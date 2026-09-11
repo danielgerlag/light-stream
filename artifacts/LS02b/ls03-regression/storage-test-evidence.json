@@ -1,0 +1,5 @@
+{
+  "command": "cargo test -p light-stream-storage",
+  "snapshot_unit_tests_preserved": true,
+  "verdict": "PASS"
+}

@@ -1,0 +1,85 @@
+{
+  "concurrent": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 3,
+      "partition": {
+        "partition": 0,
+        "stream": "714a6d43-ed71-401d-8ce5-3b8ee51e361f"
+      }
+    },
+    "id": "c1b780c3-9241-ad50-b085-47363448c340",
+    "lifecycle": "available",
+    "name": "created-during-pagination",
+    "publication": 5
+  },
+  "page_one": {
+    "items": [
+      {
+        "cursor": {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 3,
+          "partition": {
+            "partition": 0,
+            "stream": "714a6d43-ed71-401d-8ce5-3b8ee51e361f"
+          }
+        },
+        "id": "a4ac2f30-dc37-69f3-2b99-ce4f206570ed",
+        "lifecycle": "available",
+        "name": "current",
+        "publication": 4
+      },
+      {
+        "cursor": {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 0,
+          "partition": {
+            "partition": 0,
+            "stream": "714a6d43-ed71-401d-8ce5-3b8ee51e361f"
+          }
+        },
+        "id": "66cb4168-9e7e-435d-22d8-61c7d163313c",
+        "lifecycle": "available",
+        "name": "backdated",
+        "publication": 3
+      }
+    ],
+    "next_before": 3,
+    "publication_ceiling": 4
+  },
+  "page_two": {
+    "items": [
+      {
+        "cursor": {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 3,
+          "partition": {
+            "partition": 0,
+            "stream": "714a6d43-ed71-401d-8ce5-3b8ee51e361f"
+          }
+        },
+        "id": "a95a9d4c-4daa-c06d-9e0c-42d10d448180",
+        "lifecycle": "available",
+        "name": "response-lost",
+        "publication": 2
+      },
+      {
+        "cursor": {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 1,
+          "partition": {
+            "partition": 0,
+            "stream": "714a6d43-ed71-401d-8ce5-3b8ee51e361f"
+          }
+        },
+        "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+        "lifecycle": "available",
+        "name": "import-boundary",
+        "publication": 1
+      }
+    ],
+    "next_before": 1,
+    "publication_ceiling": 4
+  },
+  "verdict": "PASS"
+}

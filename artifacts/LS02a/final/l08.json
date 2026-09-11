@@ -1,0 +1,12 @@
+{
+  "conflicting_retry_rejected": true,
+  "error": {
+    "command": "request",
+    "error": {
+      "code": "receipt_conflict",
+      "message": "producer request identity was already used for another payload"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

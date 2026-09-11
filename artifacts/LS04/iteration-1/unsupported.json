@@ -1,0 +1,7 @@
+{
+  "independent_hosts": "BLOCKED",
+  "retention_expiration": "UNSUPPORTED_LS05",
+  "secured_mode": "UNSUPPORTED_LS08",
+  "single_process_failover": "DEFERRED_LS06",
+  "stream_cursor_vectors": "NOT_IMPLEMENTED"
+}

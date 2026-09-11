@@ -1,0 +1,10 @@
+{
+  "command": "cargo test -p light-stream-storage",
+  "openraft_conformance": "RAN",
+  "product_tests": [
+    "purge_keeps_applied_payload_readable",
+    "snapshot_contains_and_installs_payloads",
+    "corrupted_identity_is_refused"
+  ],
+  "verdict": "PASS"
+}

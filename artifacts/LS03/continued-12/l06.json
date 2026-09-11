@@ -1,0 +1,16 @@
+{
+  "new_stream_id": "6349792d-2127-444d-9c5b-506629407e24",
+  "old_cursor_rejection": {
+    "command": "request",
+    "error": {
+      "code": "stream_not_active",
+      "detail": {
+        "code": "stream_not_active"
+      },
+      "message": "stream is not active"
+    },
+    "ok": false
+  },
+  "old_stream_id": "e17ec836-a1c8-4b54-ad1e-30bee60b4b11",
+  "verdict": "PASS"
+}

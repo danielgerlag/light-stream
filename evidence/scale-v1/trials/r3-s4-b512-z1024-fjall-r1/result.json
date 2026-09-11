@@ -1,0 +1,83 @@
+{
+  "audit_seconds": [
+    0.126492541,
+    0.133583375,
+    0.125353833
+  ],
+  "bench": {
+    "batches": 559,
+    "elapsed_seconds": 5.141146,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 1083784.209,
+      "p50": 24114.541999999998,
+      "p95": 61311.084,
+      "p99": 198752.917
+    },
+    "mib_per_second": 54.36531076923316,
+    "payload_bytes": 293076992,
+    "per_shard": [
+      {
+        "batches": 140,
+        "digest": 15017791503167602828,
+        "first_sequence": 0,
+        "last_sequence": 139,
+        "payload_bytes": 73400320,
+        "records": 71680
+      },
+      {
+        "batches": 139,
+        "digest": 15342664515540519191,
+        "first_sequence": 0,
+        "last_sequence": 138,
+        "payload_bytes": 72876032,
+        "records": 71168
+      },
+      {
+        "batches": 140,
+        "digest": 16816682794585223271,
+        "first_sequence": 0,
+        "last_sequence": 139,
+        "payload_bytes": 73400320,
+        "records": 71680
+      },
+      {
+        "batches": 140,
+        "digest": 12721344443964836641,
+        "first_sequence": 0,
+        "last_sequence": 139,
+        "payload_bytes": 73400320,
+        "records": 71680
+      }
+    ],
+    "records": 286208,
+    "records_per_second": 55670.07822769476,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 512,
+    "name": "r3-s4-b512-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 4
+  },
+  "disk": {
+    "allocated_bytes": 879919104,
+    "file_bytes": 879583665,
+    "files": 147
+  },
+  "engine": "fjall",
+  "peak_summed_node_rss_bytes": 897236992,
+  "reopen_seconds": [
+    0.036050959,
+    0.036449708,
+    0.051701542
+  ],
+  "repeat": 1,
+  "retention_from": 69,
+  "source": "trials/r3-s4-b512-z1024-fjall-r1/bench.json",
+  "trial": "r3-s4-b512-z1024-fjall-r1",
+  "verdict": "VERIFIED"
+}

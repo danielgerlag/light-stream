@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T14:16:56.713890+00:00",
+  "error": "response omitted a typed data leader hint: {'command': 'request', 'error': {'code': 'not_leader', 'detail': {'code': 'not_leader', 'group': 'control', 'leader': {'node_id': 1, 'public_uri': 'http://127.0.0.1:64852'}}, 'message': 'the local node is not the current Control leader'}, 'ok': False}",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

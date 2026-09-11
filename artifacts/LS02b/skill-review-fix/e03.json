@@ -1,0 +1,17 @@
+{
+  "elections": [
+    {
+      "leader": 1,
+      "stage": "initial"
+    },
+    {
+      "leader": 3,
+      "stage": "after_kill"
+    },
+    {
+      "leader": 2,
+      "stage": "after_lost_response_kill"
+    }
+  ],
+  "verdict": "PASS"
+}

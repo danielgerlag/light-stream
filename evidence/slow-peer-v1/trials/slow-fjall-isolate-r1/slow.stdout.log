@@ -1,0 +1,1 @@
+{"address":"127.0.0.1:57580","engine":"fjall","leader":false,"peer_admission":"block","peer_queue_capacity":4,"protocol":"fixed-leader-durable-append","ready":true,"replication_delay_ms":250,"shards":1}

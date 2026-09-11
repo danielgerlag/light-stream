@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-10T23:51:55.056948+00:00",
+  "error": "release-build exited 101; see /Users/danielgerlag/dev/light-stream/artifacts/LS01/full/command-output/001-release-build.stdout.log and /Users/danielgerlag/dev/light-stream/artifacts/LS01/full/command-output/001-release-build.stderr.log",
+  "scenario": "all",
+  "verdict": "FAIL"
+}

@@ -1,0 +1,59 @@
+{
+  "audit_seconds": [
+    9.1292e-05,
+    9.325e-05,
+    9.6208e-05
+  ],
+  "bench": {
+    "batches": 91,
+    "elapsed_seconds": 2.010683709,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 49859.459,
+      "p50": 21847.75,
+      "p95": 26378.667,
+      "p99": 49859.459
+    },
+    "mib_per_second": 0.04419749715095544,
+    "payload_bytes": 93184,
+    "per_shard": [
+      {
+        "batches": 91,
+        "digest": 9281299867077009580,
+        "first_sequence": 0,
+        "last_sequence": 90,
+        "payload_bytes": 93184,
+        "records": 91
+      }
+    ],
+    "records": 91,
+    "records_per_second": 45.25823708257837,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 1,
+    "name": "r3-s1-b1-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 1
+  },
+  "disk": {
+    "allocated_bytes": 1757184,
+    "file_bytes": 1744938,
+    "files": 12
+  },
+  "engine": "redb",
+  "peak_summed_node_rss_bytes": 27656192,
+  "reopen_seconds": [
+    0.007827292,
+    0.008469917,
+    0.008305667
+  ],
+  "repeat": 3,
+  "retention_from": 45,
+  "source": "trials/r3-s1-b1-z1024-redb-r3/bench.json",
+  "trial": "r3-s1-b1-z1024-redb-r3",
+  "verdict": "VERIFIED"
+}

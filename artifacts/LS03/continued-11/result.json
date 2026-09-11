@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:28:31.593244+00:00",
+  "error": "ls03-ready-1 never reached linearizable read readiness: {'command': 'request', 'error': {'code': 'quorum_unavailable', 'detail': {'code': 'quorum_unavailable', 'group': 'data', 'outcome': 'not_applicable', 'request': None}, 'message': 'the Data group has no available quorum'}, 'ok': False}",
+  "scenario": "all",
+  "verdict": "FAIL"
+}

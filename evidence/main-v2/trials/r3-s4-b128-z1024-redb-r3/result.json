@@ -1,0 +1,83 @@
+{
+  "audit_seconds": [
+    0.0146445,
+    0.01198725,
+    0.010623166
+  ],
+  "bench": {
+    "batches": 156,
+    "elapsed_seconds": 2.035301917,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 114147.708,
+      "p50": 49223.375,
+      "p95": 87910.959,
+      "p99": 107611.083
+    },
+    "mib_per_second": 9.580888141029545,
+    "payload_bytes": 20447232,
+    "per_shard": [
+      {
+        "batches": 39,
+        "digest": 732112889897366771,
+        "first_sequence": 0,
+        "last_sequence": 38,
+        "payload_bytes": 5111808,
+        "records": 4992
+      },
+      {
+        "batches": 39,
+        "digest": 4960359885341122573,
+        "first_sequence": 0,
+        "last_sequence": 38,
+        "payload_bytes": 5111808,
+        "records": 4992
+      },
+      {
+        "batches": 39,
+        "digest": 16403959870685781738,
+        "first_sequence": 0,
+        "last_sequence": 38,
+        "payload_bytes": 5111808,
+        "records": 4992
+      },
+      {
+        "batches": 39,
+        "digest": 8404198957139689673,
+        "first_sequence": 0,
+        "last_sequence": 38,
+        "payload_bytes": 5111808,
+        "records": 4992
+      }
+    ],
+    "records": 19968,
+    "records_per_second": 9810.829456414254,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 128,
+    "name": "r3-s4-b128-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 4
+  },
+  "disk": {
+    "allocated_bytes": 129073152,
+    "file_bytes": 129024168,
+    "files": 39
+  },
+  "engine": "redb",
+  "peak_summed_node_rss_bytes": 161284096,
+  "reopen_seconds": [
+    0.020633292,
+    0.020801166,
+    0.02041425
+  ],
+  "repeat": 3,
+  "retention_from": 19,
+  "source": "trials/r3-s4-b128-z1024-redb-r3/bench.json",
+  "trial": "r3-s4-b128-z1024-redb-r3",
+  "verdict": "VERIFIED"
+}

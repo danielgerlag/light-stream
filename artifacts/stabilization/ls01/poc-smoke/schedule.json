@@ -1,0 +1,90 @@
+[
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r3",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 2
+    },
+    "segment",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r1",
+      "record_bytes": 1024,
+      "replicas": 1,
+      "shards": 2
+    },
+    "rocksdb",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r1",
+      "record_bytes": 1024,
+      "replicas": 1,
+      "shards": 2
+    },
+    "redb",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r1",
+      "record_bytes": 1024,
+      "replicas": 1,
+      "shards": 2
+    },
+    "segment",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r3",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 2
+    },
+    "redb",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r3",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 2
+    },
+    "rocksdb",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r1",
+      "record_bytes": 1024,
+      "replicas": 1,
+      "shards": 2
+    },
+    "fjall",
+    1
+  ],
+  [
+    {
+      "batch_records": 16,
+      "name": "smoke-r3",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 2
+    },
+    "fjall",
+    1
+  ]
+]

@@ -1,0 +1,231 @@
+{
+  "records": [
+    {
+      "key": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:0",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 3,
+          "partition": 0,
+          "route_revision": 7,
+          "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "42e56515e4376575f7e23e94bdd866c6d37c536f24aba2c6de7071be911d9ff3"
+    },
+    {
+      "key": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:1",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 4,
+          "partition": 1,
+          "route_revision": 7,
+          "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "9266e1bdf211c058fcf17264bd28f317490eab2c710b71095c0f6d7877651bf8"
+    },
+    {
+      "key": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:2",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 5,
+          "partition": 2,
+          "route_revision": 7,
+          "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "e2f45b52823f0169c723ef934901e9e21349ab9605f6220cef2f8f4a95d7d4fa"
+    },
+    {
+      "key": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:3",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 2,
+          "partition": 3,
+          "route_revision": 7,
+          "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "76814b1a81e53ddf8c1f894109e453ebe4b43d5b138e977a1eba276f56e7abb2"
+    },
+    {
+      "key": "ac004be9-21f6-4d22-8f0f-a53eb93e0eed:0",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 3,
+          "partition": 0,
+          "route_revision": 11,
+          "stream": "ac004be9-21f6-4d22-8f0f-a53eb93e0eed",
+          "stream_name": "events"
+        }
+      },
+      "sha256": "1a89fc8cc9d5537adca4364db4921f55af1d6b0d511835282e558eeb2efda496"
+    },
+    {
+      "key": "ac004be9-21f6-4d22-8f0f-a53eb93e0eed:1",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 4,
+          "partition": 1,
+          "route_revision": 11,
+          "stream": "ac004be9-21f6-4d22-8f0f-a53eb93e0eed",
+          "stream_name": "events"
+        }
+      },
+      "sha256": "6e08e415c125509307b73933b0d49c1262580bdc218c13cc4a26dac569794908"
+    },
+    {
+      "key": "62cf818f-7b21-449c-86ea-5f90d3a7f20c:0",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:60430"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 5,
+          "partition": 0,
+          "route_revision": 14,
+          "stream": "62cf818f-7b21-449c-86ea-5f90d3a7f20c",
+          "stream_name": "metrics"
+        }
+      },
+      "sha256": "fd925c09c747c6706e80e8a6a38ab3c6492016d9b54ee7718683d7d23b9ad4bc"
+    }
+  ],
+  "routes": {
+    "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:0": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 3,
+        "partition": 0,
+        "route_revision": 7,
+        "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+        "stream_name": "orders"
+      }
+    },
+    "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:1": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 4,
+        "partition": 1,
+        "route_revision": 7,
+        "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+        "stream_name": "orders"
+      }
+    },
+    "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:2": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 5,
+        "partition": 2,
+        "route_revision": 7,
+        "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+        "stream_name": "orders"
+      }
+    },
+    "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d:3": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 2,
+        "partition": 3,
+        "route_revision": 7,
+        "stream": "2ba737bd-4d4b-485b-bef5-3b1bddae1e5d",
+        "stream_name": "orders"
+      }
+    },
+    "62cf818f-7b21-449c-86ea-5f90d3a7f20c:0": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 5,
+        "partition": 0,
+        "route_revision": 14,
+        "stream": "62cf818f-7b21-449c-86ea-5f90d3a7f20c",
+        "stream_name": "metrics"
+      }
+    },
+    "ac004be9-21f6-4d22-8f0f-a53eb93e0eed:0": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 3,
+        "partition": 0,
+        "route_revision": 11,
+        "stream": "ac004be9-21f6-4d22-8f0f-a53eb93e0eed",
+        "stream_name": "events"
+      }
+    },
+    "ac004be9-21f6-4d22-8f0f-a53eb93e0eed:1": {
+      "leader": {
+        "node_id": 1,
+        "public_uri": "http://127.0.0.1:60430"
+      },
+      "route": {
+        "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+        "group": 4,
+        "partition": 1,
+        "route_revision": 11,
+        "stream": "ac004be9-21f6-4d22-8f0f-a53eb93e0eed",
+        "stream_name": "events"
+      }
+    }
+  },
+  "verdict": "PASS"
+}

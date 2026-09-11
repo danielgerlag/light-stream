@@ -1,0 +1,113 @@
+{
+  "follower-0": {
+    "per_shard": [
+      {
+        "batches": 94,
+        "digest": 10518598689971008259,
+        "first_sequence": 0,
+        "last_sequence": 93,
+        "payload_bytes": 12320768,
+        "records": 12032
+      },
+      {
+        "batches": 94,
+        "digest": 13051475619857524374,
+        "first_sequence": 0,
+        "last_sequence": 93,
+        "payload_bytes": 12320768,
+        "records": 12032
+      },
+      {
+        "batches": 95,
+        "digest": 3035970220749383674,
+        "first_sequence": 0,
+        "last_sequence": 94,
+        "payload_bytes": 12451840,
+        "records": 12160
+      },
+      {
+        "batches": 92,
+        "digest": 520631756957351832,
+        "first_sequence": 0,
+        "last_sequence": 91,
+        "payload_bytes": 12058624,
+        "records": 11776
+      }
+    ],
+    "ready": true
+  },
+  "follower-1": {
+    "per_shard": [
+      {
+        "batches": 94,
+        "digest": 10518598689971008259,
+        "first_sequence": 0,
+        "last_sequence": 93,
+        "payload_bytes": 12320768,
+        "records": 12032
+      },
+      {
+        "batches": 94,
+        "digest": 13051475619857524374,
+        "first_sequence": 0,
+        "last_sequence": 93,
+        "payload_bytes": 12320768,
+        "records": 12032
+      },
+      {
+        "batches": 95,
+        "digest": 3035970220749383674,
+        "first_sequence": 0,
+        "last_sequence": 94,
+        "payload_bytes": 12451840,
+        "records": 12160
+      },
+      {
+        "batches": 92,
+        "digest": 520631756957351832,
+        "first_sequence": 0,
+        "last_sequence": 91,
+        "payload_bytes": 12058624,
+        "records": 11776
+      }
+    ],
+    "ready": true
+  },
+  "leader": {
+    "per_shard": [
+      {
+        "batches": 94,
+        "digest": 10518598689971008259,
+        "first_sequence": 0,
+        "last_sequence": 93,
+        "payload_bytes": 12320768,
+        "records": 12032
+      },
+      {
+        "batches": 94,
+        "digest": 13051475619857524374,
+        "first_sequence": 0,
+        "last_sequence": 93,
+        "payload_bytes": 12320768,
+        "records": 12032
+      },
+      {
+        "batches": 95,
+        "digest": 3035970220749383674,
+        "first_sequence": 0,
+        "last_sequence": 94,
+        "payload_bytes": 12451840,
+        "records": 12160
+      },
+      {
+        "batches": 92,
+        "digest": 520631756957351832,
+        "first_sequence": 0,
+        "last_sequence": 91,
+        "payload_bytes": 12058624,
+        "records": 11776
+      }
+    ],
+    "ready": true
+  }
+}

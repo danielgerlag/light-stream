@@ -1,0 +1,8 @@
+{
+  "independent_reference_hosts": "BLOCKED",
+  "leader_election_failover": "UNSUPPORTED_LS02B",
+  "quorum_refusal": "UNSUPPORTED_LS02B",
+  "secured_mode": "UNSUPPORTED_LS08",
+  "snapshot_catch_up": "UNSUPPORTED_LS06",
+  "three_node_replication": "UNSUPPORTED_LS02B"
+}

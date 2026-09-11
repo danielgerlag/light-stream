@@ -1,0 +1,7 @@
+{
+  "cli_and_sdk_match": true,
+  "record_count": 6,
+  "restart_match": true,
+  "scenario": "E01",
+  "verdict": "PASS"
+}

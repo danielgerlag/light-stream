@@ -1,0 +1,2 @@
+{"cause":"queue_saturated_permanent_isolation","event":"peer_disabled","peer":"127.0.0.1:57699","sequence":5,"shard":0,"timestamp_unix_ms":1789067603963}
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57700","sequence":24,"shard":0,"timestamp_unix_ms":1789067604191}

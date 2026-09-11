@@ -1,0 +1,6 @@
+{
+  "network_response_drop": true,
+  "receipt_after_full_restart": true,
+  "same_identity_retry": true,
+  "verdict": "PASS"
+}

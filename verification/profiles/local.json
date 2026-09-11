@@ -1,0 +1,52 @@
+{
+  "name": "local",
+  "claim": "Functional and local regression evidence only.",
+  "nodes": 3,
+  "independent_failure_domains": false,
+  "process_liveness_seconds": 5,
+  "write_readiness_seconds": 10,
+  "low_load": {
+    "records_per_second": 2000,
+    "record_bytes": 1024,
+    "max_batch_records": 128,
+    "producers": 4,
+    "readers": 1,
+    "p99_ms": 250
+  },
+  "leader_loss_seconds": 10,
+  "security_modes": [
+    "local-insecure",
+    "secured"
+  ],
+  "implemented_phase": "LS04",
+  "ls01": {
+    "health_p99_ms": 100,
+    "startup_seconds": 5,
+    "public_message_bytes": 8388608,
+    "max_records_per_publish": 128
+  },
+  "ls02a": {
+    "receipt_window": 4096,
+    "max_fetch_records": 1024,
+    "max_fetch_bytes": 8388608,
+    "voters": 1
+  },
+  "ls02b": {
+    "voters": 3,
+    "peer_rpc_deadline": "openraft_rpc_option_soft_ttl",
+    "directed_delay_ms": 1500,
+    "majority_publish_deadline_ms": 5000,
+    "snapshot_policy": "never",
+    "purge": "disabled_without_snapshots",
+    "independent_hosts": false
+  },
+  "ls03": {
+    "data_groups": 4,
+    "max_streams": 4,
+    "max_partitions_per_stream": 4,
+    "rocksdb_cache_bytes": 268435456,
+    "rocksdb_write_buffer_bytes": 134217728,
+    "verification_delay_group_id": 2,
+    "verification_delay_ms": 800
+  }
+}

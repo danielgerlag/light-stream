@@ -1,0 +1,1 @@
+CXXFLAGS_aarch64_apple_darwin = Some(-DHAVE_FULLFSYNC=1)

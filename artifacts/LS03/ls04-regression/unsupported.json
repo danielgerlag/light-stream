@@ -1,0 +1,7 @@
+{
+  "bookmarks": "UNSUPPORTED_LS04",
+  "independent_hosts": "BLOCKED",
+  "retention": "UNSUPPORTED_LS05",
+  "secured_mode": "UNSUPPORTED_LS08",
+  "snapshots_after_purge": "UNSUPPORTED_LS06"
+}

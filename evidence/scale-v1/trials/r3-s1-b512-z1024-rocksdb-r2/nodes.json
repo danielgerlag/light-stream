@@ -1,0 +1,58 @@
+[
+  {
+    "address": "127.0.0.1:53774",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "rocksdb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/7ac7e89aff7347aebb2e9b23ba03ac85/r3-s1-b512-z1024-rocksdb-r2/follower-0",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "follower-0",
+    "pid": 16828,
+    "ready_seconds": 0.10132479200001399
+  },
+  {
+    "address": "127.0.0.1:53775",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "rocksdb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/7ac7e89aff7347aebb2e9b23ba03ac85/r3-s1-b512-z1024-rocksdb-r2/follower-1",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "follower-1",
+    "pid": 16855,
+    "ready_seconds": 0.07149125000000822
+  },
+  {
+    "address": "127.0.0.1:53776",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "rocksdb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/7ac7e89aff7347aebb2e9b23ba03ac85/r3-s1-b512-z1024-rocksdb-r2/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1",
+      "--peers",
+      "127.0.0.1:53774,127.0.0.1:53775"
+    ],
+    "label": "leader",
+    "pid": 16856,
+    "ready_seconds": 0.09704279200002475
+  }
+]

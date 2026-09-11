@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:43:17.165103+00:00",
+  "error": "ls02b-lost-response-pre-retry-receipt exited 5; see /Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-6/command-output/162-ls02b-lost-response-pre-retry-receipt.stdout.log and /Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-6/command-output/162-ls02b-lost-response-pre-retry-receipt.stderr.log",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

@@ -1,0 +1,122 @@
+{
+  ".cargo/config.toml": {
+    "current": "c678ddb1fad02b4df8140e5859ed591ed7d683a8957cccb106e51098c9283093",
+    "matches": true,
+    "recorded": "c678ddb1fad02b4df8140e5859ed591ed7d683a8957cccb106e51098c9283093"
+  },
+  "Cargo.lock": {
+    "current": "e880a26c540f842884c0f6f105e6312707c130de50a27184271e2cfc12903941",
+    "matches": true,
+    "recorded": "e880a26c540f842884c0f6f105e6312707c130de50a27184271e2cfc12903941"
+  },
+  "Cargo.toml": {
+    "current": "55edc8ea9e6b94d0e8d8610ae4f72cb2943b81ce9ab948ad991434972e0cfb13",
+    "matches": true,
+    "recorded": "55edc8ea9e6b94d0e8d8610ae4f72cb2943b81ce9ab948ad991434972e0cfb13"
+  },
+  "poc/common/Cargo.toml": {
+    "current": "2a352408151d5db48269d17d6655ab3e2e9564f3000831e76513545b6c38eacd",
+    "matches": true,
+    "recorded": "2a352408151d5db48269d17d6655ab3e2e9564f3000831e76513545b6c38eacd"
+  },
+  "poc/common/src/lib.rs": {
+    "current": "e37403980da85d45d0856af652b1c1c14fb9453e3de51bccebaf2cc3a94ec1a1",
+    "matches": true,
+    "recorded": "e37403980da85d45d0856af652b1c1c14fb9453e3de51bccebaf2cc3a94ec1a1"
+  },
+  "poc/runner/Cargo.toml": {
+    "current": "04d8fb7ea5342907175dd5a24dd900b06ec68d1d3b9ca0d27c6dd484a58c28ab",
+    "matches": true,
+    "recorded": "04d8fb7ea5342907175dd5a24dd900b06ec68d1d3b9ca0d27c6dd484a58c28ab"
+  },
+  "poc/runner/src/bench.rs": {
+    "current": "012e6b06a1b182baa1d7974344747acf8ef8ba5a99da0c325e0c4d06fe94db92",
+    "matches": true,
+    "recorded": "012e6b06a1b182baa1d7974344747acf8ef8ba5a99da0c325e0c4d06fe94db92"
+  },
+  "poc/runner/src/cli.rs": {
+    "current": "e3f39665a6616b49a2a77a4c47532c3ec628d1b63c49dbd664a1b2a1c2062cf3",
+    "matches": true,
+    "recorded": "e3f39665a6616b49a2a77a4c47532c3ec628d1b63c49dbd664a1b2a1c2062cf3"
+  },
+  "poc/runner/src/directory.rs": {
+    "current": "cab61ef5e46c4a6d4d0add975fd96f0c713848c2771b7d4e66b8022f378eaf18",
+    "matches": true,
+    "recorded": "cab61ef5e46c4a6d4d0add975fd96f0c713848c2771b7d4e66b8022f378eaf18"
+  },
+  "poc/runner/src/inspect.rs": {
+    "current": "8f0034b259580ffbc618a846a5b16920d83039c73f9dc59e71957de759d135c1",
+    "matches": true,
+    "recorded": "8f0034b259580ffbc618a846a5b16920d83039c73f9dc59e71957de759d135c1"
+  },
+  "poc/runner/src/main.rs": {
+    "current": "a8039af0842ac24227f9c246f9ba4bf3719fe60e380fb77a3e5883dea68d8500",
+    "matches": true,
+    "recorded": "a8039af0842ac24227f9c246f9ba4bf3719fe60e380fb77a3e5883dea68d8500"
+  },
+  "poc/runner/src/node.rs": {
+    "current": "16f9ae344e161d0631d486e83423bc1059358410047b54f4cd8955269ab56363",
+    "matches": true,
+    "recorded": "16f9ae344e161d0631d486e83423bc1059358410047b54f4cd8955269ab56363"
+  },
+  "poc/runner/src/wire.rs": {
+    "current": "1c3f94377163ab3cf217c6f755a193631da805e4e4f54c92363f9a59cba15c35",
+    "matches": true,
+    "recorded": "1c3f94377163ab3cf217c6f755a193631da805e4e4f54c92363f9a59cba15c35"
+  },
+  "poc/runner/tests/cli.rs": {
+    "current": "271692843e388ea025fd659131cec222215ca4d2ab4a0fd82a771e09e0ad7b2c",
+    "matches": true,
+    "recorded": "271692843e388ea025fd659131cec222215ca4d2ab4a0fd82a771e09e0ad7b2c"
+  },
+  "poc/scripts/run.py": {
+    "current": "3830b0d6d9d5a870d121fd0567c03a8e1318475c1673adba3e93fdb765c4cb92",
+    "matches": false,
+    "recorded": "3a5881832f1334435880c602883c099c439064ce582acd4997337778c6af47d7"
+  },
+  "poc/scripts/test_run.py": {
+    "current": "2552f1fb0966de7f77cc01542fa09e0bccd72d3fed783c7f1f702a9ce8426fd0",
+    "matches": false,
+    "recorded": "abae35dc660e3d0ad562dd07987f7a636a05ab00408339a8cd52e0f4b2c01ff2"
+  },
+  "poc/storage/Cargo.toml": {
+    "current": "cc4a7847432a5c1997ab0339bd454e8d96e5fb8e4c02e95c5e60fe9390709106",
+    "matches": true,
+    "recorded": "cc4a7847432a5c1997ab0339bd454e8d96e5fb8e4c02e95c5e60fe9390709106"
+  },
+  "poc/storage/src/fjall_store.rs": {
+    "current": "f383d76d0624f3d2c223e12743b31b67b033b84ac85884fc0b92ecab4f05093a",
+    "matches": true,
+    "recorded": "f383d76d0624f3d2c223e12743b31b67b033b84ac85884fc0b92ecab4f05093a"
+  },
+  "poc/storage/src/lib.rs": {
+    "current": "9feb1ba5f9e111be6fe80dd6f07130337eadc50177227c3be48b978c718260a4",
+    "matches": true,
+    "recorded": "9feb1ba5f9e111be6fe80dd6f07130337eadc50177227c3be48b978c718260a4"
+  },
+  "poc/storage/src/model.rs": {
+    "current": "5cc4a197cad751415b84b9c983d66ed6fa546d0a7deceeab7ec18a9b915724ec",
+    "matches": true,
+    "recorded": "5cc4a197cad751415b84b9c983d66ed6fa546d0a7deceeab7ec18a9b915724ec"
+  },
+  "poc/storage/src/redb_store.rs": {
+    "current": "c67f2ce389ff313a382cfa8284f63b3661dd967b6795efd124fb65ddc1f7326c",
+    "matches": true,
+    "recorded": "c67f2ce389ff313a382cfa8284f63b3661dd967b6795efd124fb65ddc1f7326c"
+  },
+  "poc/storage/src/rocksdb_store.rs": {
+    "current": "c95c97d7bdd3ee983b07f9dd28b731d8c54206c5c3d833845100b0cd97af1189",
+    "matches": true,
+    "recorded": "c95c97d7bdd3ee983b07f9dd28b731d8c54206c5c3d833845100b0cd97af1189"
+  },
+  "poc/storage/src/segment.rs": {
+    "current": "4f42d9d56d533e3854080386d79245d7c2543ece98af9ccd260b6caab0b512de",
+    "matches": true,
+    "recorded": "4f42d9d56d533e3854080386d79245d7c2543ece98af9ccd260b6caab0b512de"
+  },
+  "poc/storage/src/tests.rs": {
+    "current": "1388bd6d3464444ae3a012626674b7a2ed2d75cd493cb4579f27e5526a728f2a",
+    "matches": true,
+    "recorded": "1388bd6d3464444ae3a012626674b7a2ed2d75cd493cb4579f27e5526a728f2a"
+  }
+}

@@ -1,0 +1,13 @@
+[package]
+name = "light-stream-client"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+light-stream-core = { path = "../light-stream-core" }
+light-stream-proto = { path = "../light-stream-proto" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tonic.workspace = true

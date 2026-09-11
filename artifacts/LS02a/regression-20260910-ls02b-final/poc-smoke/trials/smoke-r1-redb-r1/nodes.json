@@ -1,0 +1,20 @@
+[
+  {
+    "address": "127.0.0.1:63059",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/f6ee3fd61f1b4b8eb42c79c8268b63fc/smoke-r1-redb-r1/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "leader",
+    "pid": 66770,
+    "ready_seconds": 0.11604695900000017
+  }
+]

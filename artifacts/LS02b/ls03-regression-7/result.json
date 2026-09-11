@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:44:27.073151+00:00",
+  "error": "ls02b-publish-after-failover exited 5; see /Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-7/command-output/038-ls02b-publish-after-failover.stdout.log and /Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-7/command-output/038-ls02b-publish-after-failover.stderr.log",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

@@ -1,0 +1,5 @@
+error: unexpected argument '--route-group-id' found
+
+Usage: light-streamctl --endpoint <ENDPOINT> publish --cluster-id <CLUSTER_ID> --stream-id <STREAM_ID> --principal <PRINCIPAL> --session <SESSION> --sequence <SEQUENCE> --partition <PARTITION> --file <FILE>
+
+For more information, try '--help'.

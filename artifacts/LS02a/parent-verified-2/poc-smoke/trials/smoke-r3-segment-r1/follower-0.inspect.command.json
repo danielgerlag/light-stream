@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "inspect",
+    "--engine",
+    "segment",
+    "--dir",
+    "/Users/danielgerlag/dev/light-stream/.poc-data/d77c6fdbf41843d3970f6b120bb6dc72/smoke-r3-segment-r1/follower-0",
+    "--shards",
+    "2"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.02544962499999981
+}

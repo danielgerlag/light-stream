@@ -1,0 +1,82 @@
+{
+  "first": {
+    "cluster": {
+      "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+      "control_group": 1,
+      "data_group": 2,
+      "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+      "stream_name": "bootstrap"
+    },
+    "command": "cluster-bootstrap",
+    "endpoint": "http://127.0.0.1:50318",
+    "ok": true
+  },
+  "prebootstrap": {
+    "command": "request",
+    "error": {
+      "code": "not_bootstrapped",
+      "message": "cluster has not been bootstrapped"
+    },
+    "ok": false
+  },
+  "pristine_health": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "http://127.0.0.1:50318",
+    "health": {
+      "bootstrapped": false,
+      "cluster_id": null,
+      "peer_address": "127.0.0.1:50319",
+      "public_address": "127.0.0.1:50318",
+      "status": {
+        "ready": true,
+        "revision": "086c26e7449c054e1bd8f544e20f06141b0cf5b303384963de3b231833075bee",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true
+  },
+  "retry": {
+    "cluster": {
+      "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+      "control_group": 1,
+      "data_group": 2,
+      "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+      "stream_name": "bootstrap"
+    },
+    "command": "cluster-bootstrap",
+    "endpoint": "http://127.0.0.1:50318",
+    "ok": true
+  }
+}

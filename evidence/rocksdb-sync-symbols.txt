@@ -1,0 +1,3 @@
+Normalized RocksDB undefined synchronization symbols
+   2 _fcntl
+   2 _fsync

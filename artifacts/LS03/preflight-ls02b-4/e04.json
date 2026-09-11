@@ -1,0 +1,291 @@
+{
+  "catch_up": {
+    "follower": {
+      "cache_budget_bytes": 53687091,
+      "cluster_committed_index": 12,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 3,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 12,
+      "last_log_index": 12,
+      "local_committed_index": 12,
+      "local_role": "follower",
+      "purged_index": null,
+      "replication": [],
+      "slot": 0,
+      "snapshot_index": null,
+      "write_buffer_budget_bytes": 26843545
+    },
+    "leader": {
+      "cache_budget_bytes": 53687091,
+      "cluster_committed_index": 12,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 3,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 12,
+      "last_log_index": 12,
+      "local_committed_index": 12,
+      "local_role": "leader",
+      "purged_index": null,
+      "replication": [
+        {
+          "matched_log_index": 12,
+          "target_node_id": 1
+        },
+        {
+          "matched_log_index": 12,
+          "target_node_id": 2
+        },
+        {
+          "matched_log_index": 12,
+          "target_node_id": 3
+        }
+      ],
+      "slot": 0,
+      "snapshot_index": null,
+      "write_buffer_budget_bytes": 26843545
+    },
+    "leader_id": 3,
+    "target_node_id": 2,
+    "target_replication": {
+      "matched_log_index": 12,
+      "target_node_id": 2
+    }
+  },
+  "drop_links": [
+    {
+      "counters": {
+        "accepted_connections": 150,
+        "client_to_upstream_bytes": 59177,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 1,
+        "upstream_to_client_bytes": 10752
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49817",
+      "mode": "drop",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49810"
+    },
+    {
+      "counters": {
+        "accepted_connections": 191,
+        "client_to_upstream_bytes": 129688,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 1,
+        "upstream_to_client_bytes": 36715
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49815",
+      "mode": "drop",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49812"
+    },
+    {
+      "counters": {
+        "accepted_connections": 104,
+        "client_to_upstream_bytes": 70370,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 1,
+        "upstream_to_client_bytes": 21094
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49818",
+      "mode": "drop",
+      "source_node_id": 2,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49814"
+    },
+    {
+      "counters": {
+        "accepted_connections": 25,
+        "client_to_upstream_bytes": 13296,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 1,
+        "upstream_to_client_bytes": 5073
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49820",
+      "mode": "drop",
+      "source_node_id": 3,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49812"
+    }
+  ],
+  "healed_leader": 3,
+  "healed_links": [
+    {
+      "counters": {
+        "accepted_connections": 223,
+        "client_to_upstream_bytes": 94739,
+        "delayed_chunks": 0,
+        "dropped_bytes": 37533,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 12723
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49817",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49810"
+    },
+    {
+      "counters": {
+        "accepted_connections": 227,
+        "client_to_upstream_bytes": 171278,
+        "delayed_chunks": 0,
+        "dropped_bytes": 42562,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 37687
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49815",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49812"
+    },
+    {
+      "counters": {
+        "accepted_connections": 177,
+        "client_to_upstream_bytes": 105932,
+        "delayed_chunks": 0,
+        "dropped_bytes": 37533,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 23065
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49818",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49814"
+    },
+    {
+      "counters": {
+        "accepted_connections": 73,
+        "client_to_upstream_bytes": 130199,
+        "delayed_chunks": 0,
+        "dropped_bytes": 118199,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 6369
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49820",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49812"
+    }
+  ],
+  "isolated_fetch": {
+    "command": "request",
+    "error": {
+      "code": "quorum_unavailable",
+      "detail": {
+        "code": "quorum_unavailable",
+        "group": "data",
+        "outcome": "not_applicable",
+        "request": null
+      },
+      "message": "the Data group has no available quorum"
+    },
+    "ok": false
+  },
+  "isolated_old_leader": 2,
+  "isolated_receipt": {
+    "command": "request",
+    "error": {
+      "code": "quorum_unavailable",
+      "detail": {
+        "code": "quorum_unavailable",
+        "group": "data",
+        "outcome": "not_applicable",
+        "request": null
+      },
+      "message": "the Data group has no available quorum"
+    },
+    "ok": false
+  },
+  "isolated_write": {
+    "command": "request",
+    "error": {
+      "code": "not_leader",
+      "detail": {
+        "code": "not_leader",
+        "group": "data",
+        "leader": null
+      },
+      "message": "the local node is not the current Data leader"
+    },
+    "ok": false
+  },
+  "majority_leader": 3,
+  "majority_publish": {
+    "command": "publish",
+    "endpoint": "http://127.0.0.1:49809",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 3,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls02b-10101",
+        "sequence": 4,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "old_leader_process_alive": true,
+  "successful_acknowledgements_on_old_leader": 0,
+  "verdict": "PASS"
+}

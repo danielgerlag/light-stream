@@ -1,0 +1,1 @@
+{"command": ["cargo", "build", "--release", "-p", "light-stream-server", "-p", "light-stream-cli", "-p", "light-stream-testkit"], "duration_seconds": 0.917643333, "expected_codes": [0], "name": "release-build", "returncode": 101, "stderr": "command-output/001-release-build.stderr.log", "stdout": "command-output/001-release-build.stdout.log"}

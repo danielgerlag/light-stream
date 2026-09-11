@@ -1,0 +1,70 @@
+{
+  "artifacts": "/Users/danielgerlag/dev/light-stream/artifacts/LS03/skill-bounded-groups-final",
+  "created_at": "2026-09-11T22:03:30.799196+00:00",
+  "environment": {
+    "machine": "arm64",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.9.6 (default, May 22 2026, 11:13:45) \n[Clang 21.0.0 (clang-2100.1.1.101)]"
+  },
+  "independent_host": "BLOCKED",
+  "independent_security_review": "NOT_REQUESTED",
+  "phase": "LS03",
+  "profile": {
+    "claim": "Functional and local regression evidence only.",
+    "implemented_phase": "LS03",
+    "independent_failure_domains": false,
+    "leader_loss_seconds": 10,
+    "low_load": {
+      "max_batch_records": 128,
+      "p99_ms": 250,
+      "producers": 4,
+      "readers": 1,
+      "record_bytes": 1024,
+      "records_per_second": 2000
+    },
+    "ls01": {
+      "health_p99_ms": 100,
+      "max_records_per_publish": 128,
+      "public_message_bytes": 8388608,
+      "startup_seconds": 5
+    },
+    "ls02a": {
+      "max_fetch_bytes": 8388608,
+      "max_fetch_records": 1024,
+      "receipt_window": 4096,
+      "voters": 1
+    },
+    "ls02b": {
+      "directed_delay_ms": 1500,
+      "independent_hosts": false,
+      "majority_publish_deadline_ms": 5000,
+      "peer_rpc_deadline": "openraft_rpc_option_soft_ttl",
+      "purge": "disabled_without_snapshots",
+      "snapshot_policy": "never",
+      "voters": 3
+    },
+    "ls03": {
+      "data_groups": 4,
+      "max_partitions_per_stream": 4,
+      "max_streams": 4,
+      "rocksdb_cache_bytes": 268435456,
+      "rocksdb_write_buffer_bytes": 134217728,
+      "verification_delay_group_id": 2,
+      "verification_delay_ms": 800
+    },
+    "name": "local",
+    "nodes": 3,
+    "process_liveness_seconds": 5,
+    "security_modes": [
+      "local-insecure",
+      "secured"
+    ],
+    "write_readiness_seconds": 10
+  },
+  "publication": "BLOCKED_NO_GIT_REPOSITORY",
+  "scenario": "all",
+  "security": "all",
+  "seed": 10101,
+  "source_revision": "5a9af13b00fedb87ee01869339ecd646051900e49eb4b990bb31d084ed49e9a7",
+  "suite": null
+}

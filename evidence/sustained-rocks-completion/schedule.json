@@ -1,0 +1,13 @@
+[
+  [
+    {
+      "batch_records": 512,
+      "name": "r3-s8-b512-z1024-sustained",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 8
+    },
+    "rocksdb",
+    1
+  ]
+]

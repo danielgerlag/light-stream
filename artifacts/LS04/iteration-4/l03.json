@@ -1,0 +1,5 @@
+{
+  "combined_publish_and_bookmark": "ATOMIC_STATE_MACHINE_WRITE",
+  "response_loss_and_restart_checked": true,
+  "verdict": "PASS"
+}

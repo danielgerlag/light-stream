@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T03:25:57.241163+00:00",
+  "error": "ls02b-lost-response exited 4; see /Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/command-output/077-ls02b-lost-response.stderr.log",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

@@ -1,0 +1,15 @@
+{
+  "phase": "LS02b",
+  "scenarios": {
+    "three-voter": {
+      "lanes": ["L02", "L07", "L08", "L10"],
+      "predicate": "Three release processes form exact control and data memberships, route writes and reads to the data leader, elect a different leader after loss, refuse acknowledgements without a quorum, catch up by retained log suffix, and preserve every acknowledged byte and receipt across restart."
+    }
+  },
+  "unsupported": {
+    "E08": "UNSUPPORTED_LS06",
+    "independent_hosts": "BLOCKED",
+    "secured_mode": "UNSUPPORTED_LS08",
+    "LS03+": "UNSUPPORTED"
+  }
+}

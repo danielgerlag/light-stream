@@ -1,0 +1,56 @@
+{
+  "boundary": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "7d9c141c-32e7-49de-a732-21cdf293a60d"
+      }
+    },
+    "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+    "lifecycle": "available",
+    "name": "import-boundary",
+    "publication": 1
+  },
+  "full_restart_preserved": true,
+  "lost_response_bookmark": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 3,
+      "partition": {
+        "partition": 0,
+        "stream": "7d9c141c-32e7-49de-a732-21cdf293a60d"
+      }
+    },
+    "id": "a95a9d4c-4daa-c06d-9e0c-42d10d448180",
+    "lifecycle": "available",
+    "name": "response-lost",
+    "publication": 2
+  },
+  "resume_offset": 1,
+  "revision": "2417c3de788ce3d1a29a89cd504bb77ab12eb0dd82a062c7ace2e7755acf343f",
+  "single_process_failover": "DEFERRED_LS06",
+  "stream": {
+    "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+    "lifecycle": "active",
+    "name": "imports",
+    "placements": [
+      {
+        "group": 2,
+        "partition": 0
+      },
+      {
+        "group": 2,
+        "partition": 1
+      }
+    ],
+    "ready_groups": [
+      2
+    ],
+    "revision": 4,
+    "stream": "7d9c141c-32e7-49de-a732-21cdf293a60d"
+  },
+  "stream_cursor_vectors": "NOT_IMPLEMENTED",
+  "verdict": "PASS_WITH_LIMITATION"
+}

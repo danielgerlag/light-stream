@@ -1,0 +1,12 @@
+{
+  "prior_failures": [
+    {
+      "evidence": "l09.json",
+      "expected": true,
+      "name": "invalid-insecure-bind"
+    }
+  ],
+  "profile": "local",
+  "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125",
+  "seed": 10101
+}

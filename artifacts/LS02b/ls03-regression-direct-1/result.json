@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:54:47.553425+00:00",
+  "error": "ls02b-application-after-data-failover never reached application readiness: {'command': 'request', 'error': {'code': 'quorum_unavailable', 'detail': {'code': 'quorum_unavailable', 'group': 'data', 'outcome': 'not_applicable', 'request': None}, 'message': 'the Data group has no available quorum'}, 'ok': False}",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

@@ -1,0 +1,20 @@
+[
+  {
+    "address": "127.0.0.1:55049",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "fjall",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/85a1000a792d4d79a6398bbc8ddb74eb/smoke-r1-fjall-r1/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "leader",
+    "pid": 35816,
+    "ready_seconds": 0.24011895800000005
+  }
+]

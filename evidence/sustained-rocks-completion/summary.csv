@@ -1,0 +1,2 @@
+case,engine,trials,records_per_second_median,records_per_second_min,records_per_second_max,mib_per_second_median,trial_p99_us_median,elapsed_seconds_min,batches_min,node_rss_mib_peak,verdict
+r3-s8-b512-z1024-sustained,rocksdb,1,59814.520599927004,59814.520599927004,59814.520599927004,58.412617773366215,112612.541,30.2503135,3534,1423.8125,VERIFIED

@@ -1,0 +1,64 @@
+{
+  "fast": {
+    "peer_admission": "block",
+    "peer_queue_capacity": 4,
+    "per_shard": [
+      {
+        "batches": 24,
+        "digest": 11289231274084844095,
+        "first_sequence": 0,
+        "last_sequence": 23,
+        "payload_bytes": 3145728,
+        "records": 3072
+      }
+    ],
+    "ready": true,
+    "replication_delay_ms": 0,
+    "replication_peers": []
+  },
+  "leader": {
+    "peer_admission": "block",
+    "peer_queue_capacity": 4,
+    "per_shard": [
+      {
+        "batches": 24,
+        "digest": 11289231274084844095,
+        "first_sequence": 0,
+        "last_sequence": 23,
+        "payload_bytes": 3145728,
+        "records": 3072
+      }
+    ],
+    "ready": true,
+    "replication_delay_ms": 0,
+    "replication_peers": [
+      {
+        "accepting": true,
+        "address": "127.0.0.1:57589",
+        "shard": 0
+      },
+      {
+        "accepting": true,
+        "address": "127.0.0.1:57590",
+        "shard": 0
+      }
+    ]
+  },
+  "slow": {
+    "peer_admission": "block",
+    "peer_queue_capacity": 4,
+    "per_shard": [
+      {
+        "batches": 24,
+        "digest": 11289231274084844095,
+        "first_sequence": 0,
+        "last_sequence": 23,
+        "payload_bytes": 3145728,
+        "records": 3072
+      }
+    ],
+    "ready": true,
+    "replication_delay_ms": 250,
+    "replication_peers": []
+  }
+}

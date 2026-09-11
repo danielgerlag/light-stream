@@ -1,0 +1,214 @@
+{
+  "directed_proxies": [
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:50978",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:50975"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:50979",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:50977"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:50980",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:50973"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:50981",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:50977"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:50982",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:50973"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:50983",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:50975"
+    }
+  ],
+  "nodes": {
+    "1": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-9/scratch/success/ls02b-node-1",
+        "--public-listen",
+        "127.0.0.1:50972",
+        "--peer-listen",
+        "127.0.0.1:50973",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "1",
+        "--advertise-public-uri",
+        "http://127.0.0.1:50972",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:50973",
+        "--peer-route",
+        "2=http://127.0.0.1:50978",
+        "--peer-route",
+        "3=http://127.0.0.1:50979",
+        "--max-data-groups",
+        "1",
+        "--max-streams",
+        "1",
+        "--max-partitions-per-stream",
+        "1"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-9/scratch/success/ls02b-node-1",
+      "label": "ls02b-node-1-initial",
+      "peer_address": "127.0.0.1:50973",
+      "pid": 17419,
+      "public_address": "127.0.0.1:50972",
+      "revision": "c861866e32406c1de0527e998ac3e346a00f781c1aa0b9d786aeb616d4440d49"
+    },
+    "2": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-9/scratch/success/ls02b-node-2",
+        "--public-listen",
+        "127.0.0.1:50974",
+        "--peer-listen",
+        "127.0.0.1:50975",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "2",
+        "--advertise-public-uri",
+        "http://127.0.0.1:50974",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:50975",
+        "--peer-route",
+        "1=http://127.0.0.1:50980",
+        "--peer-route",
+        "3=http://127.0.0.1:50981",
+        "--max-data-groups",
+        "1",
+        "--max-streams",
+        "1",
+        "--max-partitions-per-stream",
+        "1"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-9/scratch/success/ls02b-node-2",
+      "label": "ls02b-node-2-initial",
+      "peer_address": "127.0.0.1:50975",
+      "pid": 17420,
+      "public_address": "127.0.0.1:50974",
+      "revision": "c861866e32406c1de0527e998ac3e346a00f781c1aa0b9d786aeb616d4440d49"
+    },
+    "3": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-9/scratch/success/ls02b-node-3",
+        "--public-listen",
+        "127.0.0.1:50976",
+        "--peer-listen",
+        "127.0.0.1:50977",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "3",
+        "--advertise-public-uri",
+        "http://127.0.0.1:50976",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:50977",
+        "--peer-route",
+        "1=http://127.0.0.1:50982",
+        "--peer-route",
+        "2=http://127.0.0.1:50983",
+        "--max-data-groups",
+        "1",
+        "--max-streams",
+        "1",
+        "--max-partitions-per-stream",
+        "1"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/ls03-regression-9/scratch/success/ls02b-node-3",
+      "label": "ls02b-node-3-initial",
+      "peer_address": "127.0.0.1:50977",
+      "pid": 17423,
+      "public_address": "127.0.0.1:50976",
+      "revision": "c861866e32406c1de0527e998ac3e346a00f781c1aa0b9d786aeb616d4440d49"
+    }
+  },
+  "revision": "c861866e32406c1de0527e998ac3e346a00f781c1aa0b9d786aeb616d4440d49"
+}

@@ -1,0 +1,196 @@
+{
+  "directed_proxies": [
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49815",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49812"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49816",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49814"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49817",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49810"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49818",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49814"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49819",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49810"
+    },
+    {
+      "counters": {
+        "accepted_connections": 0,
+        "client_to_upstream_bytes": 0,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 0,
+        "upstream_to_client_bytes": 0
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:49820",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:49812"
+    }
+  ],
+  "nodes": {
+    "1": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS03/preflight-ls02b-4/scratch/success/ls02b-node-1",
+        "--public-listen",
+        "127.0.0.1:49809",
+        "--peer-listen",
+        "127.0.0.1:49810",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "1",
+        "--advertise-public-uri",
+        "http://127.0.0.1:49809",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:49810",
+        "--peer-route",
+        "2=http://127.0.0.1:49815",
+        "--peer-route",
+        "3=http://127.0.0.1:49816"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS03/preflight-ls02b-4/scratch/success/ls02b-node-1",
+      "label": "ls02b-node-1-initial",
+      "peer_address": "127.0.0.1:49810",
+      "pid": 68123,
+      "public_address": "127.0.0.1:49809",
+      "revision": "33d8a74701784d2fdfc7927f03bf603e3e880650f60289f9522d9ac7f24238d9"
+    },
+    "2": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS03/preflight-ls02b-4/scratch/success/ls02b-node-2",
+        "--public-listen",
+        "127.0.0.1:49811",
+        "--peer-listen",
+        "127.0.0.1:49812",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "2",
+        "--advertise-public-uri",
+        "http://127.0.0.1:49811",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:49812",
+        "--peer-route",
+        "1=http://127.0.0.1:49817",
+        "--peer-route",
+        "3=http://127.0.0.1:49818"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS03/preflight-ls02b-4/scratch/success/ls02b-node-2",
+      "label": "ls02b-node-2-initial",
+      "peer_address": "127.0.0.1:49812",
+      "pid": 68151,
+      "public_address": "127.0.0.1:49811",
+      "revision": "33d8a74701784d2fdfc7927f03bf603e3e880650f60289f9522d9ac7f24238d9"
+    },
+    "3": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS03/preflight-ls02b-4/scratch/success/ls02b-node-3",
+        "--public-listen",
+        "127.0.0.1:49813",
+        "--peer-listen",
+        "127.0.0.1:49814",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "3",
+        "--advertise-public-uri",
+        "http://127.0.0.1:49813",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:49814",
+        "--peer-route",
+        "1=http://127.0.0.1:49819",
+        "--peer-route",
+        "2=http://127.0.0.1:49820"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS03/preflight-ls02b-4/scratch/success/ls02b-node-3",
+      "label": "ls02b-node-3-initial",
+      "peer_address": "127.0.0.1:49814",
+      "pid": 68152,
+      "public_address": "127.0.0.1:49813",
+      "revision": "33d8a74701784d2fdfc7927f03bf603e3e880650f60289f9522d9ac7f24238d9"
+    }
+  },
+  "revision": "33d8a74701784d2fdfc7927f03bf603e3e880650f60289f9522d9ac7f24238d9"
+}

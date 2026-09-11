@@ -1,0 +1,200 @@
+[
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z16384",
+      "record_bytes": 16384,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    3
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z64",
+      "record_bytes": 64,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    2
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z64",
+      "record_bytes": 64,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    1
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z1024",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    1
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z1024",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    3
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z16384",
+      "record_bytes": 16384,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    2
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z1024",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    1
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z1024",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    3
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z64",
+      "record_bytes": 64,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    2
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z64",
+      "record_bytes": 64,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    3
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z16384",
+      "record_bytes": 16384,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    2
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z16384",
+      "record_bytes": 16384,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    3
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z16384",
+      "record_bytes": 16384,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    1
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z64",
+      "record_bytes": 64,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    1
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z16384",
+      "record_bytes": 16384,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    1
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z1024",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 4
+    },
+    "fjall",
+    2
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z1024",
+      "record_bytes": 1024,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    2
+  ],
+  [
+    {
+      "batch_records": 128,
+      "name": "r3-s4-b128-z64",
+      "record_bytes": 64,
+      "replicas": 3,
+      "shards": 4
+    },
+    "rocksdb",
+    3
+  ]
+]

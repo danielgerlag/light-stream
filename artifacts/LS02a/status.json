@@ -1,0 +1,8 @@
+{
+  "operator_review": "WAIVED",
+  "publication": "BLOCKED_NO_GIT_REPOSITORY",
+  "security_review": "NOT_REQUESTED",
+  "three_node_replication": "UNSUPPORTED_LS02B",
+  "leader_election_failover": "UNSUPPORTED_LS02B",
+  "independent_reference_hosts": "BLOCKED"
+}

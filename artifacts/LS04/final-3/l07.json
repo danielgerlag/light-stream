@@ -1,0 +1,45 @@
+{
+  "deleted": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 0,
+      "partition": {
+        "partition": 0,
+        "stream": "0fc8f15a-82a9-4ec3-837d-c06ed04feda5"
+      }
+    },
+    "id": "66cb4168-9e7e-435d-22d8-61c7d163313c",
+    "lifecycle": "deleted",
+    "name": "backdated",
+    "publication": 3
+  },
+  "old_retry": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 0,
+      "partition": {
+        "partition": 0,
+        "stream": "0fc8f15a-82a9-4ec3-837d-c06ed04feda5"
+      }
+    },
+    "id": "66cb4168-9e7e-435d-22d8-61c7d163313c",
+    "lifecycle": "deleted",
+    "name": "backdated",
+    "publication": 3
+  },
+  "replacement": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "0fc8f15a-82a9-4ec3-837d-c06ed04feda5"
+      }
+    },
+    "id": "5cfa44d3-abd6-3f63-bed1-914d35961a36",
+    "lifecycle": "available",
+    "name": "backdated",
+    "publication": 6
+  },
+  "verdict": "PASS"
+}

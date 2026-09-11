@@ -1,0 +1,28 @@
+{
+  "follower-1": {
+    "per_shard": [
+      {
+        "batches": 32,
+        "digest": 8057915078753034734,
+        "first_sequence": 0,
+        "last_sequence": 31,
+        "payload_bytes": 4194304,
+        "records": 4096
+      }
+    ],
+    "ready": true
+  },
+  "leader": {
+    "per_shard": [
+      {
+        "batches": 32,
+        "digest": 8057915078753034734,
+        "first_sequence": 0,
+        "last_sequence": 31,
+        "payload_bytes": 4194304,
+        "records": 4096
+      }
+    ],
+    "ready": true
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "configured_delay_ms": 800,
+  "delayed_group": 2,
+  "fast_receipt": {
+    "bookmark": null,
+    "range": {
+      "count": 1,
+      "first": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "e17ec836-a1c8-4b54-ad1e-30bee60b4b11"
+      }
+    },
+    "request": {
+      "principal": "verify-ls03-10101",
+      "sequence": 101,
+      "session": "971a7cfe-3fa2-b065-e90c-715ca42b8b11"
+    }
+  },
+  "fast_seconds": 0.06582083400000016,
+  "slow_seconds": 0.8535905419999992,
+  "unrelated_group": 3,
+  "verdict": "PASS"
+}

@@ -1,0 +1,67 @@
+{
+  "audit_seconds": [
+    0.000210416,
+    0.000229791,
+    0.000241959
+  ],
+  "bench": {
+    "batches": 16,
+    "elapsed_seconds": 0.542207709,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 73071.083,
+      "p50": 65678.209,
+      "p95": 73071.083,
+      "p99": 73071.083
+    },
+    "mib_per_second": 0.461077915068891,
+    "payload_bytes": 262144,
+    "per_shard": [
+      {
+        "batches": 8,
+        "digest": 8891377970509631308,
+        "first_sequence": 0,
+        "last_sequence": 7,
+        "payload_bytes": 131072,
+        "records": 128
+      },
+      {
+        "batches": 8,
+        "digest": 6043677858499336084,
+        "first_sequence": 0,
+        "last_sequence": 7,
+        "payload_bytes": 131072,
+        "records": 128
+      }
+    ],
+    "records": 256,
+    "records_per_second": 472.1437850305444,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 16,
+    "name": "smoke-r3",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 2
+  },
+  "disk": {
+    "allocated_bytes": 860160,
+    "file_bytes": 790620,
+    "files": 27
+  },
+  "engine": "segment",
+  "peak_summed_node_rss_bytes": 23019520,
+  "reopen_seconds": [
+    0.012341958,
+    0.005233042,
+    0.017533125
+  ],
+  "repeat": 1,
+  "retention_from": 4,
+  "source": "trials/smoke-r3-segment-r1/bench.json",
+  "trial": "smoke-r3-segment-r1",
+  "verdict": "VERIFIED"
+}

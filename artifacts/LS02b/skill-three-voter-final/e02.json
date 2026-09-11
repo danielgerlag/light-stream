@@ -1,0 +1,9 @@
+{
+  "exact_voters": [
+    1,
+    2,
+    3
+  ],
+  "record_count": 6,
+  "verdict": "PASS"
+}

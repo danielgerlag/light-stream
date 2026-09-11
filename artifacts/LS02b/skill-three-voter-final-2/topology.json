@@ -1,0 +1,80 @@
+{
+  "nodes": {
+    "1": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/skill-three-voter-final-2/scratch/success/ls02b-node-1",
+        "--public-listen",
+        "127.0.0.1:62230",
+        "--peer-listen",
+        "127.0.0.1:62231",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "1",
+        "--advertise-public-uri",
+        "http://127.0.0.1:62230",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:62231"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/skill-three-voter-final-2/scratch/success/ls02b-node-1",
+      "label": "ls02b-node-1-initial",
+      "peer_address": "127.0.0.1:62231",
+      "pid": 65404,
+      "public_address": "127.0.0.1:62230",
+      "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125"
+    },
+    "2": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/skill-three-voter-final-2/scratch/success/ls02b-node-2",
+        "--public-listen",
+        "127.0.0.1:62232",
+        "--peer-listen",
+        "127.0.0.1:62233",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "2",
+        "--advertise-public-uri",
+        "http://127.0.0.1:62232",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:62233"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/skill-three-voter-final-2/scratch/success/ls02b-node-2",
+      "label": "ls02b-node-2-initial",
+      "peer_address": "127.0.0.1:62233",
+      "pid": 65409,
+      "public_address": "127.0.0.1:62232",
+      "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125"
+    },
+    "3": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/skill-three-voter-final-2/scratch/success/ls02b-node-3",
+        "--public-listen",
+        "127.0.0.1:62234",
+        "--peer-listen",
+        "127.0.0.1:62235",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "3",
+        "--advertise-public-uri",
+        "http://127.0.0.1:62234",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:62235"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/skill-three-voter-final-2/scratch/success/ls02b-node-3",
+      "label": "ls02b-node-3-initial",
+      "peer_address": "127.0.0.1:62235",
+      "pid": 65410,
+      "public_address": "127.0.0.1:62234",
+      "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125"
+    }
+  },
+  "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125"
+}

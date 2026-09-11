@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:40:24.145036+00:00",
+  "error": "minority publish did not return typed ambiguous quorum refusal",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

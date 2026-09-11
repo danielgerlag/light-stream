@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:19:42.855369+00:00",
+  "error": "ls03-stale-route-refresh exited 2; see /Users/danielgerlag/dev/light-stream/artifacts/LS03/continued-7/command-output/077-ls03-stale-route-refresh.stdout.log and /Users/danielgerlag/dev/light-stream/artifacts/LS03/continued-7/command-output/077-ls03-stale-route-refresh.stderr.log",
+  "scenario": "all",
+  "verdict": "FAIL"
+}

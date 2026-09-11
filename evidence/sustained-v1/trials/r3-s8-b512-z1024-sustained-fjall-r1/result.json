@@ -1,0 +1,115 @@
+{
+  "audit_seconds": [
+    1.157308791,
+    1.255120542,
+    1.3308617919999999
+  ],
+  "bench": {
+    "batches": 4347,
+    "elapsed_seconds": 30.029852666,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 1517245.3329999999,
+      "p50": 41872.625,
+      "p95": 113039.5,
+      "p99": 228227.20799999998
+    },
+    "mib_per_second": 72.37797748041739,
+    "payload_bytes": 2279079936,
+    "per_shard": [
+      {
+        "batches": 548,
+        "digest": 4569350804828429484,
+        "first_sequence": 0,
+        "last_sequence": 547,
+        "payload_bytes": 287309824,
+        "records": 280576
+      },
+      {
+        "batches": 547,
+        "digest": 4782708764644915028,
+        "first_sequence": 0,
+        "last_sequence": 546,
+        "payload_bytes": 286785536,
+        "records": 280064
+      },
+      {
+        "batches": 550,
+        "digest": 8987996853114834762,
+        "first_sequence": 0,
+        "last_sequence": 549,
+        "payload_bytes": 288358400,
+        "records": 281600
+      },
+      {
+        "batches": 541,
+        "digest": 6220296410329081236,
+        "first_sequence": 0,
+        "last_sequence": 540,
+        "payload_bytes": 283639808,
+        "records": 276992
+      },
+      {
+        "batches": 539,
+        "digest": 10352769734577487204,
+        "first_sequence": 0,
+        "last_sequence": 538,
+        "payload_bytes": 282591232,
+        "records": 275968
+      },
+      {
+        "batches": 538,
+        "digest": 6987484400214034017,
+        "first_sequence": 0,
+        "last_sequence": 537,
+        "payload_bytes": 282066944,
+        "records": 275456
+      },
+      {
+        "batches": 542,
+        "digest": 4042127278790357191,
+        "first_sequence": 0,
+        "last_sequence": 541,
+        "payload_bytes": 284164096,
+        "records": 277504
+      },
+      {
+        "batches": 542,
+        "digest": 12683265887672918418,
+        "first_sequence": 0,
+        "last_sequence": 541,
+        "payload_bytes": 284164096,
+        "records": 277504
+      }
+    ],
+    "records": 2225664,
+    "records_per_second": 74115.0489399474,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 512,
+    "name": "r3-s8-b512-z1024-sustained",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 8
+  },
+  "disk": {
+    "allocated_bytes": 7286378496,
+    "file_bytes": 6839695590,
+    "files": 387
+  },
+  "engine": "fjall",
+  "peak_summed_node_rss_bytes": 1691025408,
+  "reopen_seconds": [
+    0.227546041,
+    0.446223583,
+    0.197994167
+  ],
+  "repeat": 1,
+  "retention_from": 269,
+  "source": "trials/r3-s8-b512-z1024-sustained-fjall-r1/bench.json",
+  "trial": "r3-s8-b512-z1024-sustained-fjall-r1",
+  "verdict": "VERIFIED"
+}

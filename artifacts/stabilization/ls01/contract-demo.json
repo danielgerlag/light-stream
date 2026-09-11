@@ -1,0 +1,54 @@
+{
+  "capabilities": [
+    {
+      "capability": "health",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "bootstrap",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "publish",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "fetch",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "receipt",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "diagnostics",
+      "support": {
+        "status": "available"
+      }
+    }
+  ],
+  "command": "health",
+  "endpoint": "http://127.0.0.1:62992",
+  "health": {
+    "bootstrapped": false,
+    "cluster_id": null,
+    "peer_address": "http://127.0.0.1:62993",
+    "public_address": "http://127.0.0.1:62992",
+    "status": {
+      "ready": true,
+      "revision": "d24a74d48dc1bd8f48590a502d8127ff9c218713d82910ddd6447da939a41fa7",
+      "security_mode": "local-insecure"
+    }
+  },
+  "ok": true
+}

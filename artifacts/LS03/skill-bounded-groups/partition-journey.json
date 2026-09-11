@@ -1,0 +1,150 @@
+{
+  "independent_group_ids": [
+    "2",
+    "3",
+    "4",
+    "5"
+  ],
+  "leaders": {
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1
+  },
+  "leaders_differ": false,
+  "progress": {
+    "2": 7,
+    "3": 8,
+    "4": 8,
+    "5": 8
+  },
+  "records": [
+    {
+      "key": "1eff296f-2452-43bb-885c-e8f8c6946cbf:0",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 3,
+          "partition": 0,
+          "route_revision": 7,
+          "stream": "1eff296f-2452-43bb-885c-e8f8c6946cbf",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "42e56515e4376575f7e23e94bdd866c6d37c536f24aba2c6de7071be911d9ff3"
+    },
+    {
+      "key": "1eff296f-2452-43bb-885c-e8f8c6946cbf:1",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 4,
+          "partition": 1,
+          "route_revision": 7,
+          "stream": "1eff296f-2452-43bb-885c-e8f8c6946cbf",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "9266e1bdf211c058fcf17264bd28f317490eab2c710b71095c0f6d7877651bf8"
+    },
+    {
+      "key": "1eff296f-2452-43bb-885c-e8f8c6946cbf:2",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 5,
+          "partition": 2,
+          "route_revision": 7,
+          "stream": "1eff296f-2452-43bb-885c-e8f8c6946cbf",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "e2f45b52823f0169c723ef934901e9e21349ab9605f6220cef2f8f4a95d7d4fa"
+    },
+    {
+      "key": "1eff296f-2452-43bb-885c-e8f8c6946cbf:3",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 2,
+          "partition": 3,
+          "route_revision": 7,
+          "stream": "1eff296f-2452-43bb-885c-e8f8c6946cbf",
+          "stream_name": "orders"
+        }
+      },
+      "sha256": "76814b1a81e53ddf8c1f894109e453ebe4b43d5b138e977a1eba276f56e7abb2"
+    },
+    {
+      "key": "be427520-dc4d-4237-b0b6-301a49e7f6f4:0",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 3,
+          "partition": 0,
+          "route_revision": 11,
+          "stream": "be427520-dc4d-4237-b0b6-301a49e7f6f4",
+          "stream_name": "events"
+        }
+      },
+      "sha256": "1a89fc8cc9d5537adca4364db4921f55af1d6b0d511835282e558eeb2efda496"
+    },
+    {
+      "key": "be427520-dc4d-4237-b0b6-301a49e7f6f4:1",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 4,
+          "partition": 1,
+          "route_revision": 11,
+          "stream": "be427520-dc4d-4237-b0b6-301a49e7f6f4",
+          "stream_name": "events"
+        }
+      },
+      "sha256": "6e08e415c125509307b73933b0d49c1262580bdc218c13cc4a26dac569794908"
+    },
+    {
+      "key": "1af30f23-91f1-4335-a01b-fe753c187acd:0",
+      "route": {
+        "leader": {
+          "node_id": 1,
+          "public_uri": "http://127.0.0.1:54064"
+        },
+        "route": {
+          "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+          "group": 5,
+          "partition": 0,
+          "route_revision": 14,
+          "stream": "1af30f23-91f1-4335-a01b-fe753c187acd",
+          "stream_name": "metrics"
+        }
+      },
+      "sha256": "fd925c09c747c6706e80e8a6a38ab3c6492016d9b54ee7718683d7d23b9ad4bc"
+    }
+  ],
+  "verdict": "PASS"
+}

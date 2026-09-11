@@ -1,0 +1,15 @@
+{
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "-p",
+    "stream-poc",
+    "--locked",
+    "--jobs",
+    "4"
+  ],
+  "returncode": 0,
+  "stderr": "    Blocking waiting for file lock on package cache\n    Finished `release` profile [optimized + debuginfo] target(s) in 1.28s\n",
+  "stdout": ""
+}

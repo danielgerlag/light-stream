@@ -1,0 +1,17 @@
+[package]
+name = "light-stream-proto"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+light-stream-core = { path = "../light-stream-core" }
+prost.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+prost-build = "0.14"
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14"
+

@@ -1,0 +1,18 @@
+{
+  "errors": [],
+  "peak_summed_node_rss_bytes": 9830400,
+  "samples": [
+    {
+      "monotonic": 2.499188041,
+      "rss_bytes": {
+        "16004": 8486912
+      }
+    },
+    {
+      "monotonic": 2.605763625,
+      "rss_bytes": {
+        "16004": 9830400
+      }
+    }
+  ]
+}

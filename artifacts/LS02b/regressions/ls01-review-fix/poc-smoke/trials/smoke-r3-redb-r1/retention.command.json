@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "inspect",
+    "--engine",
+    "redb",
+    "--dir",
+    "/Users/danielgerlag/dev/light-stream/.poc-data/2b407cf4c1ca469299278d1938209a63/smoke-r3-redb-r1/leader",
+    "--shards",
+    "2",
+    "--retain-from",
+    "4"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.06197216700000041
+}

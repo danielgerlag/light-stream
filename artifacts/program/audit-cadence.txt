@@ -1,0 +1,4 @@
+No scheduler tool is available in this session.
+Audit at each completed work package and before every long-running validation.
+The audit prompt is:
+Re-read the execution objective and plan. Check every active owner, revision, live lane, and evidence path. Stop scope drift. Report actual completed artifacts, verdicts, operator gates, and blockers. Send a status message even when nothing changed.

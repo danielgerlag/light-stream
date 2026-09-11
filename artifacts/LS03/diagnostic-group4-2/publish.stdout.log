@@ -1,0 +1,1 @@
+{"command":"publish","endpoint":"http://127.0.0.1:57561","ok":true,"receipt":{"bookmark":null,"range":{"count":1,"first":0,"partition":{"partition":1,"stream":"b4d0826d-c3b7-4f11-8ad2-cbec6d5be590"}},"request":{"principal":"diagnostic","sequence":1,"session":"228e3f27-419b-4d11-b10b-6d8c1fc5a83d"}}}

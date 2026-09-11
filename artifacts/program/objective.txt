@@ -1,0 +1,5 @@
+Execute docs/implementation/plan.md from LS01 through LS10.
+Build the real Rust server, client, CLI, verification harness, storage, replication, bookmarks, retention, security, packaging, and local acceptance.
+Tests alone are insufficient. Drive actual release binaries and preserve evidence.
+Do not merge, deploy, provision paid infrastructure, or claim independent-host verification.
+Stop only when the local implementation-ready predicate passes or a genuine dead end is proven.

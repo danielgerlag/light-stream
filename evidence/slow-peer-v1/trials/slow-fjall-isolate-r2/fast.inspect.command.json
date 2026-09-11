@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "inspect",
+    "--engine",
+    "fjall",
+    "--dir",
+    "/Users/danielgerlag/dev/light-stream/.poc-data/b3143c0b242c4fa0b1fb2f337092b99d/slow-fjall-isolate-r2/fast",
+    "--shards",
+    "1"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.029822666999997693
+}

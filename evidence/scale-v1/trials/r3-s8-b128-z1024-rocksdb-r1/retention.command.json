@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "inspect",
+    "--engine",
+    "rocksdb",
+    "--dir",
+    "/Users/danielgerlag/dev/light-stream/.poc-data/7ac7e89aff7347aebb2e9b23ba03ac85/r3-s8-b128-z1024-rocksdb-r1/leader",
+    "--shards",
+    "8",
+    "--retain-from",
+    "52"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.3933866250000051
+}

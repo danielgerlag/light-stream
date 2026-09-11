@@ -1,0 +1,59 @@
+{
+  "live_old_leader_minority_refusal": {
+    "fetch": {
+      "command": "request",
+      "error": {
+        "code": "quorum_unavailable",
+        "detail": {
+          "code": "quorum_unavailable",
+          "group": "data",
+          "outcome": "not_applicable",
+          "request": null
+        },
+        "message": "the Data group has no available quorum"
+      },
+      "ok": false
+    },
+    "leader_node_id": 3,
+    "leader_process_alive": true,
+    "publish": {
+      "command": "request",
+      "error": {
+        "code": "quorum_unavailable",
+        "detail": {
+          "code": "quorum_unavailable",
+          "group": "data",
+          "outcome": "ambiguous_commit",
+          "request": {
+            "principal": "verify-ls02b-10101",
+            "sequence": 901,
+            "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+          }
+        },
+        "message": "the Data group has no available quorum"
+      },
+      "ok": false
+    },
+    "receipt": {
+      "command": "request",
+      "error": {
+        "code": "quorum_unavailable",
+        "detail": {
+          "code": "quorum_unavailable",
+          "group": "data",
+          "outcome": "not_applicable",
+          "request": null
+        },
+        "message": "the Data group has no available quorum"
+      },
+      "ok": false
+    },
+    "stopped_voters": [
+      1,
+      2
+    ],
+    "successful_acknowledgements": 0
+  },
+  "selective_partition_with_healthy_remote_majority": "NOT_TESTED_LOCAL",
+  "verdict": "PASS"
+}

@@ -1,0 +1,17 @@
+{
+  "active_stream_count": 4,
+  "rejection": {
+    "command": "request",
+    "error": {
+      "code": "resource_limit",
+      "detail": {
+        "code": "resource_limit",
+        "limit": 0,
+        "resource": "remote resource"
+      },
+      "message": "remote resource limit 0 was exceeded"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

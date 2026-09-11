@@ -1,0 +1,15 @@
+{
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "-p",
+    "stream-poc",
+    "--locked",
+    "--jobs",
+    "4"
+  ],
+  "returncode": 0,
+  "stderr": "    Finished `release` profile [optimized + debuginfo] target(s) in 0.31s\n",
+  "stdout": ""
+}

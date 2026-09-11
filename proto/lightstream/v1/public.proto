@@ -1,0 +1,426 @@
+syntax = "proto3";
+
+package lightstream.v1;
+
+enum SecurityMode {
+  SECURITY_MODE_UNSPECIFIED = 0;
+  SECURITY_MODE_LOCAL_INSECURE = 1;
+  SECURITY_MODE_SECURED = 2;
+}
+
+enum CapabilityState {
+  CAPABILITY_STATE_UNSPECIFIED = 0;
+  CAPABILITY_STATE_AVAILABLE = 1;
+  CAPABILITY_STATE_UNSUPPORTED = 2;
+}
+
+enum ConsensusGroup {
+  CONSENSUS_GROUP_UNSPECIFIED = 0;
+  CONSENSUS_GROUP_CONTROL = 1;
+  CONSENSUS_GROUP_DATA = 2;
+}
+
+enum RequestOutcome {
+  REQUEST_OUTCOME_UNSPECIFIED = 0;
+  REQUEST_OUTCOME_DEFINITE_NO_COMMIT = 1;
+  REQUEST_OUTCOME_AMBIGUOUS_COMMIT = 2;
+  REQUEST_OUTCOME_NOT_APPLICABLE = 3;
+}
+
+message NodeDescriptor {
+  uint64 node_id = 1;
+  string public_uri = 2;
+  string peer_uri = 3;
+}
+
+message LeaderHint {
+  uint64 node_id = 1;
+  string public_uri = 2;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool ready = 1;
+  string revision = 2;
+  SecurityMode security_mode = 3;
+  string public_address = 4;
+  string peer_address = 5;
+  bool bootstrapped = 6;
+  string cluster_id = 7;
+}
+
+message CapabilitiesRequest {}
+
+message Capability {
+  string name = 1;
+  CapabilityState state = 2;
+  string available_phase = 3;
+}
+
+message CapabilitiesResponse {
+  string revision = 1;
+  repeated Capability capabilities = 2;
+}
+
+message BootstrapRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string stream_name = 3;
+  uint64 seed_node_id = 4;
+  repeated NodeDescriptor members = 5;
+}
+
+message BootstrapSuccess {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string stream_name = 3;
+  uint64 control_group_id = 4;
+  uint64 data_group_id = 5;
+}
+
+message ErrorResult {
+  string code = 1;
+  string message = 2;
+  ConsensusGroup group = 3;
+  LeaderHint leader = 4;
+  RequestOutcome outcome = 5;
+  ProducerRequestId request_id = 6;
+}
+
+message BootstrapResponse {
+  oneof result {
+    BootstrapSuccess success = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message ProducerRequestId {
+  string principal_id = 1;
+  string producer_session_id = 2;
+  uint64 sequence = 3;
+}
+
+message PublishRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  ProducerRequestId request_id = 4;
+  repeated bytes records = 5;
+  uint64 route_group_id = 6;
+  uint64 route_revision = 7;
+  string bookmark_name = 8;
+}
+
+message CommittedRecordRange {
+  string stream_id = 1;
+  uint32 partition_id = 2;
+  uint64 first_offset = 3;
+  uint64 count = 4;
+}
+
+message PublishSuccess {
+  ProducerRequestId request_id = 1;
+  CommittedRecordRange range = 2;
+  Bookmark bookmark = 3;
+}
+
+message UnsupportedResult {
+  string code = 1;
+  string operation = 2;
+  string available_phase = 3;
+  string message = 4;
+}
+
+message PublishResponse {
+  oneof result {
+    PublishSuccess success = 1;
+    UnsupportedResult unsupported = 2;
+    ErrorResult error = 3;
+  }
+}
+
+message FetchRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  uint64 offset = 4;
+  uint32 limit = 5;
+  uint64 route_group_id = 6;
+  uint64 route_revision = 7;
+}
+
+message Record {
+  uint64 offset = 1;
+  bytes payload = 2;
+}
+
+message FetchSuccess {
+  string stream_id = 1;
+  uint32 partition_id = 2;
+  repeated Record records = 3;
+  uint64 next_offset = 4;
+}
+
+message FetchResponse {
+  oneof result {
+    FetchSuccess success = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message ReceiptRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  ProducerRequestId request_id = 4;
+  uint64 route_group_id = 5;
+  uint64 route_revision = 6;
+}
+
+message ReceiptResponse {
+  oneof result {
+    PublishSuccess success = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message Bookmark {
+    string bookmark_id = 1;
+    string name = 2;
+    string cluster_id = 3;
+    string stream_id = 4;
+    uint32 partition_id = 5;
+    uint64 next_offset = 6;
+    uint64 publication_sequence = 7;
+    string lifecycle = 8;
+}
+
+message CreateBookmarkRequest {
+    string cluster_id = 1;
+    string stream_id = 2;
+    uint32 partition_id = 3;
+    string bookmark_id = 4;
+    string name = 5;
+    uint64 next_offset = 6;
+    uint64 route_group_id = 7;
+    uint64 route_revision = 8;
+}
+
+message ResolveBookmarkRequest {
+    string cluster_id = 1;
+    string stream_id = 2;
+    uint32 partition_id = 3;
+    string name = 4;
+    uint64 route_group_id = 5;
+    uint64 route_revision = 6;
+}
+
+message DeleteBookmarkRequest {
+    string cluster_id = 1;
+    string stream_id = 2;
+    uint32 partition_id = 3;
+    string bookmark_id = 4;
+    uint64 route_group_id = 5;
+    uint64 route_revision = 6;
+}
+
+message ListBookmarksRequest {
+    string cluster_id = 1;
+    string stream_id = 2;
+    uint32 partition_id = 3;
+    uint32 limit = 4;
+    uint64 publication_ceiling = 5;
+    uint64 before_publication = 6;
+    uint64 route_group_id = 7;
+    uint64 route_revision = 8;
+}
+
+message BookmarkResponse {
+  oneof result {
+    Bookmark bookmark = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message BookmarkPage {
+  repeated Bookmark bookmarks = 1;
+  uint64 publication_ceiling = 2;
+  uint64 next_before = 3;
+}
+
+message ListBookmarksResponse {
+  oneof result {
+    BookmarkPage page = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message StreamBookmarkPosition {
+  uint32 partition_id = 1;
+  uint64 next_offset = 2;
+}
+
+message StreamBookmark {
+  string bookmark_id = 1;
+  string name = 2;
+  string cluster_id = 3;
+  string stream_id = 4;
+  repeated StreamBookmarkPosition positions = 5;
+  uint64 publication_sequence = 6;
+  string lifecycle = 7;
+}
+
+message CreateStreamBookmarkRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string bookmark_id = 3;
+  string name = 4;
+  repeated StreamBookmarkPosition positions = 5;
+}
+
+message ResolveStreamBookmarkRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string name = 3;
+}
+
+message DeleteStreamBookmarkRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string bookmark_id = 3;
+}
+
+message ListStreamBookmarksRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 limit = 3;
+  uint64 publication_ceiling = 4;
+  uint64 before_publication = 5;
+}
+
+message StreamBookmarkResponse {
+  oneof result {
+    StreamBookmark bookmark = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message StreamBookmarkPage {
+  repeated StreamBookmark bookmarks = 1;
+  uint64 publication_ceiling = 2;
+  uint64 next_before = 3;
+}
+
+message ListStreamBookmarksResponse {
+  oneof result {
+    StreamBookmarkPage page = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message DiagnosticsRequest {}
+
+message ReplicationProgress {
+  uint64 target_node_id = 1;
+  bool has_matched_log = 2;
+  uint64 matched_log_index = 3;
+}
+
+message GroupDiagnostics {
+  ConsensusGroup group = 1;
+  uint64 group_id = 2;
+  string local_role = 3;
+  bool has_current_leader = 4;
+  uint64 current_leader_id = 5;
+  bool effective_uniform = 6;
+  repeated uint64 effective_voters = 7;
+  repeated uint64 effective_learners = 8;
+  bool committed_uniform = 9;
+  repeated uint64 committed_voters = 10;
+  repeated uint64 committed_learners = 11;
+  bool has_last_log = 12;
+  uint64 last_log_index = 13;
+  bool has_local_committed = 14;
+  uint64 local_committed_index = 15;
+  bool has_cluster_committed = 16;
+  uint64 cluster_committed_index = 17;
+  bool has_last_applied = 18;
+  uint64 last_applied_index = 19;
+  repeated ReplicationProgress replication = 20;
+  bool has_snapshot = 21;
+  uint64 snapshot_index = 22;
+  bool has_purged = 23;
+  uint64 purged_index = 24;
+  bool has_slot = 25;
+  uint32 slot = 26;
+  uint64 cache_budget_bytes = 27;
+  uint64 write_buffer_budget_bytes = 28;
+}
+
+message DiagnosticsResponse {
+  uint64 node_id = 1;
+  string lifecycle = 2;
+  repeated NodeDescriptor peers = 3;
+  repeated GroupDiagnostics groups = 4;
+  repeated string unsupported_claims = 5;
+  uint32 data_group_slots = 6;
+  uint32 data_group_count = 7;
+  uint64 rocksdb_cache_budget_bytes = 8;
+  uint64 rocksdb_write_buffer_budget_bytes = 9;
+  uint64 per_group_cache_bytes = 10;
+  uint64 per_group_write_buffer_bytes = 11;
+}
+
+message PartitionPlacement { uint32 partition_id = 1; uint64 group_id = 2; }
+message StreamDescription {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string stream_name = 3;
+  string lifecycle = 4;
+  repeated PartitionPlacement placements = 5;
+  repeated uint64 ready_group_ids = 6;
+  uint64 revision = 7;
+}
+message CreateStreamRequest { string cluster_id = 1; string request_id = 2; string stream_name = 3; uint32 partition_count = 4; }
+message DescribeStreamRequest { string cluster_id = 1; string stream_id = 2; string stream_name = 3; }
+message DeleteStreamRequest { string cluster_id = 1; string stream_id = 2; }
+message ListStreamsRequest { string cluster_id = 1; }
+message StreamResponse { oneof result { StreamDescription stream = 1; ErrorResult error = 2; } }
+message StreamList { repeated StreamDescription streams = 1; }
+message ListStreamsResponse { oneof result { StreamList success = 1; ErrorResult error = 2; } }
+message RouteRequest { string cluster_id = 1; string stream_id = 2; string stream_name = 3; uint32 partition_id = 4; }
+message PartitionRoute {
+  string cluster_id = 1;
+  string stream_id = 2;
+  string stream_name = 3;
+  uint32 partition_id = 4;
+  uint64 group_id = 5;
+  uint64 route_revision = 6;
+  LeaderHint leader = 7;
+}
+message RouteResponse { oneof result { PartitionRoute route = 1; ErrorResult error = 2; } }
+
+service LightStream {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesResponse);
+  rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
+  rpc CreateStream(CreateStreamRequest) returns (StreamResponse);
+  rpc DescribeStream(DescribeStreamRequest) returns (StreamResponse);
+  rpc ListStreams(ListStreamsRequest) returns (ListStreamsResponse);
+  rpc DeleteStream(DeleteStreamRequest) returns (StreamResponse);
+  rpc ResolveRoute(RouteRequest) returns (RouteResponse);
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc CommitPublish(PublishRequest) returns (PublishResponse);
+  rpc Fetch(FetchRequest) returns (FetchResponse);
+  rpc GetReceipt(ReceiptRequest) returns (ReceiptResponse);
+  rpc CreateBookmark(CreateBookmarkRequest) returns (BookmarkResponse);
+  rpc ResolveBookmark(ResolveBookmarkRequest) returns (BookmarkResponse);
+  rpc DeleteBookmark(DeleteBookmarkRequest) returns (BookmarkResponse);
+  rpc ListBookmarks(ListBookmarksRequest) returns (ListBookmarksResponse);
+  rpc CreateStreamBookmark(CreateStreamBookmarkRequest) returns (StreamBookmarkResponse);
+  rpc ResolveStreamBookmark(ResolveStreamBookmarkRequest) returns (StreamBookmarkResponse);
+  rpc DeleteStreamBookmark(DeleteStreamBookmarkRequest) returns (StreamBookmarkResponse);
+  rpc ListStreamBookmarks(ListStreamBookmarksRequest) returns (ListStreamBookmarksResponse);
+  rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
+}

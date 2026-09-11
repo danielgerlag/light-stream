@@ -1,0 +1,182 @@
+{
+  "after_restart": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+      }
+    },
+    "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+    "lifecycle": "available",
+    "name": "import-boundary",
+    "publication": 1
+  },
+  "before_restart": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+      }
+    },
+    "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+    "lifecycle": "available",
+    "name": "import-boundary",
+    "publication": 1
+  },
+  "memberships": [
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 3
+    }
+  ],
+  "single_process_failover": "DEFERRED_LS06",
+  "vector_after_restart": {
+    "id": "c1be5bf1-beec-e806-e2a6-f330035657b2",
+    "lifecycle": "available",
+    "name": "two-partition-boundary",
+    "publication": 1,
+    "vector": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "positions": [
+        {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 3,
+          "partition": {
+            "partition": 0,
+            "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+          }
+        },
+        {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 0,
+          "partition": {
+            "partition": 1,
+            "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+          }
+        }
+      ],
+      "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+    }
+  },
+  "verdict": "PASS"
+}

@@ -1,0 +1,45 @@
+{
+  "first": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/LS01/regression-20260910-ls02b-final/scratch/success/isolation-a",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure",
+      "--node-id",
+      "1"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS01/regression-20260910-ls02b-final/scratch/success/isolation-a",
+    "label": "isolation-a",
+    "peer_address": "127.0.0.1:63157",
+    "pid": 67327,
+    "public_address": "127.0.0.1:63156",
+    "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125"
+  },
+  "second": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/LS01/regression-20260910-ls02b-final/scratch/success/isolation-b",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure",
+      "--node-id",
+      "1"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS01/regression-20260910-ls02b-final/scratch/success/isolation-b",
+    "label": "isolation-b",
+    "peer_address": "127.0.0.1:63159",
+    "pid": 67328,
+    "public_address": "127.0.0.1:63158",
+    "revision": "081f48edd64379be03acf67c370ef98a400f94a386e0085b579137091cb9c125"
+  },
+  "verdict": "PASS"
+}

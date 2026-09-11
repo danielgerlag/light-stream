@@ -1,0 +1,120 @@
+{
+  "budget_ms": 100,
+  "cli": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "available_phase": "LS02",
+          "status": "unsupported"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "http://127.0.0.1:59052",
+    "health": {
+      "peer_address": "127.0.0.1:59053",
+      "public_address": "127.0.0.1:59052",
+      "status": {
+        "ready": true,
+        "revision": "9eef934e15359a6ad470e26aa53027b739e5b70e789c31a573136315a854eba0",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true
+  },
+  "health_latency_ms": [
+    0.596958,
+    0.23800000000000002,
+    0.23775000000000002,
+    0.24445899999999998,
+    0.21312499999999998,
+    0.19574999999999998,
+    0.203708,
+    0.179584,
+    0.194792,
+    0.191,
+    0.19629200000000002,
+    0.178333,
+    0.210583,
+    0.18770799999999999,
+    0.183458,
+    0.200666,
+    0.18466700000000003,
+    0.186667,
+    0.18575,
+    0.181917
+  ],
+  "health_p99_ms": 0.596958,
+  "process": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/LS01/skill-health/scratch/success/health",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS01/skill-health/scratch/success/health",
+    "label": "health",
+    "peer_address": "127.0.0.1:59053",
+    "pid": 77377,
+    "public_address": "127.0.0.1:59052",
+    "revision": "9eef934e15359a6ad470e26aa53027b739e5b70e789c31a573136315a854eba0"
+  },
+  "public_api_on_peer_port": {
+    "error": {
+      "code": "client_error",
+      "message": "request failed: code: 'Operation is not implemented or not supported'"
+    },
+    "ok": false
+  },
+  "revision": "9eef934e15359a6ad470e26aa53027b739e5b70e789c31a573136315a854eba0",
+  "rust_client": {
+    "command": "health-samples",
+    "endpoint": "http://127.0.0.1:59052",
+    "entrypoint": "rust-client",
+    "health": {
+      "peer_address": "127.0.0.1:59053",
+      "public_address": "127.0.0.1:59052",
+      "status": {
+        "ready": true,
+        "revision": "9eef934e15359a6ad470e26aa53027b739e5b70e789c31a573136315a854eba0",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true,
+    "samples_ms": [
+      0.596958,
+      0.23800000000000002,
+      0.23775000000000002,
+      0.24445899999999998,
+      0.21312499999999998,
+      0.19574999999999998,
+      0.203708,
+      0.179584,
+      0.194792,
+      0.191,
+      0.19629200000000002,
+      0.178333,
+      0.210583,
+      0.18770799999999999,
+      0.183458,
+      0.200666,
+      0.18466700000000003,
+      0.186667,
+      0.18575,
+      0.181917
+    ]
+  },
+  "verdict": "PASS"
+}

@@ -1,0 +1,15 @@
+{
+  "resume": {
+    "prior_failures": [
+      {
+        "evidence": "l09.json",
+        "expected": true,
+        "name": "invalid-insecure-bind"
+      }
+    ],
+    "profile": "local",
+    "revision": "cea7171efcd004fa3c5e7c244a3a3f1779b3fc701f75d283abf278e616ba3b2e",
+    "seed": 10101
+  },
+  "verdict": "PASS"
+}

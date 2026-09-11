@@ -1,0 +1,80 @@
+{
+  "nodes": {
+    "1": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/parent-recovered/scratch/success/ls02b-node-1",
+        "--public-listen",
+        "127.0.0.1:60321",
+        "--peer-listen",
+        "127.0.0.1:60322",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "1",
+        "--advertise-public-uri",
+        "http://127.0.0.1:60321",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:60322"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/parent-recovered/scratch/success/ls02b-node-1",
+      "label": "ls02b-node-1-initial",
+      "peer_address": "127.0.0.1:60322",
+      "pid": 83208,
+      "public_address": "127.0.0.1:60321",
+      "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8"
+    },
+    "2": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/parent-recovered/scratch/success/ls02b-node-2",
+        "--public-listen",
+        "127.0.0.1:60323",
+        "--peer-listen",
+        "127.0.0.1:60324",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "2",
+        "--advertise-public-uri",
+        "http://127.0.0.1:60323",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:60324"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/parent-recovered/scratch/success/ls02b-node-2",
+      "label": "ls02b-node-2-initial",
+      "peer_address": "127.0.0.1:60324",
+      "pid": 83212,
+      "public_address": "127.0.0.1:60323",
+      "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8"
+    },
+    "3": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/parent-recovered/scratch/success/ls02b-node-3",
+        "--public-listen",
+        "127.0.0.1:60325",
+        "--peer-listen",
+        "127.0.0.1:60326",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "3",
+        "--advertise-public-uri",
+        "http://127.0.0.1:60325",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:60326"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/parent-recovered/scratch/success/ls02b-node-3",
+      "label": "ls02b-node-3-initial",
+      "peer_address": "127.0.0.1:60326",
+      "pid": 83213,
+      "public_address": "127.0.0.1:60325",
+      "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8"
+    }
+  },
+  "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8"
+}

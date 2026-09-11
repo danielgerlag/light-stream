@@ -1,0 +1,12 @@
+{
+  "binary": "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+  "engines": "fjall",
+  "keep_data": false,
+  "matrix": "slow-peer",
+  "max_mib": 128,
+  "output": "evidence/slow-peer-v1",
+  "repeats": 3,
+  "seconds": 2,
+  "seed": 73191,
+  "skip_build": false
+}

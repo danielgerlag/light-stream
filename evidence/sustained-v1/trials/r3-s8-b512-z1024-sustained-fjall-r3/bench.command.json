@@ -1,0 +1,21 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "bench",
+    "--address",
+    "127.0.0.1:54178",
+    "--shards",
+    "8",
+    "--batch-records",
+    "512",
+    "--record-bytes",
+    "1024",
+    "--seconds",
+    "30.0",
+    "--max-batches",
+    "768"
+  ],
+  "returncode": 1,
+  "stderr": "",
+  "wall_seconds": 7.429741999999976
+}

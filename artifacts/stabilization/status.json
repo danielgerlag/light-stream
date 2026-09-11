@@ -1,0 +1,29 @@
+{
+  "authoritative_workspace": "/Users/danielgerlag/dev/light-stream",
+  "authoritative_phase": "LS02b",
+  "status": "STABLE",
+  "background_agents": 0,
+  "running_product_processes": 0,
+  "discarded_work": [
+    ".pstack-work/ls03-ws",
+    ".pstack-work/ls03-parent"
+  ],
+  "discarded_phase": "LS03",
+  "verified": {
+    "format": "PASS",
+    "compile": "PASS",
+    "poc_storage_repetitions": 5,
+    "workspace_tests": "PASS",
+    "workspace_clippy": "PASS",
+    "ls02b_three_voter": "PASS",
+    "ls02a_standalone": "PASS",
+    "ls01_contract": "PASS"
+  },
+  "evidence": {
+    "ls02b": "artifacts/stabilization/ls02b/result.json",
+    "ls02a": "artifacts/stabilization/ls02a/result.json",
+    "ls01": "artifacts/stabilization/ls01/result.json",
+    "discarded_ls03": "artifacts/LS03/blocked.json"
+  },
+  "next_execution_rule": "One foreground writer only. Checkpoint every ten minutes. Do not delegate shared implementation work."
+}

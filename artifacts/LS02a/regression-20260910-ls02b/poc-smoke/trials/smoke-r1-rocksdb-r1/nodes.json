@@ -1,0 +1,20 @@
+[
+  {
+    "address": "127.0.0.1:58197",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "rocksdb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/0aa09fc7148548348f36e6c8d987890b/smoke-r1-rocksdb-r1/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "leader",
+    "pid": 44257,
+    "ready_seconds": 0.1744548749999999
+  }
+]

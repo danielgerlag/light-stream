@@ -1,0 +1,31 @@
+{
+  "run_started_at": "2026-09-10T23:19:15Z",
+  "base_revision": "UNAVAILABLE_NO_GIT_REPOSITORY",
+  "publication": "BLOCKED_NO_GIT_REPOSITORY",
+  "artifact_root": "artifacts/",
+  "execution_mode": "foreground autonomous iterations with background scoped owners",
+  "security_profiles": [
+    "local-insecure",
+    "secured"
+  ],
+  "independent_security_review": "NOT_REQUESTED",
+  "local_exit_predicate": [
+    "Production Rust server, client, and CLI build successfully.",
+    "Standalone and three-node local topologies pass the independent end-to-end data oracle.",
+    "Leader loss, majority loss, slow follower catch-up, retry receipts, bookmarks, retention, replay leases, security, export/restore, and restart scenarios pass.",
+    "The packaged release passes the local performance and resource budgets that are measurable on this host.",
+    "All failed attempts and blocked independent-host gates remain visible."
+  ],
+  "reference_host_gate": "BLOCKED_UNLESS_APPROVED_INDEPENDENT_HOSTS_BECOME_AVAILABLE",
+  "budgets": {
+    "process_liveness_seconds": 5,
+    "write_readiness_seconds": 10,
+    "low_load_p99_ms": 250,
+    "local_failover_seconds": 10,
+    "newest_100_bookmarks_p99_ms": 100,
+    "standalone_startup_seconds": 1,
+    "standalone_idle_rss_mib": 128,
+    "linux_image_mib": 50,
+    "reference_capacity_records_per_second": 50000
+  }
+}

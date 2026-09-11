@@ -1,0 +1,48 @@
+{
+  "acknowledged_prefix": {
+    "batches": 32,
+    "digest": 8057915078753034734,
+    "first_sequence": 0,
+    "last_sequence": 31,
+    "payload_bytes": 4194304,
+    "records": 4096
+  },
+  "engine": "redb",
+  "limitations": [
+    "no leader election",
+    "no fencing",
+    "no replica catch-up",
+    "shared physical host",
+    "not a hardware power-loss experiment"
+  ],
+  "majority_loss": "write returned nonzero",
+  "one_follower_loss": "writes continued with durable local and surviving follower",
+  "process_kill_recovery": {
+    "follower-0": {
+      "batches": 16,
+      "digest": 3800404653078572044,
+      "first_sequence": 0,
+      "last_sequence": 15,
+      "payload_bytes": 2097152,
+      "records": 2048
+    },
+    "follower-1": {
+      "batches": 32,
+      "digest": 8057915078753034734,
+      "first_sequence": 0,
+      "last_sequence": 31,
+      "payload_bytes": 4194304,
+      "records": 4096
+    },
+    "leader": {
+      "batches": 33,
+      "digest": 3410559771513706571,
+      "first_sequence": 0,
+      "last_sequence": 32,
+      "payload_bytes": 4325376,
+      "records": 4224
+    }
+  },
+  "unacknowledged_leader_tail_batches": 1,
+  "verdict": "VERIFIED"
+}

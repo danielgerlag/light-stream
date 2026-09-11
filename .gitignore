@@ -1,0 +1,17 @@
+/target/
+/.poc-data/
+/.light-stream/
+/.pstack-work/
+.DS_Store
+*.profraw
+__pycache__/
+/artifacts/**/command-output/
+/artifacts/**/diagnostics/
+/artifacts/**/node-logs/
+/artifacts/**/samples/
+/artifacts/**/scratch/
+/artifacts/**/source/**
+!/artifacts/**/source/
+!/artifacts/**/source/fingerprints.json
+/artifacts/**/worktree-backup/
+/evidence/**/source/

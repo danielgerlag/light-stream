@@ -1,0 +1,65 @@
+{
+  "deleted": {
+    "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+    "lifecycle": "deleted",
+    "name": "orders",
+    "placements": [
+      {
+        "group": 3,
+        "partition": 0
+      },
+      {
+        "group": 4,
+        "partition": 1
+      },
+      {
+        "group": 5,
+        "partition": 2
+      },
+      {
+        "group": 2,
+        "partition": 3
+      }
+    ],
+    "ready_groups": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "revision": 16,
+    "stream": "6749e7c2-1fea-4e9b-97ed-9629da0fac98"
+  },
+  "replacement": {
+    "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+    "lifecycle": "active",
+    "name": "orders",
+    "placements": [
+      {
+        "group": 2,
+        "partition": 0
+      },
+      {
+        "group": 3,
+        "partition": 1
+      },
+      {
+        "group": 4,
+        "partition": 2
+      },
+      {
+        "group": 5,
+        "partition": 3
+      }
+    ],
+    "ready_groups": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "revision": 22,
+    "stream": "4f532b64-a601-43c2-8a60-b4e7ecbf08ef"
+  },
+  "verdict": "PASS"
+}

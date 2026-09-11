@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:13:03.146409+00:00",
+  "error": "ls03-publish-1 exited 5; see /Users/danielgerlag/dev/light-stream/artifacts/LS03/continued-4/command-output/044-ls03-publish-1.stdout.log and /Users/danielgerlag/dev/light-stream/artifacts/LS03/continued-4/command-output/044-ls03-publish-1.stderr.log",
+  "scenario": "all",
+  "verdict": "FAIL"
+}

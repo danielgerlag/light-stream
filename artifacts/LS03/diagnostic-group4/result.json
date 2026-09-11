@@ -1,0 +1,30 @@
+{
+  "returncode": 2,
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/light-streamctl",
+    "--endpoint",
+    "http://127.0.0.1:57561",
+    "--no-retry",
+    "--deadline-ms",
+    "10000",
+    "publish",
+    "--cluster-id",
+    "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+    "--stream-id",
+    "b4d0826d-c3b7-4f11-8ad2-cbec6d5be590",
+    "--partition",
+    "1",
+    "--principal",
+    "diagnostic",
+    "--session",
+    "3a478b71-c8f5-4eea-92b8-1584a0ba55dc",
+    "--sequence",
+    "1",
+    "--file",
+    "/Users/danielgerlag/dev/light-stream/artifacts/LS03/diagnostic-group4/payload.bin",
+    "--route-group-id",
+    "4",
+    "--route-revision",
+    "7"
+  ]
+}

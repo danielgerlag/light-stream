@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/light-stream-client",
+    "crates/light-stream-cli",
+    "crates/light-stream-core",
+    "crates/light-stream-proto",
+    "crates/light-stream-server",
+    "crates/light-stream-storage",
+    "crates/light-stream-testkit",
+    "poc/common",
+    "poc/storage",
+    "poc/runner",
+]
+
+[workspace.package]
+edition = "2024"
+publish = false
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+crc32fast = "1"
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+futures-util = "0.3"
+openraft = { version = "=0.10.0-alpha.34", features = ["serde", "type-alias"] }
+prost = "0.14"
+rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime", "multi-threaded-cf"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.14", features = ["transport"] }
+tonic-prost = "0.14"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[profile.release]
+debug = 1

@@ -1,0 +1,22 @@
+{
+  "phase": "LS01",
+  "scenarios": {
+    "health-capabilities": {
+      "lanes": ["L02", "L07"],
+      "predicate": "The release server reports ready, its source revision, local-insecure mode, and explicit capabilities through both the CLI and Rust client."
+    },
+    "unsupported-publish": {
+      "lanes": ["L03", "L08"],
+      "predicate": "The release server returns a typed unsupported result, the CLI exits nonzero, no acknowledgement is recorded, and an injected false acknowledgement fails."
+    },
+    "process-isolation": {
+      "lanes": ["L05", "L06"],
+      "predicate": "Two owned servers use different ports and data directories, and a second owner of one data directory is refused."
+    },
+    "evidence-preservation": {
+      "lanes": ["L04", "L09", "L10"],
+      "predicate": "Invalid startup fails before binding, failure logs and scratch data remain, cleanup retains evidence, and recorded run identity survives resume validation."
+    }
+  }
+}
+

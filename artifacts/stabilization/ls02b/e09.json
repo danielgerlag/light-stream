@@ -1,0 +1,51 @@
+{
+  "exact_same_range": true,
+  "killed_diagnosed_leader_before_retry": 1,
+  "network_response_drop": true,
+  "new_leader_before_retry": 3,
+  "pre_retry_receipt": {
+    "command": "receipt",
+    "endpoint": "http://127.0.0.1:61104",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 9,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls02b-10101",
+        "sequence": 10,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "receipt_after_full_restart": true,
+  "retry_receipt": {
+    "command": "publish",
+    "endpoint": "http://127.0.0.1:61104",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 9,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls02b-10101",
+        "sequence": 10,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "same_identity_retry": true,
+  "verdict": "PASS"
+}

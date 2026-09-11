@@ -1,0 +1,16 @@
+{
+  "acknowledgement_count": 0,
+  "cli_exit": 3,
+  "response": {
+    "command": "publish-probe",
+    "error": {
+      "available_phase": "LS02",
+      "code": "unsupported_operation",
+      "message": "publish is not supported until LS02",
+      "operation": "publish"
+    },
+    "ok": false
+  },
+  "rust_client_exit": 1,
+  "verdict": "PASS"
+}

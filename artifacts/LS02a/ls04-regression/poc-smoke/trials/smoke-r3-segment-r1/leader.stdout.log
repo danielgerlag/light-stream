@@ -1,0 +1,1 @@
+{"address":"127.0.0.1:62001","engine":"segment","leader":true,"peer_admission":"block","peer_queue_capacity":4,"protocol":"fixed-leader-durable-append","ready":true,"replication_delay_ms":0,"shards":2}

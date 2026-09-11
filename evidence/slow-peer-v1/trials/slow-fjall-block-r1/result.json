@@ -1,0 +1,63 @@
+{
+  "bench": {
+    "batches": 24,
+    "elapsed_seconds": 4.935190291,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 267809.833,
+      "p50": 258032.041,
+      "p95": 262414.75,
+      "p99": 267809.833
+    },
+    "mib_per_second": 0.6078792960569147,
+    "payload_bytes": 3145728,
+    "per_shard": [
+      {
+        "batches": 24,
+        "digest": 11289231274084844095,
+        "first_sequence": 0,
+        "last_sequence": 23,
+        "payload_bytes": 3145728,
+        "records": 3072
+      }
+    ],
+    "records": 3072,
+    "records_per_second": 622.4683991622807,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "engine": "fjall",
+  "injected_ack_delay_ms": 250,
+  "limits": "isolation permanently excludes the lagging POC peer; production requires catch-up",
+  "peer_admission": "block",
+  "recovered": {
+    "fast": {
+      "batches": 24,
+      "digest": 11289231274084844095,
+      "first_sequence": 0,
+      "last_sequence": 23,
+      "payload_bytes": 3145728,
+      "records": 3072
+    },
+    "leader": {
+      "batches": 24,
+      "digest": 11289231274084844095,
+      "first_sequence": 0,
+      "last_sequence": 23,
+      "payload_bytes": 3145728,
+      "records": 3072
+    },
+    "slow": {
+      "batches": 24,
+      "digest": 11289231274084844095,
+      "first_sequence": 0,
+      "last_sequence": 23,
+      "payload_bytes": 3145728,
+      "records": 3072
+    }
+  },
+  "repeat": 1,
+  "trial": "slow-fjall-block-r1",
+  "verdict": "VERIFIED"
+}

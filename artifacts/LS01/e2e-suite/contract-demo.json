@@ -1,0 +1,29 @@
+{
+  "capabilities": [
+    {
+      "capability": "health",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "publish",
+      "support": {
+        "available_phase": "LS02",
+        "status": "unsupported"
+      }
+    }
+  ],
+  "command": "health",
+  "endpoint": "http://127.0.0.1:59064",
+  "health": {
+    "peer_address": "127.0.0.1:59065",
+    "public_address": "127.0.0.1:59064",
+    "status": {
+      "ready": true,
+      "revision": "9eef934e15359a6ad470e26aa53027b739e5b70e789c31a573136315a854eba0",
+      "security_mode": "local-insecure"
+    }
+  },
+  "ok": true
+}

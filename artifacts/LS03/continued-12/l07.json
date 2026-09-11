@@ -1,0 +1,27 @@
+{
+  "refreshed_receipt": {
+    "bookmark": null,
+    "range": {
+      "count": 1,
+      "first": 0,
+      "partition": {
+        "partition": 0,
+        "stream": "6349792d-2127-444d-9c5b-506629407e24"
+      }
+    },
+    "request": {
+      "principal": "verify-ls03-10101",
+      "sequence": 200,
+      "session": "971a7cfe-3fa2-b065-e90c-715ca42b8b11"
+    }
+  },
+  "stale_route": {
+    "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+    "group": 3,
+    "partition": 0,
+    "route_revision": 7,
+    "stream": "e17ec836-a1c8-4b54-ad1e-30bee60b4b11",
+    "stream_name": "orders"
+  },
+  "verdict": "PASS"
+}

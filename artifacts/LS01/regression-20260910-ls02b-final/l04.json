@@ -1,0 +1,18 @@
+{
+  "exit": 1,
+  "listener_started": false,
+  "malformed_input": {
+    "command": "request",
+    "error": {
+      "code": "invalid_payload",
+      "detail": {
+        "code": "invalid_payload",
+        "reason": "records cannot be empty"
+      },
+      "message": "invalid publish payload: records cannot be empty"
+    },
+    "ok": false
+  },
+  "malformed_input_exit": 2,
+  "verdict": "PASS"
+}

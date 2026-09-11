@@ -1,0 +1,80 @@
+{
+  "nodes": {
+    "1": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/scratch/success/ls02b-node-1",
+        "--public-listen",
+        "127.0.0.1:54046",
+        "--peer-listen",
+        "127.0.0.1:54047",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "1",
+        "--advertise-public-uri",
+        "http://127.0.0.1:54046",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:54047"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/scratch/success/ls02b-node-1",
+      "label": "ls02b-node-1-initial",
+      "peer_address": "127.0.0.1:54047",
+      "pid": 26764,
+      "public_address": "127.0.0.1:54046",
+      "revision": "bb461a9769064d3d9f063256eebe113d3488e3f1ec07f0dc0ab56798a0a741f2"
+    },
+    "2": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/scratch/success/ls02b-node-2",
+        "--public-listen",
+        "127.0.0.1:54048",
+        "--peer-listen",
+        "127.0.0.1:54049",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "2",
+        "--advertise-public-uri",
+        "http://127.0.0.1:54048",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:54049"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/scratch/success/ls02b-node-2",
+      "label": "ls02b-node-2-initial",
+      "peer_address": "127.0.0.1:54049",
+      "pid": 26765,
+      "public_address": "127.0.0.1:54048",
+      "revision": "bb461a9769064d3d9f063256eebe113d3488e3f1ec07f0dc0ab56798a0a741f2"
+    },
+    "3": {
+      "command": [
+        "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+        "--data-dir",
+        "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/scratch/success/ls02b-node-3",
+        "--public-listen",
+        "127.0.0.1:54050",
+        "--peer-listen",
+        "127.0.0.1:54051",
+        "--security-mode",
+        "local-insecure",
+        "--node-id",
+        "3",
+        "--advertise-public-uri",
+        "http://127.0.0.1:54050",
+        "--advertise-peer-uri",
+        "http://127.0.0.1:54051"
+      ],
+      "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/run-20260910-1/scratch/success/ls02b-node-3",
+      "label": "ls02b-node-3-initial",
+      "peer_address": "127.0.0.1:54051",
+      "pid": 26766,
+      "public_address": "127.0.0.1:54050",
+      "revision": "bb461a9769064d3d9f063256eebe113d3488e3f1ec07f0dc0ab56798a0a741f2"
+    }
+  },
+  "revision": "bb461a9769064d3d9f063256eebe113d3488e3f1ec07f0dc0ab56798a0a741f2"
+}

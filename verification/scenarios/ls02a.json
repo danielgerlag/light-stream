@@ -1,0 +1,17 @@
+{
+  "phase": "LS02a",
+  "scenarios": {
+    "bootstrap": {
+      "lanes": ["L02", "L10"],
+      "predicate": "Startup leaves a pristine store unbootstrapped. The explicit bootstrap command creates one stable cluster, one control group, one data group, and one stream partition. Repeating the same command returns the same identity. A conflicting command fails."
+    },
+    "durable-publish-read-restart": {
+      "lanes": ["L02", "L10"],
+      "predicate": "The CLI and Rust client publish independent random bytes, both read paths match the external ledger, and every acknowledged byte survives a full process restart."
+    },
+    "retry-receipt": {
+      "lanes": ["L07", "L08"],
+      "predicate": "The verifier discards one client response, retries the same producer identity, receives the original range, and rejects a conflicting payload without changing committed records."
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "audit_seconds": [
+    0.000102125,
+    9.7709e-05,
+    0.000168166
+  ],
+  "bench": {
+    "batches": 16,
+    "elapsed_seconds": 0.108511292,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 16193.917,
+      "p50": 15834.750000000002,
+      "p95": 16193.917,
+      "p99": 16193.917
+    },
+    "mib_per_second": 2.303907689164737,
+    "payload_bytes": 262144,
+    "per_shard": [
+      {
+        "batches": 8,
+        "digest": 8891377970509631308,
+        "first_sequence": 0,
+        "last_sequence": 7,
+        "payload_bytes": 131072,
+        "records": 128
+      },
+      {
+        "batches": 8,
+        "digest": 6043677858499336084,
+        "first_sequence": 0,
+        "last_sequence": 7,
+        "payload_bytes": 131072,
+        "records": 128
+      }
+    ],
+    "records": 256,
+    "records_per_second": 2359.2014737046907,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 16,
+    "name": "smoke-r3",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 2
+  },
+  "disk": {
+    "allocated_bytes": 983040,
+    "file_bytes": 816684,
+    "files": 63
+  },
+  "engine": "fjall",
+  "peak_summed_node_rss_bytes": 26411008,
+  "reopen_seconds": [
+    0.026102917,
+    0.037641375,
+    0.020633
+  ],
+  "repeat": 1,
+  "retention_from": 4,
+  "source": "trials/smoke-r3-fjall-r1/bench.json",
+  "trial": "smoke-r3-fjall-r1",
+  "verdict": "VERIFIED"
+}

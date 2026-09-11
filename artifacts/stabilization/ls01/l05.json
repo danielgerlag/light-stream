@@ -1,0 +1,45 @@
+{
+  "first": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/stabilization/ls01/scratch/success/isolation-a",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure",
+      "--node-id",
+      "1"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/stabilization/ls01/scratch/success/isolation-a",
+    "label": "isolation-a",
+    "peer_address": "127.0.0.1:63023",
+    "pid": 26520,
+    "public_address": "127.0.0.1:63022",
+    "revision": "d24a74d48dc1bd8f48590a502d8127ff9c218713d82910ddd6447da939a41fa7"
+  },
+  "second": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/stabilization/ls01/scratch/success/isolation-b",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure",
+      "--node-id",
+      "1"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/stabilization/ls01/scratch/success/isolation-b",
+    "label": "isolation-b",
+    "peer_address": "127.0.0.1:63025",
+    "pid": 26521,
+    "public_address": "127.0.0.1:63024",
+    "revision": "d24a74d48dc1bd8f48590a502d8127ff9c218713d82910ddd6447da939a41fa7"
+  },
+  "verdict": "PASS"
+}

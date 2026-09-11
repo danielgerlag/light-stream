@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:23:10.115557+00:00",
+  "error": "ls03-ready-1 never reached linearizable read readiness: {'command': 'request', 'error': {'code': 'not_leader', 'detail': {'code': 'not_leader', 'group': 'control', 'leader': {'node_id': 3, 'public_uri': 'http://127.0.0.1:64653'}}, 'message': 'the local node is not the current Control leader'}, 'ok': False}",
+  "scenario": "all",
+  "verdict": "FAIL"
+}

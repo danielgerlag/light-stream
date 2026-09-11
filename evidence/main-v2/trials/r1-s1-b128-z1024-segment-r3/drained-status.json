@@ -1,0 +1,15 @@
+{
+  "leader": {
+    "per_shard": [
+      {
+        "batches": 143,
+        "digest": 2428145086708787769,
+        "first_sequence": 0,
+        "last_sequence": 142,
+        "payload_bytes": 18743296,
+        "records": 18304
+      }
+    ],
+    "ready": true
+  }
+}

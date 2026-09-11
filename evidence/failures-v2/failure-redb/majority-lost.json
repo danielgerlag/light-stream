@@ -1,0 +1,23 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "bench",
+    "--address",
+    "127.0.0.1:57738",
+    "--shards",
+    "1",
+    "--batch-records",
+    "128",
+    "--record-bytes",
+    "1024",
+    "--seconds",
+    "1",
+    "--max-batches",
+    "1",
+    "--start-sequence",
+    "32"
+  ],
+  "returncode": 1,
+  "stderr": "",
+  "stdout": "{\"error\":\"benchmark failed without retries; attempted writes may exist beyond acknowledged data: shard 0: node refused append: quorum unavailable: local append is durable but no durable follower acknowledged; peer 127.0.0.1:57736 is disabled; node closed without an acknowledgement\",\"errors\":1,\"acknowledged_per_shard\":[{\"batches\":0,\"records\":0,\"payload_bytes\":0,\"digest\":0,\"first_sequence\":null,\"last_sequence\":null}],\"acknowledged_latencies_us\":[]}\n"
+}

@@ -1,0 +1,311 @@
+--- evidence/source-checkpoint/source/poc/runner/src/node.rs	2026-09-10 10:56:15
++++ poc/runner/src/node.rs	2026-09-10 12:03:37
+@@ -3,6 +3,7 @@
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, RwLock, mpsc as blocking_mpsc};
+ use std::thread;
++use std::time::{SystemTime, UNIX_EPOCH};
+ 
+ use anyhow::{Context, Result, bail, ensure};
+ use poc_common::{Audit, Batch};
+@@ -12,7 +13,7 @@
+ use tokio::task::{JoinHandle, JoinSet};
+ use tokio::time::{Duration, timeout};
+ 
+-use crate::cli::NodeOptions;
++use crate::cli::{NodeOptions, PeerAdmission};
+ use crate::wire::{self, APPEND, IO_TIMEOUT, REPLICATE, Response, STATUS};
+ use crate::{directory, print_json};
+ 
+@@ -34,6 +35,7 @@
+     address: SocketAddr,
+     accepting: Arc<AtomicBool>,
+     queue: Option<mpsc::Sender<Replication>>,
++    admission: PeerAdmission,
+ }
+ 
+ impl Peer {
+@@ -42,21 +44,51 @@
+             self.queue.take();
+             bail!("peer {} is disabled", self.address);
+         }
+-        if self
+-            .queue
+-            .as_ref()
+-            .context("peer queue is closed")?
+-            .blocking_send(job)
+-            .is_err()
+-        {
+-            self.accepting.store(false, Ordering::Release);
++        let shard = job.batch.shard;
++        let sequence = job.batch.sequence;
++        let queue = self.queue.as_ref().context("peer queue is closed")?;
++        let admitted = match self.admission {
++            PeerAdmission::Block => queue
++                .blocking_send(job)
++                .map_err(|_| "replication_queue_closed"),
++            PeerAdmission::Isolate => queue.try_send(job).map_err(|error| match error {
++                mpsc::error::TrySendError::Full(_) => "queue_saturated_permanent_isolation",
++                mpsc::error::TrySendError::Closed(_) => "replication_queue_closed",
++            }),
++        };
++        if let Err(cause) = admitted {
++            disable_peer(&self.accepting, self.address, shard, Some(sequence), cause);
+             self.queue.take();
+-            bail!("peer {} stopped after connection failure", self.address);
++            bail!(
++                "peer {} disabled for shard {shard} sequence {sequence}: {cause}",
++                self.address
++            );
+         }
+         Ok(())
+     }
+ }
+ 
++fn disable_peer(
++    accepting: &AtomicBool,
++    address: SocketAddr,
++    shard: u32,
++    sequence: Option<u64>,
++    cause: &str,
++) {
++    accepting.store(false, Ordering::Release);
++    eprintln!(
++        "{}",
++        serde_json::json!({
++            "event": "peer_disabled",
++            "timestamp_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
++            "peer": address.to_string(),
++            "shard": shard,
++            "sequence": sequence,
++            "cause": cause,
++        })
++    );
++}
++
+ struct Writer {
+     store: Box<dyn Store>,
+     applied: Arc<RwLock<Audit>>,
+@@ -128,6 +160,7 @@
+ 
+ async fn replicate(
+     address: SocketAddr,
++    shard: u32,
+     mut jobs: mpsc::Receiver<Replication>,
+     accepting: Arc<AtomicBool>,
+     ready: oneshot::Sender<()>,
+@@ -135,9 +168,10 @@
+     let mut stream = match wire::connect(address).await {
+         Ok(stream) => stream,
+         Err(error) => {
+-            accepting.store(false, Ordering::Release);
+-            eprintln!("replication peer {address} disabled: {error:#}");
++            let cause = format!("connection failed: {error:#}");
++            disable_peer(&accepting, address, shard, None, &cause);
+             let _ = ready.send(());
++            cancel_replication_jobs(&mut jobs, &cause).await;
+             return;
+         }
+     };
+@@ -151,22 +185,42 @@
+             wire::require_ack(response, job.batch.shard, job.batch.sequence)
+         }
+         .await;
+-        let failed = result.is_err();
+-        if failed {
+-            accepting.store(false, Ordering::Release);
++        let failure = result.as_ref().err().map(|error| format!("{error:#}"));
++        if let Some(cause) = &failure {
++            disable_peer(&accepting, address, shard, Some(job.batch.sequence), cause);
+         }
+         let _ = job.reply.send(result);
+-        if failed {
+-            eprintln!("replication peer {address} disabled; no reconnect or catch-up is attempted");
++        if let Some(cause) = failure {
++            cancel_replication_jobs(&mut jobs, &cause).await;
+             break;
+         }
+     }
+ }
+ 
++async fn cancel_replication_jobs(jobs: &mut mpsc::Receiver<Replication>, cause: &str) {
++    jobs.close();
++    while let Some(job) = jobs.recv().await {
++        let _ = job.reply.send(Err(anyhow::anyhow!(
++            "replication cancelled for shard {} sequence {}: {cause}",
++            job.batch.shard,
++            job.batch.sequence
++        )));
++    }
++}
++
++struct PeerHealth {
++    shard: u32,
++    address: SocketAddr,
++    accepting: Arc<AtomicBool>,
++}
++
+ struct Shared {
+     writers: Vec<mpsc::Sender<Append>>,
+     applied: Vec<Arc<RwLock<Audit>>>,
+     leader: bool,
++    peer_admission: PeerAdmission,
++    replication_delay_ms: u64,
++    replication_peers: Vec<PeerHealth>,
+ }
+ 
+ async fn dispatch(frame: &[u8], state: &Shared) -> Result<Response> {
+@@ -179,6 +233,18 @@
+                     .applied
+                     .iter()
+                     .map(|audit| audit.read().expect("audit lock poisoned").clone())
++                    .collect(),
++                peer_admission: state.peer_admission,
++                replication_delay_ms: state.replication_delay_ms,
++                peer_queue_capacity: PEER_QUEUE,
++                replication_peers: state
++                    .replication_peers
++                    .iter()
++                    .map(|peer| wire::PeerStatus {
++                        shard: peer.shard,
++                        address: peer.address.to_string(),
++                        accepting: peer.accepting.load(Ordering::Acquire),
++                    })
+                     .collect(),
+             })
+         }
+@@ -206,6 +272,9 @@
+             result
+                 .await
+                 .context("shard writer stopped without acknowledgement")??;
++            if kind == REPLICATE && state.replication_delay_ms > 0 {
++                tokio::time::sleep(Duration::from_millis(state.replication_delay_ms)).await;
++            }
+             Ok(Response::Ack { shard, sequence })
+         }
+         _ => bail!("unknown request type"),
+@@ -349,6 +418,7 @@
+         let mut writer_threads = Vec::new();
+         let mut peer_tasks = Vec::new();
+         let mut peer_ready = Vec::new();
++        let mut peer_health = Vec::new();
+         for (shard, store) in stores.into_iter().enumerate() {
+             let mut peers = Vec::new();
+             for &peer_address in &peer_addresses {
+@@ -357,15 +427,22 @@
+                 let (ready, connected) = oneshot::channel();
+                 peer_tasks.push(tokio::spawn(replicate(
+                     peer_address,
++                    shard as u32,
+                     jobs,
+                     accepting.clone(),
+                     ready,
+                 )));
+                 peer_ready.push(connected);
++                peer_health.push(PeerHealth {
++                    shard: shard as u32,
++                    address: peer_address,
++                    accepting: accepting.clone(),
++                });
+                 peers.push(Peer {
+                     address: peer_address,
+                     accepting,
+                     queue: Some(queue),
++                    admission: options.peer_admission,
+                 });
+             }
+             let (queue, requests) = mpsc::channel(WRITER_QUEUE);
+@@ -383,6 +460,9 @@
+             writers: writers.clone(),
+             applied,
+             leader: !peer_addresses.is_empty(),
++            peer_admission: options.peer_admission,
++            replication_delay_ms: options.replication_delay_ms,
++            replication_peers: peer_health,
+         });
+         let listener = tokio::spawn(serve(listener, shared, stopped));
+         for connected in peer_ready {
+@@ -435,6 +515,8 @@
+     let engine = options.engine.to_string();
+     let shards = options.shards;
+     let leader = !options.peers.is_empty();
++    let peer_admission = options.peer_admission;
++    let replication_delay_ms = options.replication_delay_ms;
+     let node = RunningNode::start(options).await?;
+     let output = print_json(&serde_json::json!({
+         "ready": true,
+@@ -443,6 +525,9 @@
+         "shards": shards,
+         "protocol": "fixed-leader-durable-append",
+         "leader": leader,
++        "peer_admission": peer_admission,
++        "replication_delay_ms": replication_delay_ms,
++        "peer_queue_capacity": PEER_QUEUE,
+     }));
+     if output.is_ok() {
+         #[cfg(unix)]
+@@ -457,3 +542,64 @@
+     output?;
+     shutdown
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn peer_admission_isolate_never_resumes_after_full_queue() -> Result<()> {
++        let (queue, mut jobs) = mpsc::channel(1);
++        let accepting = Arc::new(AtomicBool::new(true));
++        let mut peer = Peer {
++            address: "127.0.0.1:1".parse()?,
++            accepting: accepting.clone(),
++            queue: Some(queue),
++            admission: PeerAdmission::Isolate,
++        };
++        let (reply, _results) = blocking_mpsc::channel();
++        let job = |sequence| -> Result<Replication> {
++            Ok(Replication {
++                batch: Arc::new(Batch::generate(0, sequence, 1, 17)?),
++                reply: reply.clone(),
++            })
++        };
++        peer.enqueue(job(0)?)?;
++        assert!(peer.enqueue(job(1)?).is_err());
++        assert!(!accepting.load(Ordering::Acquire));
++        assert_eq!(jobs.try_recv()?.batch.sequence, 0);
++        assert!(peer.enqueue(job(2)?).is_err());
++        assert!(matches!(
++            jobs.try_recv(),
++            Err(mpsc::error::TryRecvError::Disconnected)
++        ));
++        Ok(())
++    }
++
++    #[tokio::test]
++    async fn peer_admission_cancelled_jobs_receive_explicit_errors() -> Result<()> {
++        let (queue, mut jobs) = mpsc::channel(2);
++        let (reply, results) = blocking_mpsc::channel();
++        for sequence in 0..2 {
++            queue
++                .try_send(Replication {
++                    batch: Arc::new(Batch::generate(0, sequence, 1, 17)?),
++                    reply: reply.clone(),
++                })
++                .map_err(|_| anyhow::anyhow!("test queue unexpectedly full"))?;
++        }
++        cancel_replication_jobs(&mut jobs, "test timeout").await;
++        for sequence in 0..2 {
++            let error = results
++                .try_recv()?
++                .expect_err("cancelled replication cannot acknowledge");
++            assert!(
++                error
++                    .to_string()
++                    .contains(&format!("sequence {sequence}: test timeout"))
++            );
++        }
++        assert!(queue.is_closed());
++        Ok(())
++    }
++}

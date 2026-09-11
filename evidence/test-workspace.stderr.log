@@ -1,0 +1,5 @@
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57306","sequence":4,"shard":1,"timestamp_unix_ms":1789067510033}
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57306","sequence":4,"shard":0,"timestamp_unix_ms":1789067510037}
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57307","sequence":8,"shard":0,"timestamp_unix_ms":1789067510273}
+{"cause":"queue_saturated_permanent_isolation","event":"peer_disabled","peer":"127.0.0.1:57329","sequence":5,"shard":0,"timestamp_unix_ms":1789067511606}
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57330","sequence":16,"shard":0,"timestamp_unix_ms":1789067512030}

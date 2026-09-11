@@ -1,0 +1,209 @@
+{
+  "follower-0": {
+    "per_shard": [
+      {
+        "batches": 79,
+        "digest": 18202592297564791705,
+        "first_sequence": 0,
+        "last_sequence": 78,
+        "payload_bytes": 41418752,
+        "records": 40448
+      },
+      {
+        "batches": 86,
+        "digest": 8140831981128488326,
+        "first_sequence": 0,
+        "last_sequence": 85,
+        "payload_bytes": 45088768,
+        "records": 44032
+      },
+      {
+        "batches": 128,
+        "digest": 11667071263424323691,
+        "first_sequence": 0,
+        "last_sequence": 127,
+        "payload_bytes": 67108864,
+        "records": 65536
+      },
+      {
+        "batches": 80,
+        "digest": 7355607496745831811,
+        "first_sequence": 0,
+        "last_sequence": 79,
+        "payload_bytes": 41943040,
+        "records": 40960
+      },
+      {
+        "batches": 86,
+        "digest": 11044325011243172925,
+        "first_sequence": 0,
+        "last_sequence": 85,
+        "payload_bytes": 45088768,
+        "records": 44032
+      },
+      {
+        "batches": 81,
+        "digest": 14187383012608558016,
+        "first_sequence": 0,
+        "last_sequence": 80,
+        "payload_bytes": 42467328,
+        "records": 41472
+      },
+      {
+        "batches": 85,
+        "digest": 12022503468268837667,
+        "first_sequence": 0,
+        "last_sequence": 84,
+        "payload_bytes": 44564480,
+        "records": 43520
+      },
+      {
+        "batches": 98,
+        "digest": 3668431587388976883,
+        "first_sequence": 0,
+        "last_sequence": 97,
+        "payload_bytes": 51380224,
+        "records": 50176
+      }
+    ],
+    "ready": true
+  },
+  "follower-1": {
+    "per_shard": [
+      {
+        "batches": 79,
+        "digest": 18202592297564791705,
+        "first_sequence": 0,
+        "last_sequence": 78,
+        "payload_bytes": 41418752,
+        "records": 40448
+      },
+      {
+        "batches": 86,
+        "digest": 8140831981128488326,
+        "first_sequence": 0,
+        "last_sequence": 85,
+        "payload_bytes": 45088768,
+        "records": 44032
+      },
+      {
+        "batches": 128,
+        "digest": 11667071263424323691,
+        "first_sequence": 0,
+        "last_sequence": 127,
+        "payload_bytes": 67108864,
+        "records": 65536
+      },
+      {
+        "batches": 80,
+        "digest": 7355607496745831811,
+        "first_sequence": 0,
+        "last_sequence": 79,
+        "payload_bytes": 41943040,
+        "records": 40960
+      },
+      {
+        "batches": 86,
+        "digest": 11044325011243172925,
+        "first_sequence": 0,
+        "last_sequence": 85,
+        "payload_bytes": 45088768,
+        "records": 44032
+      },
+      {
+        "batches": 81,
+        "digest": 14187383012608558016,
+        "first_sequence": 0,
+        "last_sequence": 80,
+        "payload_bytes": 42467328,
+        "records": 41472
+      },
+      {
+        "batches": 85,
+        "digest": 12022503468268837667,
+        "first_sequence": 0,
+        "last_sequence": 84,
+        "payload_bytes": 44564480,
+        "records": 43520
+      },
+      {
+        "batches": 98,
+        "digest": 3668431587388976883,
+        "first_sequence": 0,
+        "last_sequence": 97,
+        "payload_bytes": 51380224,
+        "records": 50176
+      }
+    ],
+    "ready": true
+  },
+  "leader": {
+    "per_shard": [
+      {
+        "batches": 79,
+        "digest": 18202592297564791705,
+        "first_sequence": 0,
+        "last_sequence": 78,
+        "payload_bytes": 41418752,
+        "records": 40448
+      },
+      {
+        "batches": 86,
+        "digest": 8140831981128488326,
+        "first_sequence": 0,
+        "last_sequence": 85,
+        "payload_bytes": 45088768,
+        "records": 44032
+      },
+      {
+        "batches": 128,
+        "digest": 11667071263424323691,
+        "first_sequence": 0,
+        "last_sequence": 127,
+        "payload_bytes": 67108864,
+        "records": 65536
+      },
+      {
+        "batches": 80,
+        "digest": 7355607496745831811,
+        "first_sequence": 0,
+        "last_sequence": 79,
+        "payload_bytes": 41943040,
+        "records": 40960
+      },
+      {
+        "batches": 86,
+        "digest": 11044325011243172925,
+        "first_sequence": 0,
+        "last_sequence": 85,
+        "payload_bytes": 45088768,
+        "records": 44032
+      },
+      {
+        "batches": 81,
+        "digest": 14187383012608558016,
+        "first_sequence": 0,
+        "last_sequence": 80,
+        "payload_bytes": 42467328,
+        "records": 41472
+      },
+      {
+        "batches": 85,
+        "digest": 12022503468268837667,
+        "first_sequence": 0,
+        "last_sequence": 84,
+        "payload_bytes": 44564480,
+        "records": 43520
+      },
+      {
+        "batches": 98,
+        "digest": 3668431587388976883,
+        "first_sequence": 0,
+        "last_sequence": 97,
+        "payload_bytes": 51380224,
+        "records": 50176
+      }
+    ],
+    "ready": true
+  }
+}

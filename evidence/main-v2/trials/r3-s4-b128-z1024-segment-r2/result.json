@@ -1,0 +1,83 @@
+{
+  "audit_seconds": [
+    0.004791083,
+    0.004340208,
+    0.004566375
+  ],
+  "bench": {
+    "batches": 76,
+    "elapsed_seconds": 2.060291917,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 151582.459,
+      "p50": 106055.042,
+      "p95": 126697.375,
+      "p99": 151582.459
+    },
+    "mib_per_second": 4.610997073576346,
+    "payload_bytes": 9961472,
+    "per_shard": [
+      {
+        "batches": 19,
+        "digest": 15148263907700069695,
+        "first_sequence": 0,
+        "last_sequence": 18,
+        "payload_bytes": 2490368,
+        "records": 2432
+      },
+      {
+        "batches": 19,
+        "digest": 4209042529114178893,
+        "first_sequence": 0,
+        "last_sequence": 18,
+        "payload_bytes": 2490368,
+        "records": 2432
+      },
+      {
+        "batches": 19,
+        "digest": 1428993606324820036,
+        "first_sequence": 0,
+        "last_sequence": 18,
+        "payload_bytes": 2490368,
+        "records": 2432
+      },
+      {
+        "batches": 19,
+        "digest": 7220474927125339252,
+        "first_sequence": 0,
+        "last_sequence": 18,
+        "payload_bytes": 2490368,
+        "records": 2432
+      }
+    ],
+    "records": 9728,
+    "records_per_second": 4721.661003342178,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 128,
+    "name": "r3-s4-b128-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 4
+  },
+  "disk": {
+    "allocated_bytes": 40648704,
+    "file_bytes": 29900760,
+    "files": 51
+  },
+  "engine": "segment",
+  "peak_summed_node_rss_bytes": 32423936,
+  "reopen_seconds": [
+    0.021999167,
+    0.006561291,
+    0.00659525
+  ],
+  "repeat": 2,
+  "retention_from": 9,
+  "source": "trials/r3-s4-b128-z1024-segment-r2/bench.json",
+  "trial": "r3-s4-b128-z1024-segment-r2",
+  "verdict": "VERIFIED"
+}

@@ -1,0 +1,41 @@
+{
+  "follower-0": {
+    "per_shard": [
+      {
+        "batches": 53,
+        "digest": 12539833157781346465,
+        "first_sequence": 0,
+        "last_sequence": 52,
+        "payload_bytes": 6946816,
+        "records": 6784
+      }
+    ],
+    "ready": true
+  },
+  "follower-1": {
+    "per_shard": [
+      {
+        "batches": 53,
+        "digest": 12539833157781346465,
+        "first_sequence": 0,
+        "last_sequence": 52,
+        "payload_bytes": 6946816,
+        "records": 6784
+      }
+    ],
+    "ready": true
+  },
+  "leader": {
+    "per_shard": [
+      {
+        "batches": 53,
+        "digest": 12539833157781346465,
+        "first_sequence": 0,
+        "last_sequence": 52,
+        "payload_bytes": 6946816,
+        "records": 6784
+      }
+    ],
+    "ready": true
+  }
+}

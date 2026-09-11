@@ -1,0 +1,266 @@
+{
+  "db_counts": {
+    "1": 5,
+    "2": 5,
+    "3": 5
+  },
+  "diagnostics": {
+    "data_group_count": 4,
+    "data_group_slots": 4,
+    "groups": [
+      {
+        "cache_budget_bytes": 0,
+        "cluster_committed_index": 6,
+        "committed_learners": [],
+        "committed_uniform": true,
+        "committed_voters": [
+          1,
+          2,
+          3
+        ],
+        "current_leader": 1,
+        "effective_learners": [],
+        "effective_uniform": true,
+        "effective_voters": [
+          1,
+          2,
+          3
+        ],
+        "group": "control",
+        "group_id": 1,
+        "last_applied_index": 6,
+        "last_log_index": 6,
+        "local_committed_index": 6,
+        "local_role": "leader",
+        "purged_index": null,
+        "replication": [
+          {
+            "matched_log_index": 6,
+            "target_node_id": 1
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 2
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 3
+          }
+        ],
+        "slot": null,
+        "snapshot_index": null,
+        "write_buffer_budget_bytes": 0
+      },
+      {
+        "cache_budget_bytes": 53687091,
+        "cluster_committed_index": 6,
+        "committed_learners": [],
+        "committed_uniform": true,
+        "committed_voters": [
+          1,
+          2,
+          3
+        ],
+        "current_leader": 1,
+        "effective_learners": [],
+        "effective_uniform": true,
+        "effective_voters": [
+          1,
+          2,
+          3
+        ],
+        "group": "data",
+        "group_id": 2,
+        "last_applied_index": 6,
+        "last_log_index": 6,
+        "local_committed_index": 6,
+        "local_role": "leader",
+        "purged_index": null,
+        "replication": [
+          {
+            "matched_log_index": 6,
+            "target_node_id": 1
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 2
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 3
+          }
+        ],
+        "slot": 0,
+        "snapshot_index": null,
+        "write_buffer_budget_bytes": 26843545
+      },
+      {
+        "cache_budget_bytes": 53687091,
+        "cluster_committed_index": 6,
+        "committed_learners": [],
+        "committed_uniform": true,
+        "committed_voters": [
+          1,
+          2,
+          3
+        ],
+        "current_leader": 1,
+        "effective_learners": [],
+        "effective_uniform": true,
+        "effective_voters": [
+          1,
+          2,
+          3
+        ],
+        "group": "data",
+        "group_id": 3,
+        "last_applied_index": 6,
+        "last_log_index": 6,
+        "local_committed_index": 6,
+        "local_role": "leader",
+        "purged_index": null,
+        "replication": [
+          {
+            "matched_log_index": 6,
+            "target_node_id": 1
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 2
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 3
+          }
+        ],
+        "slot": 1,
+        "snapshot_index": null,
+        "write_buffer_budget_bytes": 26843545
+      },
+      {
+        "cache_budget_bytes": 53687091,
+        "cluster_committed_index": 6,
+        "committed_learners": [],
+        "committed_uniform": true,
+        "committed_voters": [
+          1,
+          2,
+          3
+        ],
+        "current_leader": 1,
+        "effective_learners": [],
+        "effective_uniform": true,
+        "effective_voters": [
+          1,
+          2,
+          3
+        ],
+        "group": "data",
+        "group_id": 4,
+        "last_applied_index": 6,
+        "last_log_index": 6,
+        "local_committed_index": 6,
+        "local_role": "leader",
+        "purged_index": null,
+        "replication": [
+          {
+            "matched_log_index": 6,
+            "target_node_id": 1
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 2
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 3
+          }
+        ],
+        "slot": 2,
+        "snapshot_index": null,
+        "write_buffer_budget_bytes": 26843545
+      },
+      {
+        "cache_budget_bytes": 53687091,
+        "cluster_committed_index": 6,
+        "committed_learners": [],
+        "committed_uniform": true,
+        "committed_voters": [
+          1,
+          2,
+          3
+        ],
+        "current_leader": 1,
+        "effective_learners": [],
+        "effective_uniform": true,
+        "effective_voters": [
+          1,
+          2,
+          3
+        ],
+        "group": "data",
+        "group_id": 5,
+        "last_applied_index": 6,
+        "last_log_index": 6,
+        "local_committed_index": 6,
+        "local_role": "leader",
+        "purged_index": null,
+        "replication": [
+          {
+            "matched_log_index": 6,
+            "target_node_id": 1
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 2
+          },
+          {
+            "matched_log_index": 6,
+            "target_node_id": 3
+          }
+        ],
+        "slot": 3,
+        "snapshot_index": null,
+        "write_buffer_budget_bytes": 26843545
+      }
+    ],
+    "lifecycle": "active",
+    "node_id": 1,
+    "peers": [
+      {
+        "node_id": 1,
+        "peer_uri": "http://127.0.0.1:54562",
+        "public_uri": "http://127.0.0.1:54561"
+      },
+      {
+        "node_id": 2,
+        "peer_uri": "http://127.0.0.1:54564",
+        "public_uri": "http://127.0.0.1:54563"
+      },
+      {
+        "node_id": 3,
+        "peer_uri": "http://127.0.0.1:54566",
+        "public_uri": "http://127.0.0.1:54565"
+      }
+    ],
+    "per_group_cache_bytes": 53687091,
+    "per_group_write_buffer_bytes": 26843545,
+    "rocksdb_cache_budget_bytes": 268435456,
+    "rocksdb_write_buffer_budget_bytes": 134217728,
+    "unsupported_claims": [
+      "snapshot_after_purge:UNSUPPORTED_LS06",
+      "secured_mode:UNSUPPORTED_LS08",
+      "independent_hosts:BLOCKED",
+      "bookmarks:UNSUPPORTED_LS04",
+      "retention:UNSUPPORTED_LS05"
+    ]
+  },
+  "group_ids": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "verdict": "PASS"
+}

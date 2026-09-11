@@ -1,0 +1,62 @@
+{
+  "receipt": {
+    "bookmark": {
+      "cursor": {
+        "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+        "next_offset": 3,
+        "partition": {
+          "partition": 0,
+          "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+        }
+      },
+      "id": "a95a9d4c-4daa-c06d-9e0c-42d10d448180",
+      "lifecycle": "available",
+      "name": "response-lost",
+      "publication": 2
+    },
+    "range": {
+      "count": 1,
+      "first": 2,
+      "partition": {
+        "partition": 0,
+        "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+      }
+    },
+    "request": {
+      "principal": "verify-ls04-10101",
+      "sequence": 3,
+      "session": "d491d419-74ab-6e06-1243-94f8f3475075"
+    }
+  },
+  "response_dropped": true,
+  "retry": {
+    "bookmark": {
+      "cursor": {
+        "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+        "next_offset": 3,
+        "partition": {
+          "partition": 0,
+          "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+        }
+      },
+      "id": "a95a9d4c-4daa-c06d-9e0c-42d10d448180",
+      "lifecycle": "available",
+      "name": "response-lost",
+      "publication": 2
+    },
+    "range": {
+      "count": 1,
+      "first": 2,
+      "partition": {
+        "partition": 0,
+        "stream": "05912f90-afb7-444f-90fe-b7097cfbec0d"
+      }
+    },
+    "request": {
+      "principal": "verify-ls04-10101",
+      "sequence": 3,
+      "session": "d491d419-74ab-6e06-1243-94f8f3475075"
+    }
+  },
+  "verdict": "PASS"
+}

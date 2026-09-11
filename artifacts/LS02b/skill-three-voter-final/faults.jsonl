@@ -1,0 +1,5 @@
+{"fault": "kill_data_leader", "node_id": 1}
+{"fault": "stop_follower_for_suffix", "node_id": 1}
+{"fault": "stop_two_voters", "nodes": [1, 3], "remaining": 2}
+{"fault": "kill_ambiguous_old_leader", "node_id": 2, "reason": "prevent an unacknowledged tail from becoming committed on heal"}
+{"client_result": {"error": {"code": "client_error", "message": "request failed: code: 'Unknown error', message: \"transport error\", source: tonic::transport::Error(Transport, hyper::Error(Io, Custom { kind: BrokenPipe, error: \"stream closed because of a broken pipe\" }))"}, "ok": false}, "fault": "drop_successful_network_response", "network_response_drop": true, "request_id": "verify-ls02b-10101:eff6d7c6-fa33-856f-ee69-80f64ca8c28c:6"}

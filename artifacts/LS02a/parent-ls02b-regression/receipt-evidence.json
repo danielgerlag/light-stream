@@ -1,0 +1,38 @@
+{
+  "conflict": {
+    "command": "request",
+    "error": {
+      "code": "receipt_conflict",
+      "detail": {
+        "code": "receipt_conflict"
+      },
+      "message": "producer request identity was already used for another payload"
+    },
+    "ok": false
+  },
+  "original_first_offset": 2,
+  "request_sequence": 3,
+  "response_dropped": true,
+  "retry_receipt": {
+    "command": "receipt",
+    "endpoint": "http://127.0.0.1:61029",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 2,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-10101",
+        "sequence": 3,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "verdict": "PASS"
+}

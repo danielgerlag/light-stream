@@ -1,0 +1,58 @@
+[
+  {
+    "address": "127.0.0.1:50299",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "fjall",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/88c9ad77b7384c3bb2b7f0d9bf75bf3a/smoke-r3-fjall-r1/follower-0",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "follower-0",
+    "pid": 65449,
+    "ready_seconds": 0.26469062500000007
+  },
+  {
+    "address": "127.0.0.1:50301",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "fjall",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/88c9ad77b7384c3bb2b7f0d9bf75bf3a/smoke-r3-fjall-r1/follower-1",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "follower-1",
+    "pid": 65450,
+    "ready_seconds": 0.262969
+  },
+  {
+    "address": "127.0.0.1:50304",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "fjall",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/88c9ad77b7384c3bb2b7f0d9bf75bf3a/smoke-r3-fjall-r1/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2",
+      "--peers",
+      "127.0.0.1:50299,127.0.0.1:50301"
+    ],
+    "label": "leader",
+    "pid": 65467,
+    "ready_seconds": 0.25997908400000025
+  }
+]

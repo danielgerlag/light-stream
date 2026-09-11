@@ -1,0 +1,2 @@
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57723","sequence":16,"shard":0,"timestamp_unix_ms":1789067608071}
+{"cause":"node closed without an acknowledgement","event":"peer_disabled","peer":"127.0.0.1:57724","sequence":32,"shard":0,"timestamp_unix_ms":1789067608245}

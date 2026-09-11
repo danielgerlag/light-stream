@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "features": {
+    "health-capabilities": {
+      "command": "python3 scripts/verify.py --phase LS01 --scenario health-capabilities --profile local --artifacts artifacts/LS01/skill-health",
+      "evidence": ["l02.json", "l07.json", "contract-demo.json", "cleanup.json"]
+    },
+    "unsupported-publish": {
+      "command": "python3 scripts/verify.py --phase LS01 --scenario unsupported-publish --profile local --artifacts artifacts/LS01/skill-publish",
+      "evidence": ["l03.json", "l08.json", "attempts.jsonl", "acks.jsonl", "errors.jsonl"]
+    },
+    "process-isolation": {
+      "command": "python3 scripts/verify.py --phase LS01 --scenario process-isolation --profile local --artifacts artifacts/LS01/skill-isolation",
+      "evidence": ["l05.json", "l06.json", "node-logs", "cleanup.json"]
+    },
+    "evidence-preservation": {
+      "command": "python3 scripts/verify.py --phase LS01 --scenario evidence-preservation --profile local --artifacts artifacts/LS01/skill-evidence",
+      "evidence": ["l04.json", "l09.json", "l10.json", "diagnostics", "cleanup.json"]
+    },
+    "cluster-bootstrap": {
+      "command": "python3 scripts/verify.py --phase LS02a --scenario bootstrap --profile local --artifacts artifacts/LS02a/skill-bootstrap",
+      "evidence": ["bootstrap.json", "l02.json", "l10.json", "node-logs", "cleanup.json"]
+    },
+    "publish-read-restart": {
+      "command": "python3 scripts/verify.py --phase LS02a --scenario durable-publish-read-restart --profile local --artifacts artifacts/LS02a/skill-publish-read",
+      "evidence": ["durable-journey.json", "attempts.jsonl", "acks.jsonl", "reads.jsonl", "node-logs", "cleanup.json"]
+    },
+    "retry-receipt": {
+      "command": "python3 scripts/verify.py --phase LS02a --scenario retry-receipt --profile local --artifacts artifacts/LS02a/skill-retry-final-2",
+      "evidence": ["receipt-evidence.json", "faults.jsonl", "l07.json", "l08.json", "cleanup.json"]
+    },
+    "three-voter": {
+      "command": "python3 scripts/verify.py --phase LS02b --scenario three-voter --profile local --artifacts artifacts/LS02b/skill-three-voter",
+      "evidence": ["ls02b-summary.json", "e02.json", "e03.json", "e04.json", "e05.json", "e06.json", "e07.json", "e08.json", "e09.json", "faults.jsonl", "diagnostics/raft.jsonl", "cleanup.json"]
+    },
+    "bounded-groups": {
+      "command": "python3 scripts/verify.py --phase LS03 --profile local --security all --artifacts artifacts/LS03/skill-bounded-groups-final",
+      "evidence": ["partition-journey.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "cleanup.json", "unsupported.json"]
+    },
+    "bookmarks": {
+      "command": "python3 scripts/verify.py --phase LS04 --scenario bookmarks --profile local --security all --artifacts artifacts/LS04/skill-bookmarks-final",
+      "evidence": ["bookmark-journey.json", "l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "cleanup.json", "unsupported.json"]
+    }
+  }
+}

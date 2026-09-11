@@ -1,0 +1,98 @@
+{
+  "follower-0": {
+    "peer_admission": "block",
+    "peer_queue_capacity": 4,
+    "per_shard": [
+      {
+        "batches": 4,
+        "digest": 3721230655165120839,
+        "first_sequence": 0,
+        "last_sequence": 3,
+        "payload_bytes": 65536,
+        "records": 64
+      },
+      {
+        "batches": 4,
+        "digest": 3728559044224439134,
+        "first_sequence": 0,
+        "last_sequence": 3,
+        "payload_bytes": 65536,
+        "records": 64
+      }
+    ],
+    "ready": true,
+    "replication_delay_ms": 0,
+    "replication_peers": []
+  },
+  "follower-1": {
+    "peer_admission": "block",
+    "peer_queue_capacity": 4,
+    "per_shard": [
+      {
+        "batches": 4,
+        "digest": 3721230655165120839,
+        "first_sequence": 0,
+        "last_sequence": 3,
+        "payload_bytes": 65536,
+        "records": 64
+      },
+      {
+        "batches": 4,
+        "digest": 3728559044224439134,
+        "first_sequence": 0,
+        "last_sequence": 3,
+        "payload_bytes": 65536,
+        "records": 64
+      }
+    ],
+    "ready": true,
+    "replication_delay_ms": 0,
+    "replication_peers": []
+  },
+  "leader": {
+    "peer_admission": "block",
+    "peer_queue_capacity": 4,
+    "per_shard": [
+      {
+        "batches": 4,
+        "digest": 3721230655165120839,
+        "first_sequence": 0,
+        "last_sequence": 3,
+        "payload_bytes": 65536,
+        "records": 64
+      },
+      {
+        "batches": 4,
+        "digest": 3728559044224439134,
+        "first_sequence": 0,
+        "last_sequence": 3,
+        "payload_bytes": 65536,
+        "records": 64
+      }
+    ],
+    "ready": true,
+    "replication_delay_ms": 0,
+    "replication_peers": [
+      {
+        "accepting": true,
+        "address": "127.0.0.1:57769",
+        "shard": 0
+      },
+      {
+        "accepting": true,
+        "address": "127.0.0.1:57770",
+        "shard": 0
+      },
+      {
+        "accepting": true,
+        "address": "127.0.0.1:57769",
+        "shard": 1
+      },
+      {
+        "accepting": true,
+        "address": "127.0.0.1:57770",
+        "shard": 1
+      }
+    ]
+  }
+}

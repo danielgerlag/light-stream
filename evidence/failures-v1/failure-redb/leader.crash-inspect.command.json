@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "inspect",
+    "--engine",
+    "redb",
+    "--dir",
+    "/Users/danielgerlag/dev/light-stream/.poc-data/69aa6c8614ab4cd6bd2b7577559f5a32/failure-redb/leader",
+    "--shards",
+    "1"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.037897083999999914
+}

@@ -1,0 +1,15 @@
+{
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "-p",
+    "stream-poc",
+    "--locked",
+    "--jobs",
+    "4"
+  ],
+  "returncode": 0,
+  "stderr": "   Compiling poc-storage v0.1.0 (/Users/danielgerlag/dev/light-stream/poc/storage)\n   Compiling stream-poc v0.1.0 (/Users/danielgerlag/dev/light-stream/poc/runner)\n    Finished `release` profile [optimized + debuginfo] target(s) in 4.72s\n",
+  "stdout": ""
+}

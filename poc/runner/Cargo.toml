@@ -1,0 +1,19 @@
+[package]
+name = "stream-poc"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+fs2 = "0.4"
+poc-common = { path = "../common" }
+poc-storage = { path = "../storage" }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[[bin]]
+name = "stream-poc"
+path = "src/main.rs"

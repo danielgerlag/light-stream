@@ -1,0 +1,59 @@
+{
+  "audit_seconds": [
+    0.00321125,
+    0.003420542,
+    0.004073375
+  ],
+  "bench": {
+    "batches": 53,
+    "elapsed_seconds": 2.010741125,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 75941.375,
+      "p50": 36564.0,
+      "p95": 42748.0,
+      "p99": 75941.375
+    },
+    "mib_per_second": 3.2948050435880947,
+    "payload_bytes": 6946816,
+    "per_shard": [
+      {
+        "batches": 53,
+        "digest": 12539833157781346465,
+        "first_sequence": 0,
+        "last_sequence": 52,
+        "payload_bytes": 6946816,
+        "records": 6784
+      }
+    ],
+    "records": 6784,
+    "records_per_second": 3373.880364634209,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 128,
+    "name": "r3-s1-b128-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 1
+  },
+  "disk": {
+    "allocated_bytes": 22843392,
+    "file_bytes": 20850654,
+    "files": 15
+  },
+  "engine": "segment",
+  "peak_summed_node_rss_bytes": 25935872,
+  "reopen_seconds": [
+    0.00447425,
+    0.005256416,
+    0.011362458
+  ],
+  "repeat": 2,
+  "retention_from": 26,
+  "source": "trials/r3-s1-b128-z1024-segment-r2/bench.json",
+  "trial": "r3-s1-b128-z1024-segment-r2",
+  "verdict": "VERIFIED"
+}

@@ -1,0 +1,5 @@
+{
+  "oracle_exit": 1,
+  "predicate": "an acknowledgement for an unsupported result is rejected",
+  "verdict": "PASS"
+}

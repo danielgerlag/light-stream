@@ -1,0 +1,17 @@
+{
+  "light-stream-testkit": {
+    "bytes": 4314264,
+    "path": "target/release/light-stream-testkit",
+    "sha256": "77696b7799662387e18b4ecee518ff7e6840fd4f9da0d180fdf7d762a76ffa2b"
+  },
+  "light-streamctl": {
+    "bytes": 4819760,
+    "path": "target/release/light-streamctl",
+    "sha256": "30fc28171b58078c055ec8136fab8bba722b508211de37fd85b3947fefab74ac"
+  },
+  "light-streamd": {
+    "bytes": 28921488,
+    "path": "target/release/light-streamd",
+    "sha256": "136fa447d353c7cc5aa6eb62f12568a6c08928e7d9d852021944fd6918e3b3d6"
+  }
+}

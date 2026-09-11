@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T03:30:04.937526+00:00",
+  "error": "response-drop proxy observed no application response",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

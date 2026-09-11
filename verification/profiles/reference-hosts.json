@@ -1,0 +1,27 @@
+{
+  "name": "reference-hosts",
+  "claim": "Required before independent-host HA or capacity claims.",
+  "nodes": 3,
+  "independent_failure_domains": true,
+  "node": {
+    "cpus": 8,
+    "memory_gib": 16,
+    "storage": "local NVMe",
+    "network_gbit": 10
+  },
+  "driver": "separate adequately provisioned host",
+  "capacity": {
+    "scheduled_records_per_second": 50000,
+    "minimum_successful_records_per_second": 49500,
+    "record_bytes": 1024,
+    "duration_seconds": 3600,
+    "groups": 8,
+    "concurrent_readers": true,
+    "continuous_retention": true,
+    "p99_ms": 150
+  },
+  "startup_seconds": 1,
+  "idle_rss_mib": 128,
+  "compressed_linux_image_mib": 50,
+  "status": "BLOCKED_UNTIL_APPROVED_HOSTS_EXIST"
+}

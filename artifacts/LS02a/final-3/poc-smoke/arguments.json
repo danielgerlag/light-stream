@@ -1,0 +1,12 @@
+{
+  "binary": "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+  "engines": "segment,redb,fjall,rocksdb",
+  "keep_data": false,
+  "matrix": "smoke",
+  "max_mib": 128,
+  "output": "/Users/danielgerlag/dev/light-stream/artifacts/LS02a/final-3/poc-smoke",
+  "repeats": 1,
+  "seconds": 2,
+  "seed": 73191,
+  "skip_build": false
+}

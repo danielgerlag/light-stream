@@ -1,0 +1,5 @@
+{
+  "verdict": "BLOCKED_NO_GIT_REPOSITORY",
+  "reason": "The workspace is not a Git repository. LS01 did not initialize one or claim publication."
+}
+

@@ -1,0 +1,2 @@
+{"record_count": 2, "stage": "before_failover"}
+{"record_count": 10, "stage": "after_full_restart"}

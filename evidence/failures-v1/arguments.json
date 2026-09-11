@@ -1,0 +1,12 @@
+{
+  "binary": "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+  "engines": "fjall,rocksdb,redb,segment",
+  "keep_data": false,
+  "matrix": "failure",
+  "max_mib": 128,
+  "output": "evidence/failures-v1",
+  "repeats": 3,
+  "seconds": 2,
+  "seed": 73191,
+  "skip_build": false
+}

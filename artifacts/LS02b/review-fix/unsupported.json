@@ -1,0 +1,6 @@
+{
+  "independent_hosts": "BLOCKED",
+  "ls03_plus": "UNSUPPORTED",
+  "secured_mode": "UNSUPPORTED_LS08",
+  "snapshot_after_purge": "UNSUPPORTED_LS06"
+}

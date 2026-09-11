@@ -1,0 +1,83 @@
+{
+  "audit_seconds": [
+    0.022919042,
+    0.022406375,
+    0.022676875
+  ],
+  "bench": {
+    "batches": 377,
+    "elapsed_seconds": 3.023387666,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 45914.5,
+      "p50": 31882.624999999996,
+      "p95": 39809.041000000005,
+      "p99": 42918.291999999994
+    },
+    "mib_per_second": 15.586820218244549,
+    "payload_bytes": 49414144,
+    "per_shard": [
+      {
+        "batches": 95,
+        "digest": 16471442526003016210,
+        "first_sequence": 0,
+        "last_sequence": 94,
+        "payload_bytes": 12451840,
+        "records": 12160
+      },
+      {
+        "batches": 95,
+        "digest": 9821581706890567244,
+        "first_sequence": 0,
+        "last_sequence": 94,
+        "payload_bytes": 12451840,
+        "records": 12160
+      },
+      {
+        "batches": 95,
+        "digest": 3035970220749383674,
+        "first_sequence": 0,
+        "last_sequence": 94,
+        "payload_bytes": 12451840,
+        "records": 12160
+      },
+      {
+        "batches": 92,
+        "digest": 520631756957351832,
+        "first_sequence": 0,
+        "last_sequence": 91,
+        "payload_bytes": 12058624,
+        "records": 11776
+      }
+    ],
+    "records": 48256,
+    "records_per_second": 15960.903903482418,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 128,
+    "name": "r3-s4-b128-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 4
+  },
+  "disk": {
+    "allocated_bytes": 149778432,
+    "file_bytes": 149446051,
+    "files": 147
+  },
+  "engine": "rocksdb",
+  "peak_summed_node_rss_bytes": 195231744,
+  "reopen_seconds": [
+    0.255178167,
+    0.250926917,
+    0.234043208
+  ],
+  "repeat": 3,
+  "retention_from": 46,
+  "source": "trials/r3-s4-b128-z1024-rocksdb-r3/bench.json",
+  "trial": "r3-s4-b128-z1024-rocksdb-r3",
+  "verdict": "VERIFIED"
+}

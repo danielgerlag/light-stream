@@ -1,0 +1,41 @@
+{
+  "commands": [
+    {
+      "command": "cargo fmt --all -- --check",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo test --workspace",
+      "result": "PASS"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "result": "FAIL_BLOCKED_BY_OUT_OF_SCOPE_POC",
+      "detail": "poc/storage/src/redb_store.rs:55 triggers clippy::items-after-test-module because impl Backend for Redb starts at line 70. The LS01 scope forbids modifying poc/ implementation."
+    },
+    {
+      "command": "cargo clippy -p light-stream-core -p light-stream-proto -p light-stream-server -p light-stream-client -p light-stream-cli -p light-stream-testkit --all-targets -- -D warnings",
+      "result": "PASS"
+    },
+    {
+      "command": "LIGHT_STREAM_BUILD_REVISION=9eef934e15359a6ad470e26aa53027b739e5b70e789c31a573136315a854eba0 cargo build --release -p light-stream-server -p light-stream-cli -p light-stream-testkit",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 scripts/verify.py --phase LS01 --profile local --security all --artifacts artifacts/LS01/full-verified",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 scripts/verify.py --phase LS01 --scenario health-capabilities --profile local --artifacts artifacts/LS01/skill-health",
+      "result": "PASS"
+    },
+    {
+      "command": "python3 scripts/verify.py --suite e2e --profile local --security all --artifacts artifacts/LS01/e2e-suite",
+      "result": "PASS"
+    }
+  ],
+  "publication": "BLOCKED_NO_GIT_REPOSITORY",
+  "independent_host": "BLOCKED",
+  "independent_security_review": "NOT_REQUESTED"
+}
+

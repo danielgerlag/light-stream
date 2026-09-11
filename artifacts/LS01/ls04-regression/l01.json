@@ -1,0 +1,10 @@
+{
+  "poc": {
+    "completed": 8,
+    "finished_at": "2026-09-11T22:46:56.922364+00:00",
+    "verdict": "VERIFIED"
+  },
+  "production_feature_on_base": "UNSUPPORTED",
+  "stdout": "[1/8] smoke-r3 segment repeat=1\n  486 records/s; persisted audit matched\n[2/8] smoke-r1 rocksdb repeat=1\n  3943 records/s; persisted audit matched\n[3/8] smoke-r1 redb repeat=1\n  1619 records/s; persisted audit matched\n[4/8] smoke-r1 segment repeat=1\n  1274 records/s; persisted audit matched\n[5/8] smoke-r3 redb repeat=1\n  796 records/s; persisted audit matched\n[6/8] smoke-r3 rocksdb repeat=1\n  1428 records/s; persisted audit matched\n[7/8] smoke-r1 fjall repeat=1\n  4244 records/s; persisted audit matched\n[8/8] smoke-r3 fjall repeat=1\n  2359 records/s; persisted audit matched\n",
+  "verdict": "PASS"
+}

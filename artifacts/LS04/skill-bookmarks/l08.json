@@ -1,0 +1,57 @@
+{
+  "bookmark": {
+    "id": "c1be5bf1-beec-e806-e2a6-f330035657b2",
+    "lifecycle": "available",
+    "name": "two-partition-boundary",
+    "publication": 1,
+    "vector": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "positions": [
+        {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 3,
+          "partition": {
+            "partition": 0,
+            "stream": "15744395-661e-46a3-9c04-0ef701aa9be7"
+          }
+        },
+        {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 0,
+          "partition": {
+            "partition": 1,
+            "stream": "15744395-661e-46a3-9c04-0ef701aa9be7"
+          }
+        }
+      ],
+      "stream": "15744395-661e-46a3-9c04-0ef701aa9be7"
+    }
+  },
+  "consistent_cut_claim": false,
+  "future_offset_rejection": {
+    "command": "request",
+    "error": {
+      "code": "invalid_range",
+      "detail": {
+        "code": "invalid_range",
+        "reason": "stream bookmark offset 1 is past partition 1 tail 0"
+      },
+      "message": "invalid committed range: stream bookmark offset 1 is past partition 1 tail 0"
+    },
+    "ok": false
+  },
+  "incomplete_vector_rejection": {
+    "command": "request",
+    "error": {
+      "code": "invalid_range",
+      "detail": {
+        "code": "invalid_range",
+        "reason": "stream bookmark must contain one position for every stream partition"
+      },
+      "message": "invalid committed range: stream bookmark must contain one position for every stream partition"
+    },
+    "ok": false
+  },
+  "positions_are_independent": true,
+  "verdict": "PASS"
+}

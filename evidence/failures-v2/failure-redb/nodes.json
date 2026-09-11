@@ -1,0 +1,58 @@
+[
+  {
+    "address": "127.0.0.1:57736",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/5bbfc28568674ebea9c8b6834c728303/failure-redb/follower-0",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "follower-0",
+    "pid": 88555,
+    "ready_seconds": 0.09677054099999971
+  },
+  {
+    "address": "127.0.0.1:57737",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/5bbfc28568674ebea9c8b6834c728303/failure-redb/follower-1",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "follower-1",
+    "pid": 88557,
+    "ready_seconds": 0.07865508400000021
+  },
+  {
+    "address": "127.0.0.1:57738",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/5bbfc28568674ebea9c8b6834c728303/failure-redb/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1",
+      "--peers",
+      "127.0.0.1:57736,127.0.0.1:57737"
+    ],
+    "label": "leader",
+    "pid": 88559,
+    "ready_seconds": 0.08016808300000022
+  }
+]

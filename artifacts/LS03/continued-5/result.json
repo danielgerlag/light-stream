@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T21:14:22.228016+00:00",
+  "error": "ls03-node-1-initial exited before readiness: error: unexpected argument '--group-payload-budget-bytes' found\n\nUsage: light-streamd --data-dir <DATA_DIR> --public-listen <PUBLIC_LISTEN> --peer-listen <PEER_LISTEN> --security-mode <SECURITY_MODE> --node-id <NODE_ID> --advertise-public-uri <ADVERTISE_PUBLIC_URI> --advertise-peer-uri <ADVERTISE_PEER_URI> --max-data-groups <MAX_DATA_GROUPS> --max-streams <MAX_STREAMS> --max-partitions-per-stream <MAX_PARTITIONS_PER_STREAM>\n\nFor more information, try '--help'.\n",
+  "scenario": "all",
+  "verdict": "FAIL"
+}

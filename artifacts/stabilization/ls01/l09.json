@@ -1,0 +1,6 @@
+{
+  "child_exit": 1,
+  "retained_data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/stabilization/ls01/diagnostics/failed-child-data",
+  "retained_sentinel": "/Users/danielgerlag/dev/light-stream/artifacts/stabilization/ls01/diagnostics/failed-child-data/retain-me.txt",
+  "verdict": "PASS"
+}

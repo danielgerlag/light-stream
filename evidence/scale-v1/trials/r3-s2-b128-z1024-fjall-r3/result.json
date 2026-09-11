@@ -1,0 +1,67 @@
+{
+  "audit_seconds": [
+    0.029296291,
+    0.029504541,
+    0.028999542
+  ],
+  "bench": {
+    "batches": 558,
+    "elapsed_seconds": 5.015376208,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 155785.125,
+      "p50": 16058.541,
+      "p95": 23248.791,
+      "p99": 29716.833000000002
+    },
+    "mib_per_second": 13.907231901914384,
+    "payload_bytes": 73138176,
+    "per_shard": [
+      {
+        "batches": 278,
+        "digest": 17385943632663178050,
+        "first_sequence": 0,
+        "last_sequence": 277,
+        "payload_bytes": 36438016,
+        "records": 35584
+      },
+      {
+        "batches": 280,
+        "digest": 2133585673671534978,
+        "first_sequence": 0,
+        "last_sequence": 279,
+        "payload_bytes": 36700160,
+        "records": 35840
+      }
+    ],
+    "records": 71424,
+    "records_per_second": 14241.00546756033,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 128,
+    "name": "r3-s2-b128-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 2
+  },
+  "disk": {
+    "allocated_bytes": 421625856,
+    "file_bytes": 421442550,
+    "files": 69
+  },
+  "engine": "fjall",
+  "peak_summed_node_rss_bytes": 283852800,
+  "reopen_seconds": [
+    0.031137917,
+    0.030958708,
+    0.030590708
+  ],
+  "repeat": 3,
+  "retention_from": 139,
+  "source": "trials/r3-s2-b128-z1024-fjall-r3/bench.json",
+  "trial": "r3-s2-b128-z1024-fjall-r3",
+  "verdict": "VERIFIED"
+}

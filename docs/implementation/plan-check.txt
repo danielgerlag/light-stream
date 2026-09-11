@@ -1,0 +1,11 @@
+Establish contracts and the verification runner (LS01)  boxes=25  files=2 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=2 merge=1
+Implement the durable Raft vertical slice (LS02)  boxes=22  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=0 merge=1
+Distribute stream partitions across bounded groups (LS03)  boxes=22  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=0 merge=1
+Add immutable named bookmarks and recent listing (LS04)  boxes=24  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=2 merge=1
+Implement retention and bounded replay protection (LS05)  boxes=24  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=2 merge=1
+Complete recovery, catch-up, and safe membership changes (LS06)  boxes=22  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=0 merge=1
+Finish batching, client workflows, and mutable progress (LS07)  boxes=24  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=2 merge=1
+Implement optional runtime security (LS08)  boxes=24  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=2 merge=1
+Package and operate the actual broker (LS09)  boxes=24  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=2 merge=1
+Complete end-to-end and independent-host acceptance (LS10)  boxes=22  files=1 build=4 you-see=1 verify-unit=1 verify-live=10 verify-perf=4 review-gate=0 merge=1
+10 PR sections, 0 problems

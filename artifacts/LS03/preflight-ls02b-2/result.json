@@ -1,0 +1,6 @@
+{
+  "completed_at": "2026-09-11T14:14:31.676114+00:00",
+  "error": "source changed during the release build",
+  "scenario": "three-voter",
+  "verdict": "FAIL"
+}

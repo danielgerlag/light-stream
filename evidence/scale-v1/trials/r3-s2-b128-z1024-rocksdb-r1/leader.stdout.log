@@ -1,0 +1,1 @@
+{"address":"127.0.0.1:53686","engine":"rocksdb","leader":true,"protocol":"fixed-leader-durable-append","ready":true,"shards":2}

@@ -1,0 +1,117 @@
+{
+  "groups": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "leaders": {
+    "2": 1,
+    "3": 1,
+    "4": 1,
+    "5": 1
+  },
+  "streams": [
+    {
+      "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+      "lifecycle": "active",
+      "name": "orders",
+      "placements": [
+        {
+          "group": 3,
+          "partition": 0
+        },
+        {
+          "group": 4,
+          "partition": 1
+        },
+        {
+          "group": 5,
+          "partition": 2
+        },
+        {
+          "group": 2,
+          "partition": 3
+        }
+      ],
+      "ready_groups": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "revision": 7,
+      "stream": "e17ec836-a1c8-4b54-ad1e-30bee60b4b11"
+    },
+    {
+      "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+      "lifecycle": "active",
+      "name": "events",
+      "placements": [
+        {
+          "group": 3,
+          "partition": 0
+        },
+        {
+          "group": 4,
+          "partition": 1
+        }
+      ],
+      "ready_groups": [
+        3,
+        4
+      ],
+      "revision": 11,
+      "stream": "5da154e4-0024-4aab-9f88-bc96476895c6"
+    },
+    {
+      "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+      "lifecycle": "active",
+      "name": "metrics",
+      "placements": [
+        {
+          "group": 5,
+          "partition": 0
+        }
+      ],
+      "ready_groups": [
+        5
+      ],
+      "revision": 14,
+      "stream": "c88da378-591f-4532-90c7-95f59646aa2c"
+    },
+    {
+      "cluster": "9c5f74d6-8090-7f1a-7d74-bb1d573e1b0a",
+      "lifecycle": "active",
+      "name": "orders",
+      "placements": [
+        {
+          "group": 2,
+          "partition": 0
+        },
+        {
+          "group": 3,
+          "partition": 1
+        },
+        {
+          "group": 4,
+          "partition": 2
+        },
+        {
+          "group": 5,
+          "partition": 3
+        }
+      ],
+      "ready_groups": [
+        2,
+        3,
+        4,
+        5
+      ],
+      "revision": 22,
+      "stream": "6349792d-2127-444d-9c5b-506629407e24"
+    }
+  ],
+  "verdict": "PASS"
+}

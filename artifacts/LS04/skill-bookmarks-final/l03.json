@@ -1,0 +1,218 @@
+{
+  "bookmark_after_crash": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 3,
+      "partition": {
+        "partition": 0,
+        "stream": "d2dd810f-fb26-4515-947e-d4b6a892c173"
+      }
+    },
+    "id": "a95a9d4c-4daa-c06d-9e0c-42d10d448180",
+    "lifecycle": "available",
+    "name": "response-lost",
+    "publication": 2
+  },
+  "combined_publish_and_bookmark": "ATOMIC_STATE_MACHINE_WRITE",
+  "crash_memberships": [
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 3
+    }
+  ],
+  "name_conflict_rejection": {
+    "command": "request",
+    "error": {
+      "code": "bookmark_name_conflict",
+      "detail": {
+        "code": "bookmark_name_conflict"
+      },
+      "message": "bookmark name is already active"
+    },
+    "ok": false
+  },
+  "records_after_crash": [
+    {
+      "offset": 0,
+      "payload": [
+        98,
+        101,
+        102,
+        111,
+        114,
+        101,
+        45,
+        98,
+        111,
+        117,
+        110,
+        100,
+        97,
+        114,
+        121
+      ]
+    },
+    {
+      "offset": 1,
+      "payload": [
+        97,
+        102,
+        116,
+        101,
+        114,
+        45,
+        98,
+        111,
+        117,
+        110,
+        100,
+        97,
+        114,
+        121
+      ]
+    },
+    {
+      "offset": 2,
+      "payload": [
+        108,
+        111,
+        115,
+        116,
+        45,
+        114,
+        101,
+        115,
+        112,
+        111,
+        110,
+        115,
+        101
+      ]
+    }
+  ],
+  "tail_after_conflict": {
+    "next_offset": 3,
+    "partition": {
+      "partition": 0,
+      "stream": "d2dd810f-fb26-4515-947e-d4b6a892c173"
+    },
+    "records": []
+  },
+  "verdict": "PASS"
+}

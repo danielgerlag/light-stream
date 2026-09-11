@@ -1,0 +1,2 @@
+case,engine,trials,records_per_second_median,records_per_second_min,records_per_second_max,mib_per_second_median,trial_p99_us_median,elapsed_seconds_min,batches_min,node_rss_mib_peak,verdict
+r3-s8-b512-z1024-sustained,fjall,1,68650.77047531992,68650.77047531992,68650.77047531992,67.04176804230461,234109.625,30.12301225,4039,1592.296875,VERIFIED

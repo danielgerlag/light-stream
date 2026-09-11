@@ -1,0 +1,17 @@
+[package]
+name = "poc-storage"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+crc32fast.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+poc-common = { path = "../common" }
+fs2 = "0.4.3"
+redb = "4.2.0"
+fjall = { version = "3.1.10", default-features = false }
+rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime"] }

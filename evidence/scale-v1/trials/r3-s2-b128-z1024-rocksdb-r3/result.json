@@ -1,0 +1,67 @@
+{
+  "audit_seconds": [
+    0.031782792,
+    0.029855208,
+    0.033534875
+  ],
+  "bench": {
+    "batches": 440,
+    "elapsed_seconds": 5.016305666,
+    "errors": 0,
+    "latency_definition": "microseconds from sending each pre-generated binary request to its matching acknowledgement; nearest-rank percentiles",
+    "latency_sample_order": "shard index, then request sequence",
+    "latency_us": {
+      "max": 41280.292,
+      "p50": 23048.167,
+      "p95": 26772.833,
+      "p99": 34019.792
+    },
+    "mib_per_second": 10.964244139424018,
+    "payload_bytes": 57671680,
+    "per_shard": [
+      {
+        "batches": 220,
+        "digest": 3859168935104680365,
+        "first_sequence": 0,
+        "last_sequence": 219,
+        "payload_bytes": 28835840,
+        "records": 28160
+      },
+      {
+        "batches": 220,
+        "digest": 361657181170018273,
+        "first_sequence": 0,
+        "last_sequence": 219,
+        "payload_bytes": 28835840,
+        "records": 28160
+      }
+    ],
+    "records": 56320,
+    "records_per_second": 11227.385998770194,
+    "throughput_definition": "acknowledged records or payload MiB / wall seconds from synchronized release to final acknowledgement; includes payload generation and encoding, excludes connection setup"
+  },
+  "case": {
+    "batch_records": 128,
+    "name": "r3-s2-b128-z1024",
+    "record_bytes": 1024,
+    "replicas": 3,
+    "shards": 2
+  },
+  "disk": {
+    "allocated_bytes": 173887488,
+    "file_bytes": 173726279,
+    "files": 75
+  },
+  "engine": "rocksdb",
+  "peak_summed_node_rss_bytes": 214958080,
+  "reopen_seconds": [
+    0.173778833,
+    0.186648125,
+    0.180239875
+  ],
+  "repeat": 3,
+  "retention_from": 110,
+  "source": "trials/r3-s2-b128-z1024-rocksdb-r3/bench.json",
+  "trial": "r3-s2-b128-z1024-rocksdb-r3",
+  "verdict": "VERIFIED"
+}

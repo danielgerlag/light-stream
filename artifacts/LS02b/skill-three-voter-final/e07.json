@@ -1,0 +1,72 @@
+{
+  "restart_catch_up": {
+    "follower": {
+      "cluster_committed_index": 10,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 10,
+      "last_log_index": 10,
+      "local_committed_index": 10,
+      "local_role": "follower",
+      "purged_index": null,
+      "replication": [],
+      "snapshot_index": null
+    },
+    "leader": {
+      "cluster_committed_index": 10,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 10,
+      "last_log_index": 10,
+      "local_committed_index": 10,
+      "local_role": "leader",
+      "purged_index": null,
+      "replication": [
+        {
+          "matched_log_index": null,
+          "target_node_id": 1
+        },
+        {
+          "matched_log_index": 10,
+          "target_node_id": 2
+        },
+        {
+          "matched_log_index": 10,
+          "target_node_id": 3
+        }
+      ],
+      "snapshot_index": null
+    }
+  },
+  "verdict": "PASS"
+}

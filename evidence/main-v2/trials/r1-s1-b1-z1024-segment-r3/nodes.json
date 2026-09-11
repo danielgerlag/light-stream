@@ -1,0 +1,20 @@
+[
+  {
+    "address": "127.0.0.1:52237",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "segment",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/a73594fd8af6441f816f78f0e4e76219/r1-s1-b1-z1024-segment-r3/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "leader",
+    "pid": 96798,
+    "ready_seconds": 0.04876662499999895
+  }
+]

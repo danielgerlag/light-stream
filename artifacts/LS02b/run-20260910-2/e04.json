@@ -1,0 +1,5 @@
+{
+  "direct_no_retry_refusal": true,
+  "old_leader_tcp_isolation": "NOT_IMPLEMENTED",
+  "verdict": "PARTIAL"
+}

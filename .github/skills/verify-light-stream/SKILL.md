@@ -1,0 +1,88 @@
+---
+name: verify-light-stream
+description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS04, including bookmarks and cursor vectors.
+---
+
+# Verify Light Stream
+
+Use the repository root as the working directory.
+
+Read `feature-map.json` and select one feature. Use a new artifact directory for every run because the verifier refuses to overwrite evidence.
+
+Run the mapped command exactly, replacing only the final artifact directory with a path that does not exist.
+
+For the full LS01 phase, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS01 \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS01/skill-full
+```
+
+For the implemented end-to-end suite, run:
+
+```sh
+python3 scripts/verify.py \
+  --suite e2e \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS01/skill-e2e
+```
+
+For the LS02a durable journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS02a \
+  --profile local \
+  --artifacts artifacts/LS02a/skill-full
+```
+
+For the LS02b three-voter journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS02b \
+  --scenario three-voter \
+  --profile local \
+  --artifacts artifacts/LS02b/skill-three-voter
+```
+
+For the LS03 bounded-group journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS03 \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS03/skill-bounded-groups
+```
+
+For the LS04 bookmark journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS04 \
+  --scenario bookmarks \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS04/skill-bookmarks-final
+```
+
+Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
+
+For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
+
+For LS02b, inspect `ls02b-summary.json` and `e02.json` through `e09.json`. Confirm exact committed and effective memberships for both groups on every recorded node. Confirm empty learner sets and typed data-leader hints that match diagnostics and topology. Confirm that catch-up includes exact leader replication progress for a non-leader target.
+
+Inspect `e04.json` and `e05.json`. Confirm that the live old leader returns no publish acknowledgement and refuses fetch and receipt calls after the other two voters stop. Treat the selective-partition case with a healthy remote majority as `NOT_TESTED_LOCAL`.
+
+Inspect `e09.json`. Confirm that the verifier drops the first response, kills the diagnosed data leader, elects a different leader, reads the exact receipt before retry, and receives the same range from the retry and after full restart. `e08.json` must report `UNSUPPORTED_LS06`.
+
+For LS03, inspect `partition-journey.json` and `l02.json` through `l10.json`. Confirm five databases per node, four bounded data groups, partition routes spanning groups 2 through 5, byte-for-byte reads, response-loss create idempotency, quota rejection, name reuse with a new stream identity, stale-route refresh, group-local delay isolation, and full-cluster restart. `l04.json` records single-process multi-group recovery as `DEFERRED_LS06`.
+
+For LS04, inspect `bookmark-journey.json` and `l01.json` through `l10.json`. Confirm atomic publish-plus-bookmark, exact resume, response-loss retry with one bookmark ID, backdated publication order, stable pagination, terminal deletion and name reuse, independent stream cursor vectors, a last-100 lookup below 100 ms over 10,000 records, and full-cluster restart. `l10.json` records partial-node failover as `DEFERRED_LS06`.
+
+Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report secured mode as `UNSUPPORTED_LS08`. Report independent-host verification as `BLOCKED`.

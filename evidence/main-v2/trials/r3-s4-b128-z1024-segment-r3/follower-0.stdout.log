@@ -1,0 +1,1 @@
+{"address":"127.0.0.1:51744","engine":"segment","leader":false,"protocol":"fixed-leader-durable-append","ready":true,"shards":4}

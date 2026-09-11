@@ -1,0 +1,22 @@
+[
+  {
+    "engine": "fjall",
+    "explicit_zero_ack_quorum_rejection": true,
+    "prefix_digest_including_extra_tail": true
+  },
+  {
+    "engine": "rocksdb",
+    "explicit_zero_ack_quorum_rejection": true,
+    "prefix_digest_including_extra_tail": true
+  },
+  {
+    "engine": "redb",
+    "explicit_zero_ack_quorum_rejection": true,
+    "prefix_digest_including_extra_tail": true
+  },
+  {
+    "engine": "segment",
+    "explicit_zero_ack_quorum_rejection": true,
+    "prefix_digest_including_extra_tail": true
+  }
+]

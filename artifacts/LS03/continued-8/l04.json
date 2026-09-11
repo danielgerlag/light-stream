@@ -1,0 +1,7 @@
+{
+  "failed_leader": 1,
+  "request_id": "ca7675b9-574c-6db7-79b6-852eb9dc2836",
+  "response_dropped": true,
+  "stream_id": "449ba09b-ff0a-4091-8f40-dd305d96c096",
+  "verdict": "PASS"
+}

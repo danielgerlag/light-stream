@@ -1,0 +1,47 @@
+{
+  "receipt": {
+    "bookmark": {
+      "cursor": {
+        "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+        "next_offset": 1,
+        "partition": {
+          "partition": 0,
+          "stream": "0fc8f15a-82a9-4ec3-837d-c06ed04feda5"
+        }
+      },
+      "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+      "lifecycle": "available",
+      "name": "import-boundary",
+      "publication": 1
+    },
+    "range": {
+      "count": 1,
+      "first": 0,
+      "partition": {
+        "partition": 0,
+        "stream": "0fc8f15a-82a9-4ec3-837d-c06ed04feda5"
+      }
+    },
+    "request": {
+      "principal": "verify-ls04-10101",
+      "sequence": 1,
+      "session": "d491d419-74ab-6e06-1243-94f8f3475075"
+    }
+  },
+  "resolved": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "0fc8f15a-82a9-4ec3-837d-c06ed04feda5"
+      }
+    },
+    "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+    "lifecycle": "available",
+    "name": "import-boundary",
+    "publication": 1
+  },
+  "resumed_sha256": "b5f466a168731190b203408637b1b68f2ee167d75ba72f85d08c02d3a1776a6e",
+  "verdict": "PASS"
+}

@@ -1,0 +1,6 @@
+{
+  "predicate": "embedded build revision matches the pre-build source fingerprint",
+  "revision": "fb4736118d3974b2f9ab859fabdb059927afe0cbae5bade3d94f70c353bff4e6",
+  "server_revision": "fb4736118d3974b2f9ab859fabdb059927afe0cbae5bade3d94f70c353bff4e6",
+  "verdict": "PASS"
+}

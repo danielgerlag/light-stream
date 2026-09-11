@@ -1,0 +1,22 @@
+{
+  "error": {
+    "command": "request",
+    "error": {
+      "code": "quorum_unavailable",
+      "detail": {
+        "code": "quorum_unavailable",
+        "group": "data",
+        "outcome": "ambiguous_commit",
+        "request": {
+          "principal": "verify-ls02b-10101",
+          "sequence": 901,
+          "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+        }
+      },
+      "message": "the Data group has no available quorum"
+    },
+    "ok": false
+  },
+  "successful_acknowledgements_after_two_voters_stopped": 0,
+  "verdict": "PASS"
+}

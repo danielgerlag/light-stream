@@ -1,0 +1,32 @@
+target/release/stream-poc:
+(__TEXT,__text) section
+__ZN7rocksdb17PosixWritableFile5FsyncERKNS_9IOOptionsEPNS_14IODebugContextE:
+000000010037e980	sub	sp, sp, #0x50
+000000010037e984	stp	x22, x21, [sp, #0x20]
+000000010037e988	stp	x20, x19, [sp, #0x30]
+000000010037e98c	stp	x29, x30, [sp, #0x40]
+000000010037e990	add	x29, sp, #0x40
+000000010037e994	mov	x20, x0
+000000010037e998	mov	x19, x8
+000000010037e99c	ldr	w0, [x0, #0x44]
+000000010037e9a0	mov	w1, #0x33
+000000010037e9a4	bl	0x100769238 ; symbol stub for: _fcntl
+000000010037e9a8	tbnz	w0, #0x1f, 0x10037e9cc
+000000010037e9ac	strh	wzr, [x19]
+000000010037e9b0	str	xzr, [x19, #0x8]
+000000010037e9b4	stur	wzr, [x19, #0x2]
+000000010037e9b8	ldp	x29, x30, [sp, #0x40]
+000000010037e9bc	ldp	x20, x19, [sp, #0x30]
+000000010037e9c0	ldp	x22, x21, [sp, #0x20]
+000000010037e9c4	add	sp, sp, #0x50
+000000010037e9c8	ret
+000000010037e9cc	mov	w0, #0x20
+000000010037e9d0	bl	0x100769010 ; symbol stub for: __Znwm
+000000010037e9d4	mov	x21, x0
+000000010037e9d8	str	x0, [sp, #0x8]
+000000010037e9dc	adrp	x8, 1107 ; 0x1007d1000
+000000010037e9e0	ldr	q0, [x8, #0xbc0]
+000000010037e9e4	adrp	x8, 1191 ; 0x100825000
+000000010037e9e8	add	x8, x8, #0xb94 ; literal pool for: "while fcntl(F_FULLFSYNC)"
+000000010037e9ec	stur	q0, [sp, #0x10]
+000000010037e9f0	ldr	q0, [x8]

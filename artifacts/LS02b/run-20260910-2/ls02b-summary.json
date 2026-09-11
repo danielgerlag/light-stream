@@ -1,0 +1,200 @@
+{
+  "acknowledged_records": 6,
+  "bootstrap": {
+    "cluster": {
+      "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+      "control_group": 1,
+      "data_group": 2,
+      "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+      "stream_name": "bootstrap"
+    },
+    "command": "cluster-bootstrap",
+    "endpoint": "http://127.0.0.1:54709",
+    "ok": true
+  },
+  "cluster_id": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+  "initial_leader": 1,
+  "killed_leader_catch_up": {
+    "follower": {
+      "cluster_committed_index": 10,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 10,
+      "last_log_index": 10,
+      "local_committed_index": 10,
+      "local_role": "follower",
+      "purged_index": null,
+      "replication": [],
+      "snapshot_index": null
+    },
+    "leader": {
+      "cluster_committed_index": 10,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 10,
+      "last_log_index": 10,
+      "local_committed_index": 10,
+      "local_role": "leader",
+      "purged_index": null,
+      "replication": [
+        {
+          "matched_log_index": 10,
+          "target_node_id": 1
+        },
+        {
+          "matched_log_index": 10,
+          "target_node_id": 2
+        },
+        {
+          "matched_log_index": 10,
+          "target_node_id": 3
+        }
+      ],
+      "snapshot_index": null
+    }
+  },
+  "lost_response_retry": {
+    "command": "publish",
+    "endpoint": "http://127.0.0.1:54711",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 5,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls02b-10101",
+        "sequence": 6,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "new_leader": 2,
+  "receipt_after_full_restart": {
+    "command": "receipt",
+    "endpoint": "http://127.0.0.1:54711",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 5,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls02b-10101",
+        "sequence": 6,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "stream_id": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+  "suffix_catch_up": {
+    "follower": {
+      "cluster_committed_index": 12,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 12,
+      "last_log_index": 12,
+      "local_committed_index": 12,
+      "local_role": "follower",
+      "purged_index": null,
+      "replication": [],
+      "snapshot_index": null
+    },
+    "leader": {
+      "cluster_committed_index": 12,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 12,
+      "last_log_index": 12,
+      "local_committed_index": 12,
+      "local_role": "leader",
+      "purged_index": null,
+      "replication": [
+        {
+          "matched_log_index": 12,
+          "target_node_id": 1
+        },
+        {
+          "matched_log_index": 12,
+          "target_node_id": 2
+        },
+        {
+          "matched_log_index": 12,
+          "target_node_id": 3
+        }
+      ],
+      "snapshot_index": null
+    }
+  },
+  "verdict": "PASS"
+}

@@ -1,0 +1,12 @@
+{
+  "binary": "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+  "engines": "rocksdb",
+  "keep_data": false,
+  "matrix": "sustained",
+  "max_mib": 3072,
+  "output": "evidence/sustained-rocks-completion",
+  "repeats": 1,
+  "seconds": 30.0,
+  "seed": 73191,
+  "skip_build": false
+}

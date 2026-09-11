@@ -1,0 +1,6 @@
+{
+  "network_response_drop": false,
+  "receipt_after_full_restart": true,
+  "same_identity_retry": true,
+  "verdict": "PARTIAL"
+}

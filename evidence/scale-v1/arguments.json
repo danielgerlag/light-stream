@@ -1,0 +1,12 @@
+{
+  "binary": "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+  "engines": "fjall,rocksdb",
+  "keep_data": false,
+  "matrix": "scale",
+  "max_mib": 512,
+  "output": "evidence/scale-v1",
+  "repeats": 3,
+  "seconds": 5.0,
+  "seed": 73191,
+  "skip_build": false
+}

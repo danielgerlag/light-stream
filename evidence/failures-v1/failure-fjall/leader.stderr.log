@@ -1,0 +1,2 @@
+replication peer 127.0.0.1:53876 disabled; no reconnect or catch-up is attempted
+replication peer 127.0.0.1:53877 disabled; no reconnect or catch-up is attempted

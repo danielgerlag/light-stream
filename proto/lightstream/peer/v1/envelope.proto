@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package lightstream.peer.v1;
+
+message PeerEnvelope {
+  uint32 protocol_version = 1;
+  uint32 codec_version = 2;
+  string cluster_id = 3;
+  uint64 group_id = 4;
+  uint64 sender_node_id = 5;
+  uint64 target_node_id = 6;
+  bytes payload = 7;
+}
+
+message PeerRequest {
+  PeerEnvelope envelope = 1;
+}
+
+message PeerResponse {
+  PeerEnvelope envelope = 1;
+}
+
+service PeerService {
+  rpc AppendEntries(PeerRequest) returns (PeerResponse);
+  rpc Vote(PeerRequest) returns (PeerResponse);
+  rpc PreVote(PeerRequest) returns (PeerResponse);
+  rpc PrepareJoin(PeerRequest) returns (PeerResponse);
+  rpc Activate(PeerRequest) returns (PeerResponse);
+}

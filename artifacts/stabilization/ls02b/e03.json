@@ -1,0 +1,22 @@
+{
+  "elections": [
+    {
+      "leader": 1,
+      "stage": "initial"
+    },
+    {
+      "leader": 3,
+      "stage": "after_kill"
+    },
+    {
+      "isolated_old_leader": 3,
+      "leader": 2,
+      "stage": "during_directed_isolation"
+    },
+    {
+      "leader": 3,
+      "stage": "after_lost_response_kill"
+    }
+  ],
+  "verdict": "PASS"
+}

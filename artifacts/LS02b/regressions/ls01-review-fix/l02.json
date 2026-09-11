@@ -1,0 +1,149 @@
+{
+  "budget_ms": 100,
+  "cli": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "diagnostics",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "http://127.0.0.1:60214",
+    "health": {
+      "bootstrapped": false,
+      "cluster_id": null,
+      "peer_address": "http://127.0.0.1:60215",
+      "public_address": "http://127.0.0.1:60214",
+      "status": {
+        "ready": true,
+        "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true
+  },
+  "health_latency_ms": [
+    0.89725,
+    0.462583,
+    0.939792,
+    0.471584,
+    0.815083,
+    1.176542,
+    1.2650000000000001,
+    1.192458,
+    1.04175,
+    0.9808749999999999,
+    1.052083,
+    1.006708,
+    0.785083,
+    0.7255,
+    0.7535419999999999,
+    0.7518330000000001,
+    0.764416,
+    0.804667,
+    0.779416,
+    0.692875
+  ],
+  "health_p99_ms": 1.2650000000000001,
+  "process": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/regressions/ls01-review-fix/scratch/success/health",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure",
+      "--node-id",
+      "1"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS02b/regressions/ls01-review-fix/scratch/success/health",
+    "label": "health",
+    "peer_address": "127.0.0.1:60215",
+    "pid": 82911,
+    "public_address": "127.0.0.1:60214",
+    "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8"
+  },
+  "public_api_on_peer_port": {
+    "error": {
+      "code": "client_error",
+      "message": "request failed: code: 'Operation is not implemented or not supported'"
+    },
+    "ok": false
+  },
+  "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8",
+  "rust_client": {
+    "command": "health-samples",
+    "endpoint": "http://127.0.0.1:60214",
+    "entrypoint": "rust-client",
+    "health": {
+      "bootstrapped": false,
+      "cluster_id": null,
+      "peer_address": "http://127.0.0.1:60215",
+      "public_address": "http://127.0.0.1:60214",
+      "status": {
+        "ready": true,
+        "revision": "4863bf61947ac3501765f5eabe88a92540d448155aaf4d0fd9946ac8ed0426b8",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true,
+    "samples_ms": [
+      0.89725,
+      0.462583,
+      0.939792,
+      0.471584,
+      0.815083,
+      1.176542,
+      1.2650000000000001,
+      1.192458,
+      1.04175,
+      0.9808749999999999,
+      1.052083,
+      1.006708,
+      0.785083,
+      0.7255,
+      0.7535419999999999,
+      0.7518330000000001,
+      0.764416,
+      0.804667,
+      0.779416,
+      0.692875
+    ]
+  },
+  "verdict": "PASS"
+}

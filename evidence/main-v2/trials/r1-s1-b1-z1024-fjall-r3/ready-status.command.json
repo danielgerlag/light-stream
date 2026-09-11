@@ -1,0 +1,11 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "status",
+    "--address",
+    "127.0.0.1:52440"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.011116249999986394
+}

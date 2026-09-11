@@ -1,0 +1,58 @@
+[
+  {
+    "address": "127.0.0.1:53924",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "segment",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/69aa6c8614ab4cd6bd2b7577559f5a32/failure-segment/follower-0",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "follower-0",
+    "pid": 19186,
+    "ready_seconds": 0.048718250000000296
+  },
+  {
+    "address": "127.0.0.1:53925",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "segment",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/69aa6c8614ab4cd6bd2b7577559f5a32/failure-segment/follower-1",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1"
+    ],
+    "label": "follower-1",
+    "pid": 19187,
+    "ready_seconds": 0.04908866599999939
+  },
+  {
+    "address": "127.0.0.1:53926",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "segment",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/69aa6c8614ab4cd6bd2b7577559f5a32/failure-segment/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "1",
+      "--peers",
+      "127.0.0.1:53924,127.0.0.1:53925"
+    ],
+    "label": "leader",
+    "pid": 19188,
+    "ready_seconds": 0.05100070800000012
+  }
+]
