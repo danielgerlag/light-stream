@@ -1,0 +1,58 @@
+[
+  {
+    "address": "127.0.0.1:63891",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/9a76a4c78baa4cfeaee0cf876fdd2de5/smoke-r3-redb-r1/follower-0",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "follower-0",
+    "pid": 89888,
+    "ready_seconds": 0.12903429099999997
+  },
+  {
+    "address": "127.0.0.1:63892",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/9a76a4c78baa4cfeaee0cf876fdd2de5/smoke-r3-redb-r1/follower-1",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2"
+    ],
+    "label": "follower-1",
+    "pid": 89889,
+    "ready_seconds": 0.12990066600000016
+  },
+  {
+    "address": "127.0.0.1:63893",
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+      "node",
+      "--engine",
+      "redb",
+      "--dir",
+      "/Users/danielgerlag/dev/light-stream/.poc-data/9a76a4c78baa4cfeaee0cf876fdd2de5/smoke-r3-redb-r1/leader",
+      "--listen",
+      "127.0.0.1:0",
+      "--shards",
+      "2",
+      "--peers",
+      "127.0.0.1:63891,127.0.0.1:63892"
+    ],
+    "label": "leader",
+    "pid": 89890,
+    "ready_seconds": 0.1336913329999998
+  }
+]

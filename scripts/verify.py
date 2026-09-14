@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run release verification for LS01 through LS04 and retain evidence."""
+"""Run release verification for LS01 through LS05 and retain evidence."""
 
 import argparse
 import base64
@@ -30,6 +30,7 @@ KNOWN_SCENARIOS = {
     "three-voter",
     "bounded-groups",
     "bookmarks",
+    "retention-replay",
     "health-capabilities",
     "unsupported-publish",
     "process-isolation",
@@ -4663,6 +4664,936 @@ def run_ls04_scenario(artifacts, runner, binaries, revision, profile, seed):
                 node["server"].stop()
 
 
+def run_ls05_scenario(artifacts, runner, binaries, revision, profile, seed):
+    rng = random.Random(seed ^ 0x4C533035)
+    cluster = deterministic_uuid(rng)
+    bootstrap_stream = deterministic_uuid(rng)
+    stream_request = deterministic_uuid(rng)
+    producer_session = deterministic_uuid(rng)
+    replay_session = deterministic_uuid(rng)
+    retention_session = deterministic_uuid(rng)
+    floor_first_session = deterministic_uuid(rng)
+    limits = profile["ls05"]
+    nodes = {}
+    configs = {}
+    used_ports = set()
+
+    for node_id in (1, 2, 3):
+        public_port = free_port()
+        while public_port in used_ports:
+            public_port = free_port()
+        used_ports.add(public_port)
+        peer_port = free_port()
+        while peer_port in used_ports:
+            peer_port = free_port()
+        used_ports.add(peer_port)
+        configs[node_id] = {
+            "node_id": node_id,
+            "public_address": f"127.0.0.1:{public_port}",
+            "peer_address": f"127.0.0.1:{peer_port}",
+            "endpoint": f"http://127.0.0.1:{public_port}",
+            "peer_uri": f"http://127.0.0.1:{peer_port}",
+            "data_dir": artifacts / "scratch" / "success" / f"ls05-node-{node_id}",
+        }
+
+    def start_node(node_id, suffix):
+        config = configs[node_id]
+        server = OwnedServer(
+            binaries["light-streamd"],
+            config["data_dir"],
+            artifacts / "node-logs",
+            f"ls05-node-{node_id}-{suffix}",
+            node_id=node_id,
+            public_address=config["public_address"],
+            peer_address=config["peer_address"],
+            advertise_public_uri=config["endpoint"],
+            advertise_peer_uri=config["peer_uri"],
+            max_data_groups=1,
+            max_streams=8,
+            max_partitions_per_stream=4,
+        )
+        nodes[node_id] = {**config, "server": server}
+
+    def endpoints():
+        return [
+            nodes[node_id]["endpoint"]
+            for node_id in sorted(nodes)
+            if nodes[node_id]["server"].is_running()
+        ]
+
+    def cli(endpoint, arguments, label, expected=(0,), timeout=30):
+        command = cli_endpoint_command(
+            binaries["light-streamctl"],
+            endpoint,
+            seeds=endpoints(),
+            deadline_ms=20000,
+        ) + arguments
+        return parse_json_output(
+            runner.run(command, label, expected_codes=expected, timeout=timeout),
+            label,
+        )
+
+    def target(stream_id, partition):
+        return [
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream_id,
+            "--partition",
+            str(partition),
+        ]
+
+    def mutation(principal, session, sequence):
+        return [
+            "--principal",
+            principal,
+            "--mutation-session",
+            session,
+            "--sequence",
+            str(sequence),
+        ]
+
+    def publish(stream_id, partition, sequence, payload, label):
+        return cli(
+            nodes[1]["endpoint"],
+            [
+                "publish",
+                *target(stream_id, partition),
+                "--principal",
+                f"verify-ls05-{seed}",
+                "--session",
+                producer_session,
+                "--sequence",
+                str(sequence),
+                "--payload",
+                payload,
+            ],
+            label,
+        )["receipt"]
+
+    def fetch(stream_id, partition, offset, limit, label, expected=(0,)):
+        return cli(
+            nodes[2]["endpoint"],
+            [
+                "fetch",
+                *target(stream_id, partition),
+                "--offset",
+                str(offset),
+                "--limit",
+                str(limit),
+            ],
+            label,
+            expected=expected,
+        )
+
+    def advance(stream_id, partition, session, sequence, floor, label):
+        started = time.monotonic()
+        value = cli(
+            nodes[1]["endpoint"],
+            [
+                "retention",
+                "advance",
+                *target(stream_id, partition),
+                *mutation("retention-operator", session, sequence),
+                "--floor",
+                str(floor),
+            ],
+            label,
+        )
+        return value["retention"], time.monotonic() - started
+
+    def admit(
+        stream_id,
+        partition,
+        session,
+        sequence,
+        start,
+        end,
+        duration_ms,
+        max_bytes,
+        label,
+        expected=(0,),
+    ):
+        started = time.monotonic()
+        value = cli(
+            nodes[1]["endpoint"],
+            [
+                "replay",
+                "admit",
+                *target(stream_id, partition),
+                *mutation("replay-job", session, sequence),
+                "--start",
+                str(start),
+                "--end",
+                str(end),
+                "--duration-ms",
+                str(duration_ms),
+                "--max-bytes",
+                str(max_bytes),
+            ],
+            label,
+            expected=expected,
+        )
+        return value, time.monotonic() - started
+
+    def renew(stream_id, partition, session, sequence, lease_id, duration_ms, label):
+        started = time.monotonic()
+        value = cli(
+            nodes[2]["endpoint"],
+            [
+                "replay",
+                "renew",
+                *target(stream_id, partition),
+                *mutation("replay-job", session, sequence),
+                "--lease-id",
+                lease_id,
+                "--duration-ms",
+                str(duration_ms),
+            ],
+            label,
+        )
+        return value["lease"], time.monotonic() - started
+
+    def release(stream_id, partition, session, sequence, lease_id, label):
+        started = time.monotonic()
+        value = cli(
+            nodes[3]["endpoint"],
+            [
+                "replay",
+                "release",
+                *target(stream_id, partition),
+                *mutation("replay-job", session, sequence),
+                "--lease-id",
+                lease_id,
+            ],
+            label,
+        )
+        return value["lease"], time.monotonic() - started
+
+    def protected_fetch(stream_id, partition, lease_id, offset, limit, label, expected=(0,)):
+        return cli(
+            nodes[3]["endpoint"],
+            [
+                "replay",
+                "fetch",
+                *target(stream_id, partition),
+                "--lease-id",
+                lease_id,
+                "--offset",
+                str(offset),
+                "--limit",
+                str(limit),
+            ],
+            label,
+            expected=expected,
+        )
+
+    def retention_status(stream_id, partition, label):
+        return cli(
+            nodes[2]["endpoint"],
+            ["retention", "status", *target(stream_id, partition)],
+            label,
+        )["retention"]
+
+    try:
+        for node_id in (1, 2, 3):
+            start_node(node_id, "initial")
+        bootstrap_command = cli_endpoint_command(
+            binaries["light-streamctl"],
+            nodes[1]["endpoint"],
+            deadline_ms=45000,
+        ) + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            bootstrap_stream,
+            "--stream-name",
+            "bootstrap",
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            bootstrap_command.extend(
+                [
+                    "--member",
+                    f"{node_id},{nodes[node_id]['endpoint']},{nodes[node_id]['peer_uri']}",
+                ]
+            )
+        bootstrap = parse_json_output(
+            runner.run(bootstrap_command, "ls05-bootstrap", timeout=60),
+            "LS05 bootstrap",
+        )
+        memberships = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls05-active",
+        )
+        stream = cli(
+            nodes[1]["endpoint"],
+            [
+                "stream",
+                "create",
+                "--cluster-id",
+                cluster,
+                "--request-id",
+                stream_request,
+                "--name",
+                "retained-orders",
+                "--partitions",
+                "2",
+            ],
+            "ls05-create-stream",
+        )["stream"]
+        stream_id = stream["stream"]
+        for partition in (0, 1):
+            deadline = time.monotonic() + profile["write_readiness_seconds"] + 20
+            while True:
+                ready = fetch(
+                    stream_id,
+                    partition,
+                    0,
+                    1,
+                    f"ls05-ready-{partition}",
+                    expected=(0, 5),
+                )
+                if ready.get("ok"):
+                    break
+                if time.monotonic() >= deadline:
+                    raise VerificationError(f"LS05 partition {partition} did not become ready")
+                time.sleep(0.05)
+
+        p0_payloads = [f"p0-{index}" for index in range(6)]
+        p1_payloads = [f"p1-{index}" for index in range(3)]
+        sequence = 1
+        for partition, payloads in ((0, p0_payloads), (1, p1_payloads)):
+            for payload in payloads:
+                publish(
+                    stream_id,
+                    partition,
+                    sequence,
+                    payload,
+                    f"ls05-publish-{partition}-{sequence}",
+                )
+                sequence += 1
+        initial = fetch(stream_id, 0, 0, 16, "ls05-initial-fetch")["page"]
+        if [bytes(record["payload"]).decode() for record in initial["records"]] != p0_payloads:
+            raise VerificationError("retention-disabled record ledger changed")
+        write_json(
+            artifacts / "l01.json",
+            {
+                "verdict": "PASS",
+                "bootstrap": bootstrap,
+                "memberships": memberships,
+                "records": p0_payloads,
+                "retention_disabled_compatible": True,
+            },
+        )
+
+        bookmark_id = deterministic_uuid(rng)
+        bookmark = cli(
+            nodes[1]["endpoint"],
+            [
+                "bookmark",
+                "create",
+                *target(stream_id, 0),
+                "--bookmark-id",
+                bookmark_id,
+                "--name",
+                "old-replay",
+                "--offset",
+                "1",
+            ],
+            "ls05-create-old-bookmark",
+        )["bookmark"]
+        admission, admit_seconds = admit(
+            stream_id,
+            0,
+            replay_session,
+            1,
+            1,
+            4,
+            30000,
+            1024,
+            "ls05-admit-protected-range",
+        )
+        lease = admission["lease"]
+        floor, floor_seconds = advance(
+            stream_id,
+            0,
+            retention_session,
+            1,
+            6,
+            "ls05-advance-floor",
+        )
+        expired_fetch = fetch(
+            stream_id,
+            0,
+            1,
+            16,
+            "ls05-expired-bookmark-fetch",
+            expected=(4,),
+        )
+        resolved = cli(
+            nodes[2]["endpoint"],
+            [
+                "bookmark",
+                "resolve",
+                *target(stream_id, 0),
+                "--name",
+                "old-replay",
+            ],
+            "ls05-resolve-expired-bookmark",
+        )["bookmark"]
+        if resolved["id"] != bookmark_id or expired_fetch["error"]["code"] != "cursor_expired":
+            raise VerificationError("expired bookmark metadata or error contract is wrong")
+        write_json(
+            artifacts / "l02.json",
+            {
+                "verdict": "PASS",
+                "bookmark": bookmark,
+                "resolved_after_expiry": resolved,
+                "fetch_error": expired_fetch,
+                "floor": floor,
+            },
+        )
+
+        protected = protected_fetch(
+            stream_id,
+            0,
+            lease["id"],
+            1,
+            16,
+            "ls05-protected-fetch",
+        )["page"]
+        protected_payloads = [
+            bytes(record["payload"]).decode() for record in protected["records"]
+        ]
+        status_after_floor = retention_status(stream_id, 0, "ls05-status-after-floor")
+        if protected_payloads != p0_payloads[1:4] or status_after_floor["logical_floor"] != 6:
+            raise VerificationError("protected replay did not preserve its exact island")
+        write_json(
+            artifacts / "l03.json",
+            {
+                "verdict": "PASS",
+                "lease": lease,
+                "protected_payloads": protected_payloads,
+                "retention": status_after_floor,
+            },
+        )
+
+        first_page = fetch(stream_id, 1, 0, 1, "ls05-unleased-first-page")["page"]
+        advance(
+            stream_id,
+            1,
+            floor_first_session,
+            1,
+            3,
+            "ls05-advance-unleased-floor",
+        )
+        next_page = fetch(
+            stream_id,
+            1,
+            1,
+            8,
+            "ls05-unleased-next-page",
+            expected=(4,),
+        )
+        if len(first_page["records"]) != 1 or next_page["error"]["code"] != "cursor_expired":
+            raise VerificationError("unleased replay returned a shortened success")
+        write_json(
+            artifacts / "l04.json",
+            {
+                "verdict": "PASS",
+                "first_page": first_page,
+                "terminal_next_page": next_page,
+            },
+        )
+
+        floor_first, _ = admit(
+            stream_id,
+            1,
+            deterministic_uuid(rng),
+            1,
+            0,
+            2,
+            30000,
+            1024,
+            "ls05-floor-first-admission",
+            expected=(4,),
+        )
+        if floor_first["error"]["code"] != "cursor_expired":
+            raise VerificationError("floor-first ordering did not reject admission")
+        write_json(
+            artifacts / "l05.json",
+            {
+                "verdict": "PASS",
+                "admission_first": {
+                    "lease": lease,
+                    "floor": floor,
+                    "protected_payloads": protected_payloads,
+                },
+                "floor_first": floor_first,
+            },
+        )
+
+        publish(stream_id, 0, sequence, "quota-record", "ls05-publish-quota-record")
+        sequence += 1
+        quota, _ = admit(
+            stream_id,
+            0,
+            deterministic_uuid(rng),
+            1,
+            6,
+            7,
+            limits["max_lease_duration_ms"] + 1,
+            1024,
+            "ls05-duration-quota",
+            expected=(4,),
+        )
+        if quota["error"]["code"] != "resource_limit":
+            raise VerificationError("lease duration quota failed for the wrong reason")
+        write_json(
+            artifacts / "l06.json",
+            {
+                "verdict": "PASS",
+                "duration_rejection": quota,
+                "configured_limits": limits,
+                "aggregate_and_active_quota_unit_coverage": True,
+                "recovery_headroom": "LOGICAL_GUARD_ONLY_LS05",
+            },
+        )
+
+        admission_retry, _ = admit(
+            stream_id,
+            0,
+            replay_session,
+            1,
+            1,
+            4,
+            30000,
+            1024,
+            "ls05-admission-retry",
+        )
+        if admission_retry["lease"]["id"] != lease["id"]:
+            raise VerificationError("admission retry returned a new lease identity")
+        mutation_route = cli(
+            nodes[1]["endpoint"],
+            [
+                "stream",
+                "route",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream_id,
+                "--partition",
+                "0",
+            ],
+            "ls05-mutation-route",
+        )["route"]
+        renew_proxy = OneShotResponseDropProxy(
+            free_port(),
+            int(mutation_route["leader"]["public_uri"].rsplit(":", 1)[1]),
+        )
+        renew_command = cli_endpoint_command(
+            binaries["light-streamctl"],
+            renew_proxy.endpoint,
+            no_retry=True,
+            deadline_ms=3000,
+        ) + [
+            "replay",
+            "renew",
+            *target(stream_id, 0),
+            *mutation("replay-job", replay_session, 2),
+            "--lease-id",
+            lease["id"],
+            "--duration-ms",
+            "30000",
+            "--route-group-id",
+            str(mutation_route["route"]["group"]),
+            "--route-revision",
+            str(mutation_route["route"]["route_revision"]),
+        ]
+        runner.run_dropped_response(
+            renew_command,
+            "ls05-renew-response-dropped",
+            expected_codes=(1, 5),
+            timeout=10,
+        )
+        renew_proxy.wait()
+        renewed, renew_seconds = renew(
+            stream_id,
+            0,
+            replay_session,
+            2,
+            lease["id"],
+            30000,
+            "ls05-renew",
+        )
+        renewed_retry, _ = renew(
+            stream_id,
+            0,
+            replay_session,
+            2,
+            lease["id"],
+            30000,
+            "ls05-renew-retry",
+        )
+        if renewed_retry != renewed:
+            raise VerificationError("renewal retry did not resolve the dropped response")
+        release_route = cli(
+            nodes[1]["endpoint"],
+            [
+                "stream",
+                "route",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream_id,
+                "--partition",
+                "0",
+            ],
+            "ls05-release-route",
+        )["route"]
+        release_proxy = OneShotResponseDropProxy(
+            free_port(),
+            int(release_route["leader"]["public_uri"].rsplit(":", 1)[1]),
+        )
+        release_command = cli_endpoint_command(
+            binaries["light-streamctl"],
+            release_proxy.endpoint,
+            no_retry=True,
+            deadline_ms=3000,
+        ) + [
+            "replay",
+            "release",
+            *target(stream_id, 0),
+            *mutation("replay-job", replay_session, 3),
+            "--lease-id",
+            lease["id"],
+            "--route-group-id",
+            str(release_route["route"]["group"]),
+            "--route-revision",
+            str(release_route["route"]["route_revision"]),
+        ]
+        runner.run_dropped_response(
+            release_command,
+            "ls05-release-response-dropped",
+            expected_codes=(1, 5),
+            timeout=10,
+        )
+        release_proxy.wait()
+        released, release_seconds = release(
+            stream_id,
+            0,
+            replay_session,
+            3,
+            lease["id"],
+            "ls05-release",
+        )
+        released_retry, _ = release(
+            stream_id,
+            0,
+            replay_session,
+            3,
+            lease["id"],
+            "ls05-release-retry",
+        )
+        released_fetch = protected_fetch(
+            stream_id,
+            0,
+            lease["id"],
+            1,
+            16,
+            "ls05-released-fetch",
+            expected=(4,),
+        )
+        if (
+            released_retry != released
+            or released_fetch["error"]["code"] != "replay_lease_inactive"
+        ):
+            raise VerificationError("release retry or terminal state is wrong")
+        write_json(
+            artifacts / "l07.json",
+            {
+                "verdict": "PASS",
+                "admission_retry": admission_retry["lease"],
+                "renewed": renewed,
+                "renewed_retry": renewed_retry,
+                "released": released,
+                "released_retry": released_retry,
+                "released_fetch": released_fetch,
+                "renew_response_dropped": True,
+                "release_response_dropped": True,
+            },
+        )
+
+        publish(stream_id, 0, sequence, "short", "ls05-publish-short")
+        sequence += 1
+        short_admission, _ = admit(
+            stream_id,
+            0,
+            deterministic_uuid(rng),
+            1,
+            7,
+            8,
+            1,
+            1024,
+            "ls05-admit-short",
+        )
+        short_lease = short_admission["lease"]
+        immediate = protected_fetch(
+            stream_id,
+            0,
+            short_lease["id"],
+            7,
+            1,
+            "ls05-short-immediate",
+        )
+        before_idle_expiry = cli(
+            nodes[2]["endpoint"],
+            ["diagnostics"],
+            "ls05-before-idle-expiry",
+        )["diagnostics"]
+        wait_seconds = limits["max_clock_skew_ms"] * 2 / 1000 + 0.5
+        started = time.monotonic()
+        time.sleep(wait_seconds)
+        after_idle_expiry = cli(
+            nodes[2]["endpoint"],
+            ["diagnostics"],
+            "ls05-after-idle-expiry",
+        )["diagnostics"]
+        expired = cli(
+            nodes[2]["endpoint"],
+            [
+                "replay",
+                "status",
+                *target(stream_id, 0),
+                "--lease-id",
+                short_lease["id"],
+            ],
+            "ls05-short-expired",
+        )["lease"]
+        elapsed = time.monotonic() - started
+        before_data = next(
+            group
+            for group in before_idle_expiry["groups"]
+            if group["group"] == "data" and group["group_id"] == 2
+        )
+        after_data = next(
+            group
+            for group in after_idle_expiry["groups"]
+            if group["group"] == "data" and group["group_id"] == 2
+        )
+        if (
+            not immediate["ok"]
+            or expired["lifecycle"] != "expired"
+            or after_data["last_applied_index"] <= before_data["last_applied_index"]
+        ):
+            raise VerificationError("safe-time expiry contract failed")
+        write_json(
+            artifacts / "l08.json",
+            {
+                "verdict": "PASS",
+                "declared_max_clock_skew_ms": limits["max_clock_skew_ms"],
+                "lease": short_lease,
+                "immediate_read": immediate,
+                "expired": expired,
+                "wait_seconds": elapsed,
+                "clock_source": "system_time_with_declared_bound",
+                "background_maintenance_progress": {
+                    "before_applied": before_data["last_applied_index"],
+                    "after_applied": after_data["last_applied_index"],
+                },
+            },
+        )
+
+        publish(stream_id, 0, sequence, "stall", "ls05-publish-stall")
+        stall_session = deterministic_uuid(rng)
+        stall_admission, _ = admit(
+            stream_id,
+            0,
+            stall_session,
+            1,
+            8,
+            9,
+            limits["max_lease_duration_ms"],
+            1024,
+            "ls05-admit-stalled-reader",
+        )
+        stall_lease = stall_admission["lease"]
+        advance(
+            stream_id,
+            0,
+            retention_session,
+            2,
+            9,
+            "ls05-advance-around-stalled-reader",
+        )
+        stalled_first = protected_fetch(
+            stream_id,
+            0,
+            stall_lease["id"],
+            8,
+            1,
+            "ls05-stalled-first-page",
+        )
+        time.sleep(0.25)
+        stalled_second = protected_fetch(
+            stream_id,
+            0,
+            stall_lease["id"],
+            9,
+            1,
+            "ls05-stalled-second-page",
+        )
+        status_stalled = retention_status(stream_id, 0, "ls05-status-stalled-reader")
+        if (
+            len(stalled_first["page"]["records"]) != 1
+            or stalled_second["page"]["records"]
+            or status_stalled["reclaim_cursor"] != 9
+        ):
+            raise VerificationError("stalled reader violated bounded page or reclaim behavior")
+        write_json(
+            artifacts / "l09.json",
+            {
+                "verdict": "PASS",
+                "first_page": stalled_first,
+                "second_page": stalled_second,
+                "stall_seconds": 0.25,
+                "rocksdb_snapshot_across_stall": False,
+                "retention": status_stalled,
+            },
+        )
+
+        before_restart = {
+            "retention": retention_status(stream_id, 0, "ls05-status-before-restart"),
+            "bookmark": resolved,
+            "active_lease": stall_lease,
+            "released_lease": released,
+            "expired_lease": expired,
+        }
+        for node_id in (1, 2, 3):
+            nodes[node_id]["server"].stop()
+        for node_id in (1, 2, 3):
+            start_node(node_id, "full-restart")
+        restarted = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls05-full-restart",
+        )
+        after_restart = {
+            "retention": retention_status(stream_id, 0, "ls05-status-after-restart"),
+            "bookmark": cli(
+                nodes[2]["endpoint"],
+                [
+                    "bookmark",
+                    "resolve",
+                    *target(stream_id, 0),
+                    "--name",
+                    "old-replay",
+                ],
+                "ls05-bookmark-after-restart",
+            )["bookmark"],
+            "active_read": protected_fetch(
+                stream_id,
+                0,
+                stall_lease["id"],
+                8,
+                1,
+                "ls05-active-lease-after-restart",
+            ),
+            "released": cli(
+                nodes[2]["endpoint"],
+                [
+                    "replay",
+                    "status",
+                    *target(stream_id, 0),
+                    "--lease-id",
+                    released["id"],
+                ],
+                "ls05-released-after-restart",
+            )["lease"],
+            "expired": cli(
+                nodes[2]["endpoint"],
+                [
+                    "replay",
+                    "status",
+                    *target(stream_id, 0),
+                    "--lease-id",
+                    expired["id"],
+                ],
+                "ls05-expired-after-restart",
+            )["lease"],
+        }
+        if (
+            after_restart["retention"] != before_restart["retention"]
+            or after_restart["bookmark"] != before_restart["bookmark"]
+            or after_restart["released"]["lifecycle"] != "released"
+            or after_restart["expired"]["lifecycle"] != "expired"
+        ):
+            raise VerificationError("LS05 state changed after full restart")
+        write_json(
+            artifacts / "l10.json",
+            {
+                "verdict": "PASS",
+                "before_restart": before_restart,
+                "after_restart": after_restart,
+                "memberships": restarted,
+                "partial_node_recovery": "DEFERRED_LS06",
+            },
+        )
+
+        mutation_durations = sorted([admit_seconds, floor_seconds, renew_seconds, release_seconds])
+        p99_index = ((99 * len(mutation_durations) + 99) // 100) - 1
+        p99_seconds = mutation_durations[p99_index]
+        if p99_seconds * 1000 > limits["lease_operation_p99_ms"]:
+            raise VerificationError(
+                f"lease mutation p99 exceeded {limits['lease_operation_p99_ms']} ms: {p99_seconds}"
+            )
+        write_json(
+            artifacts / "retention-journey.json",
+            {
+                "verdict": "PASS",
+                "revision": revision,
+                "stream": stream,
+                "logical_floor": after_restart["retention"]["logical_floor"],
+                "bookmark_survived_expiry": True,
+                "protected_replay_complete": True,
+                "unleased_replay_explicitly_expired": True,
+                "lease_mutation_seconds": mutation_durations,
+                "lease_mutation_p99_seconds": p99_seconds,
+                "logical_reclaimed_bytes": after_restart["retention"][
+                    "logically_expired_bytes"
+                ],
+                "raft_only_bytes": after_restart["retention"]["raft_only_bytes"],
+                "filesystem_payload_reclaim": "DEFERRED_LS06",
+            },
+        )
+        write_json(
+            artifacts / "unsupported.json",
+            {
+                "age_based_retention": "NOT_IMPLEMENTED",
+                "response_loss_proxy_for_lease_mutations": "UNIT_COVERAGE_ONLY",
+                "raft_owned_payload_reclaim": "DEFERRED_LS06",
+                "partial_node_recovery": "DEFERRED_LS06",
+                "secured_mode": "UNSUPPORTED_LS08",
+                "independent_hosts": "BLOCKED",
+            },
+        )
+    finally:
+        for node in nodes.values():
+            if node["server"].is_running():
+                node["server"].stop()
+
+
 def record_security(artifacts, runner, binaries, security):
     statuses = []
     if security in ("local-insecure", "all"):
@@ -4720,6 +5651,25 @@ def cleanup_success_data(artifacts, succeeded):
 
 
 def run_selected(args, artifacts, runner, binaries, revision, profile):
+    if args.phase == "LS05" or args.suite == "ls05-e2e":
+        runner.run(
+            [
+                "cargo",
+                "test",
+                "-p",
+                "light-stream-core",
+                "-p",
+                "light-stream-storage",
+                "-p",
+                "light-stream-server",
+                "-p",
+                "light-stream-client",
+            ],
+            "ls05-targeted-tests",
+            timeout=900,
+        )
+        run_ls05_scenario(artifacts, runner, binaries, revision, profile, args.seed)
+        return
     if args.phase == "LS04" or args.suite == "ls04-e2e":
         runner.run(
             [
@@ -4830,6 +5780,7 @@ def parse_args():
         "LS02",
         "LS03",
         "LS04",
+        "LS05",
     ):
         parser.error(f"unknown phase {args.phase!r}")
     if args.suite is not None and args.suite not in (
@@ -4838,6 +5789,7 @@ def parse_args():
         "ls02b-e2e",
         "ls03-e2e",
         "ls04-e2e",
+        "ls05-e2e",
     ):
         parser.error(f"unknown suite {args.suite!r}")
     if args.scenario not in KNOWN_SCENARIOS:

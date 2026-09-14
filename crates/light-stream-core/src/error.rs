@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{ConsensusGroup, LeaderHint, ProducerRequestId, RequestOutcome};
+use crate::{
+    AmbiguousRequest, ConsensusGroup, LeaderHint, RecordOffset, ReplayLeaseId,
+    ReplayLeaseLifecycle, RequestOutcome,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,6 +28,15 @@ pub enum ErrorCode {
     StreamNameConflict,
     BookmarkNotFound,
     BookmarkNameConflict,
+    CursorExpired,
+    ReplayLeaseNotFound,
+    ReplayLeaseInactive,
+    ReplayLeaseConflict,
+    ReplayLeaseRangeViolation,
+    ReplayLeaseLifetimeExhausted,
+    MutationConflict,
+    MutationReceiptExpired,
+    LeaseClockUnavailable,
     ResourceLimit,
     StaleRoute,
     UnsupportedOperation,
@@ -52,6 +64,15 @@ impl ErrorCode {
             Self::StreamNameConflict => "stream_name_conflict",
             Self::BookmarkNotFound => "bookmark_not_found",
             Self::BookmarkNameConflict => "bookmark_name_conflict",
+            Self::CursorExpired => "cursor_expired",
+            Self::ReplayLeaseNotFound => "replay_lease_not_found",
+            Self::ReplayLeaseInactive => "replay_lease_inactive",
+            Self::ReplayLeaseConflict => "replay_lease_conflict",
+            Self::ReplayLeaseRangeViolation => "replay_lease_range_violation",
+            Self::ReplayLeaseLifetimeExhausted => "replay_lease_lifetime_exhausted",
+            Self::MutationConflict => "mutation_conflict",
+            Self::MutationReceiptExpired => "mutation_receipt_expired",
+            Self::LeaseClockUnavailable => "lease_clock_unavailable",
             Self::ResourceLimit => "resource_limit",
             Self::StaleRoute => "stale_route",
             Self::UnsupportedOperation => "unsupported_operation",
@@ -93,7 +114,7 @@ pub enum DomainError {
     QuorumUnavailable {
         group: ConsensusGroup,
         outcome: RequestOutcome,
-        request: Option<ProducerRequestId>,
+        request: Option<AmbiguousRequest>,
     },
     #[error("cluster formation is not complete")]
     ClusterForming,
@@ -107,6 +128,30 @@ pub enum DomainError {
     BookmarkNotFound,
     #[error("bookmark name is already active")]
     BookmarkNameConflict,
+    #[error("record offset {requested:?} expired; earliest available offset is {available_from:?}")]
+    CursorExpired {
+        requested: RecordOffset,
+        available_from: RecordOffset,
+    },
+    #[error("replay lease {lease} was not found")]
+    ReplayLeaseNotFound { lease: ReplayLeaseId },
+    #[error("replay lease {lease} is {lifecycle:?}")]
+    ReplayLeaseInactive {
+        lease: ReplayLeaseId,
+        lifecycle: ReplayLeaseLifecycle,
+    },
+    #[error("replay lease request identity conflicts with an existing request")]
+    ReplayLeaseConflict,
+    #[error("requested replay is outside the admitted lease range")]
+    ReplayLeaseRangeViolation,
+    #[error("replay lease reached its maximum total lifetime")]
+    ReplayLeaseLifetimeExhausted,
+    #[error("mutation request identity was already used for another operation")]
+    MutationConflict,
+    #[error("mutation request identity is older than the retained receipt window")]
+    MutationReceiptExpired,
+    #[error("the configured lease clock guarantee is unavailable")]
+    LeaseClockUnavailable,
     #[error("{resource} limit {limit} was exceeded")]
     ResourceLimit { resource: String, limit: u64 },
     #[error("routing metadata is stale")]
@@ -140,6 +185,15 @@ impl DomainError {
             Self::StreamNameConflict => ErrorCode::StreamNameConflict,
             Self::BookmarkNotFound => ErrorCode::BookmarkNotFound,
             Self::BookmarkNameConflict => ErrorCode::BookmarkNameConflict,
+            Self::CursorExpired { .. } => ErrorCode::CursorExpired,
+            Self::ReplayLeaseNotFound { .. } => ErrorCode::ReplayLeaseNotFound,
+            Self::ReplayLeaseInactive { .. } => ErrorCode::ReplayLeaseInactive,
+            Self::ReplayLeaseConflict => ErrorCode::ReplayLeaseConflict,
+            Self::ReplayLeaseRangeViolation => ErrorCode::ReplayLeaseRangeViolation,
+            Self::ReplayLeaseLifetimeExhausted => ErrorCode::ReplayLeaseLifetimeExhausted,
+            Self::MutationConflict => ErrorCode::MutationConflict,
+            Self::MutationReceiptExpired => ErrorCode::MutationReceiptExpired,
+            Self::LeaseClockUnavailable => ErrorCode::LeaseClockUnavailable,
             Self::ResourceLimit { .. } => ErrorCode::ResourceLimit,
             Self::StaleRoute => ErrorCode::StaleRoute,
             Self::UnsupportedOperation { .. } => ErrorCode::UnsupportedOperation,

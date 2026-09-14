@@ -1,0 +1,104 @@
+{
+  "first_page": {
+    "command": "replay-fetch",
+    "endpoint": "http://127.0.0.1:50506",
+    "lease": {
+      "expires_at": 1789405616121,
+      "generation": 1,
+      "hard_expires_at": 1789406456121,
+      "id": "60ffbf10-89a1-6be7-5fb4-7416913b57a7",
+      "lifecycle": "active",
+      "protected_bytes": 5,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 60000,
+        "max_bytes": 1024,
+        "range": {
+          "end": 9,
+          "partition": {
+            "partition": 0,
+            "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+          },
+          "start": 8
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "21f45f27-64f3-deb2-8765-971a9a9a84d2"
+        }
+      }
+    },
+    "ok": true,
+    "page": {
+      "next_offset": 9,
+      "partition": {
+        "partition": 0,
+        "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+      },
+      "records": [
+        {
+          "offset": 8,
+          "payload": [
+            115,
+            116,
+            97,
+            108,
+            108
+          ]
+        }
+      ]
+    }
+  },
+  "retention": {
+    "logical_floor": 9,
+    "logically_expired_bytes": 41,
+    "partition": {
+      "partition": 0,
+      "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+    },
+    "raft_only_bytes": 41,
+    "reclaim_cursor": 9
+  },
+  "rocksdb_snapshot_across_stall": false,
+  "second_page": {
+    "command": "replay-fetch",
+    "endpoint": "http://127.0.0.1:50506",
+    "lease": {
+      "expires_at": 1789405616121,
+      "generation": 1,
+      "hard_expires_at": 1789406456121,
+      "id": "60ffbf10-89a1-6be7-5fb4-7416913b57a7",
+      "lifecycle": "active",
+      "protected_bytes": 5,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 60000,
+        "max_bytes": 1024,
+        "range": {
+          "end": 9,
+          "partition": {
+            "partition": 0,
+            "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+          },
+          "start": 8
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "21f45f27-64f3-deb2-8765-971a9a9a84d2"
+        }
+      }
+    },
+    "ok": true,
+    "page": {
+      "next_offset": 9,
+      "partition": {
+        "partition": 0,
+        "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+      },
+      "records": []
+    }
+  },
+  "stall_seconds": 0.25,
+  "verdict": "PASS"
+}

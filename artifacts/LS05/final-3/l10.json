@@ -1,0 +1,358 @@
+{
+  "after_restart": {
+    "active_read": {
+      "command": "replay-fetch",
+      "endpoint": "http://127.0.0.1:62042",
+      "lease": {
+        "expires_at": 1789407293147,
+        "generation": 1,
+        "hard_expires_at": 1789408133147,
+        "id": "60ffbf10-89a1-6be7-5fb4-7416913b57a7",
+        "lifecycle": "active",
+        "protected_bytes": 5,
+        "request": {
+          "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+          "duration": 60000,
+          "max_bytes": 1024,
+          "range": {
+            "end": 9,
+            "partition": {
+              "partition": 0,
+              "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+            },
+            "start": 8
+          },
+          "request": {
+            "principal": "replay-job",
+            "sequence": 1,
+            "session": "21f45f27-64f3-deb2-8765-971a9a9a84d2"
+          }
+        }
+      },
+      "ok": true,
+      "page": {
+        "next_offset": 9,
+        "partition": {
+          "partition": 0,
+          "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+        },
+        "records": [
+          {
+            "offset": 8,
+            "payload": [
+              115,
+              116,
+              97,
+              108,
+              108
+            ]
+          }
+        ]
+      }
+    },
+    "bookmark": {
+      "cursor": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "next_offset": 1,
+        "partition": {
+          "partition": 0,
+          "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+        }
+      },
+      "id": "3c1ba6b4-b233-385d-b136-4af391779300",
+      "lifecycle": "available",
+      "name": "old-replay",
+      "publication": 1
+    },
+    "expired": {
+      "expires_at": 1789407228401,
+      "generation": 2,
+      "hard_expires_at": 1789408128400,
+      "id": "67cb288a-ec95-3b6b-fc4a-c6ed3845cb3e",
+      "lifecycle": "expired",
+      "protected_bytes": 5,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 1,
+        "max_bytes": 1024,
+        "range": {
+          "end": 8,
+          "partition": {
+            "partition": 0,
+            "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+          },
+          "start": 7
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "48e101b4-b8b4-7e67-6c51-a6066974f879"
+        }
+      }
+    },
+    "released": {
+      "expires_at": 1789407257732,
+      "generation": 3,
+      "hard_expires_at": 1789408127105,
+      "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+      "lifecycle": "released",
+      "protected_bytes": 12,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 30000,
+        "max_bytes": 1024,
+        "range": {
+          "end": 4,
+          "partition": {
+            "partition": 0,
+            "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+          },
+          "start": 1
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+        }
+      }
+    },
+    "retention": {
+      "logical_floor": 9,
+      "logically_expired_bytes": 41,
+      "partition": {
+        "partition": 0,
+        "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+      },
+      "raft_only_bytes": 41,
+      "reclaim_cursor": 9
+    }
+  },
+  "before_restart": {
+    "active_lease": {
+      "expires_at": 1789407293147,
+      "generation": 1,
+      "hard_expires_at": 1789408133147,
+      "id": "60ffbf10-89a1-6be7-5fb4-7416913b57a7",
+      "lifecycle": "active",
+      "protected_bytes": 5,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 60000,
+        "max_bytes": 1024,
+        "range": {
+          "end": 9,
+          "partition": {
+            "partition": 0,
+            "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+          },
+          "start": 8
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "21f45f27-64f3-deb2-8765-971a9a9a84d2"
+        }
+      }
+    },
+    "bookmark": {
+      "cursor": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "next_offset": 1,
+        "partition": {
+          "partition": 0,
+          "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+        }
+      },
+      "id": "3c1ba6b4-b233-385d-b136-4af391779300",
+      "lifecycle": "available",
+      "name": "old-replay",
+      "publication": 1
+    },
+    "expired_lease": {
+      "expires_at": 1789407228401,
+      "generation": 2,
+      "hard_expires_at": 1789408128400,
+      "id": "67cb288a-ec95-3b6b-fc4a-c6ed3845cb3e",
+      "lifecycle": "expired",
+      "protected_bytes": 5,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 1,
+        "max_bytes": 1024,
+        "range": {
+          "end": 8,
+          "partition": {
+            "partition": 0,
+            "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+          },
+          "start": 7
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "48e101b4-b8b4-7e67-6c51-a6066974f879"
+        }
+      }
+    },
+    "released_lease": {
+      "expires_at": 1789407257732,
+      "generation": 3,
+      "hard_expires_at": 1789408127105,
+      "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+      "lifecycle": "released",
+      "protected_bytes": 12,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 30000,
+        "max_bytes": 1024,
+        "range": {
+          "end": 4,
+          "partition": {
+            "partition": 0,
+            "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+          },
+          "start": 1
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+        }
+      }
+    },
+    "retention": {
+      "logical_floor": 9,
+      "logically_expired_bytes": 41,
+      "partition": {
+        "partition": 0,
+        "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+      },
+      "raft_only_bytes": 41,
+      "reclaim_cursor": 9
+    }
+  },
+  "memberships": [
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 3
+    }
+  ],
+  "partial_node_recovery": "DEFERRED_LS06",
+  "verdict": "PASS"
+}

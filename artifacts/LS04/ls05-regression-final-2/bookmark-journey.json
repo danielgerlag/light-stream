@@ -1,0 +1,83 @@
+{
+  "boundary": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "08643883-5941-42b0-b055-4d7c758cae7a"
+      }
+    },
+    "id": "850651a2-bbe1-75f4-ed67-ae0de8f9fcaa",
+    "lifecycle": "available",
+    "name": "import-boundary",
+    "publication": 1
+  },
+  "full_restart_preserved": true,
+  "lost_response_bookmark": {
+    "cursor": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "next_offset": 3,
+      "partition": {
+        "partition": 0,
+        "stream": "08643883-5941-42b0-b055-4d7c758cae7a"
+      }
+    },
+    "id": "a95a9d4c-4daa-c06d-9e0c-42d10d448180",
+    "lifecycle": "available",
+    "name": "response-lost",
+    "publication": 2
+  },
+  "resume_offset": 1,
+  "revision": "23682a11748218d57fccc1d2163a43a2fecbc5329fc4950ecbb5947a5ad42e3e",
+  "single_process_failover": "DEFERRED_LS06",
+  "stream": {
+    "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+    "lifecycle": "active",
+    "name": "imports",
+    "placements": [
+      {
+        "group": 2,
+        "partition": 0
+      },
+      {
+        "group": 2,
+        "partition": 1
+      }
+    ],
+    "ready_groups": [
+      2
+    ],
+    "revision": 4,
+    "stream": "08643883-5941-42b0-b055-4d7c758cae7a"
+  },
+  "stream_cursor_vector": {
+    "id": "c1be5bf1-beec-e806-e2a6-f330035657b2",
+    "lifecycle": "available",
+    "name": "two-partition-boundary",
+    "publication": 1,
+    "vector": {
+      "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+      "positions": [
+        {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 3,
+          "partition": {
+            "partition": 0,
+            "stream": "08643883-5941-42b0-b055-4d7c758cae7a"
+          }
+        },
+        {
+          "cluster": "3bade523-0a7d-5124-b84c-3e14764b98ed",
+          "next_offset": 0,
+          "partition": {
+            "partition": 1,
+            "stream": "08643883-5941-42b0-b055-4d7c758cae7a"
+          }
+        }
+      ],
+      "stream": "08643883-5941-42b0-b055-4d7c758cae7a"
+    }
+  },
+  "verdict": "PASS"
+}

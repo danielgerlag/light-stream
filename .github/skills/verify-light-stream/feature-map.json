@@ -40,6 +40,10 @@
     "bookmarks": {
       "command": "python3 scripts/verify.py --phase LS04 --scenario bookmarks --profile local --security all --artifacts artifacts/LS04/skill-bookmarks-final",
       "evidence": ["bookmark-journey.json", "l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "cleanup.json", "unsupported.json"]
+    },
+    "retention-replay": {
+      "command": "python3 scripts/verify.py --phase LS05 --scenario retention-replay --profile local --security all --artifacts artifacts/LS05/skill-retention-replay-final-3",
+      "evidence": ["retention-journey.json", "l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "cleanup.json", "unsupported.json"]
     }
   }
 }

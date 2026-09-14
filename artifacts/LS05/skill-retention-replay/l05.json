@@ -1,0 +1,62 @@
+{
+  "admission_first": {
+    "floor": {
+      "floor": 6,
+      "partition": {
+        "partition": 0,
+        "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+      },
+      "previous_floor": 0,
+      "request": {
+        "principal": "retention-operator",
+        "sequence": 1,
+        "session": "853b50b4-29ac-66f3-8ef9-579202fa8115"
+      }
+    },
+    "lease": {
+      "expires_at": 1789405580024,
+      "generation": 1,
+      "hard_expires_at": 1789406450024,
+      "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+      "lifecycle": "active",
+      "protected_bytes": 12,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 30000,
+        "max_bytes": 1024,
+        "range": {
+          "end": 4,
+          "partition": {
+            "partition": 0,
+            "stream": "8b9cea4b-875e-4e73-97dd-d470c1c98595"
+          },
+          "start": 1
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+        }
+      }
+    },
+    "protected_payloads": [
+      "p0-1",
+      "p0-2",
+      "p0-3"
+    ]
+  },
+  "floor_first": {
+    "command": "request",
+    "error": {
+      "code": "cursor_expired",
+      "detail": {
+        "available_from": 3,
+        "code": "cursor_expired",
+        "requested": 0
+      },
+      "message": "record offset RecordOffset(0) expired; earliest available offset is RecordOffset(3)"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

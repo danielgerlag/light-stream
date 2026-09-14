@@ -1014,6 +1014,7 @@ dependencies = [
  "prost",
  "prost-build",
  "protoc-bin-vendored",
+ "serde_json",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

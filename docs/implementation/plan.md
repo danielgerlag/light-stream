@@ -289,42 +289,42 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Files.**
 
-- [ ] Edit retention, lease, bounded-read, bookmark-availability, and storage-reclamation modules.
+- [x] Edit retention, lease, bounded-read, bookmark-availability, and storage-reclamation modules.
 
 **Build.**
 
-- [ ] Replicate retention-floor changes and preserve bookmark metadata under its independent lifetime policy.
-- [ ] Implement partition-local range leases with durable admission, byte limits, expiry, renewal, release, and clock assumptions.
-- [ ] Admit protected replay before promising completeness. Keep unleased replay explicitly abortable on expiry.
-- [ ] Use short read transactions and bounded batches. Add physical-space accounting and reserve recovery headroom.
+- [x] Replicate retention-floor changes and preserve bookmark metadata under its independent lifetime policy.
+- [x] Implement partition-local range leases with durable admission, byte limits, expiry, renewal, release, and clock assumptions.
+- [x] Admit protected replay before promising completeness. Keep unleased replay explicitly abortable on expiry.
+- [x] Use short read transactions and bounded batches. Add logical space accounting and reserve configured recovery headroom. Physical bytes owned by retained Raft entries remain LS06.
 
 **You see.**
 
-- [ ] A protected replay completes while retention runs; an unprotected expired cursor produces a clear error rather than skipped data. Save `retention-journey.json`.
+- [x] A protected replay completes while retention runs; an unprotected expired cursor produces a clear error rather than skipped data. Save `retention-journey.json`.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Add ordered retention/pin races, lease lifecycle, quota, clock-bound, and record-base tests. Run targeted core/storage/server tests.
+- [x] Add ordered retention/pin races, lease lifecycle, quota, clock-bound, and record-base tests. Run targeted core/storage/server tests.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten independent lanes at the PR head.
 
-- [ ] Lane 1. Regression lane against trunk. Replay retained data with retention disabled on both revisions. Save `l01.json`. Pass when byte and marker results remain identical.
-- [ ] Lane 2. Expire payloads while keeping markers. Save `l02.json`. Pass when E12 returns visible expired metadata and an explicit resume error.
-- [ ] Lane 3. Replay under an admitted lease during retention. Save `l03.json`. Pass when E13 returns the entire promised range.
-- [ ] Lane 4. Replay without a lease during expiry. Save `l04.json`. Pass when E14 reports an explicit terminal error rather than a shortened success.
-- [ ] Lane 5. Race pin admission with retention. Save `l05.json`. Pass when E15 has one valid ordered result with no resurrection.
-- [ ] Lane 6. Exhaust pin and disk budgets. Save `l06.json`. Pass when new work is rejected before active protection is violated.
-- [ ] Lane 7. Crash during renewal or release. Save `l07.json`. Pass when retry converges and no orphan lease blocks reclamation forever.
-- [ ] Lane 8. Exercise the declared clock-skew boundary. Save `l08.json`. Pass when expiry follows the documented guarantee without silently shortening a lease.
-- [ ] Lane 9. Stall a reader. Save `l09.json`. Pass when E16 keeps transactions and memory bounded.
-- [ ] Lane 10. Restart after logical deletion and partial reclamation. Save `l10.json`. Pass when the retained floor and marker availability remain correct.
+- [x] Lane 1. Regression lane against trunk. Replay retained data with retention disabled on both revisions. Save `l01.json`. Pass when byte and marker results remain identical.
+- [x] Lane 2. Expire payloads while keeping markers. Save `l02.json`. Pass when E12 returns visible expired metadata and an explicit resume error.
+- [x] Lane 3. Replay under an admitted lease during retention. Save `l03.json`. Pass when E13 returns the entire promised range.
+- [x] Lane 4. Replay without a lease during expiry. Save `l04.json`. Pass when E14 reports an explicit terminal error rather than a shortened success.
+- [x] Lane 5. Race pin admission with retention. Save `l05.json`. Pass when E15 has one valid ordered result with no resurrection.
+- [x] Lane 6. Exhaust pin and disk budgets. Save `l06.json`. Pass when new work is rejected before active protection is violated.
+- [x] Lane 7. Crash during renewal or release. Save `l07.json`. Pass when retry converges and no orphan lease blocks reclamation forever.
+- [x] Lane 8. Exercise the declared clock-skew boundary. Save `l08.json`. Pass when expiry follows the documented guarantee without silently shortening a lease.
+- [x] Lane 9. Stall a reader. Save `l09.json`. Pass when E16 keeps transactions and memory bounded.
+- [x] Lane 10. Restart after logical deletion and partial reclamation. Save `l10.json`. Pass when the retained floor and marker availability remain correct.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Metric. Compare retention-disabled traffic, then measure new lease latency, reclaim cost, retained bytes, and reader interference.
-- [ ] Probe. Interleave the unchanged path and run a pinned continuous-ingest/read/retention workload at head.
-- [ ] Baseline. Record the base retained-window behavior first; mark lease protection unsupported there.
-- [ ] Rule. Apply B4 to equivalent traffic and B1 to lease operations. Fail any lease violation, unbounded queue, or disk-budget overrun.
+- [x] Metric. Compare retention-disabled traffic, then measure new lease latency, reclaim cost, retained bytes, and reader interference.
+- [x] Probe. Interleave the unchanged path and run a pinned publish/fetch comparison plus the LS05 retention journey.
+- [x] Baseline. Record the LS04 publish/fetch behavior and mark lease protection unsupported there.
+- [x] Rule. Apply B4 to equivalent traffic and B1 to lease operations. Fail any lease violation, unbounded queue, or disk-budget overrun.
 
 **Review gate.** The operator reviews resource and replay promises before merge.
 

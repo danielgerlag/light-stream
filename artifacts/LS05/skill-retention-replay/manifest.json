@@ -1,0 +1,81 @@
+{
+  "artifacts": "/Users/danielgerlag/dev/light-stream/artifacts/LS05/skill-retention-replay",
+  "created_at": "2026-09-14T17:05:27.719775+00:00",
+  "environment": {
+    "machine": "arm64",
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.9.6 (default, May 22 2026, 11:13:45) \n[Clang 21.0.0 (clang-2100.1.1.101)]"
+  },
+  "independent_host": "BLOCKED",
+  "independent_security_review": "NOT_REQUESTED",
+  "phase": "LS05",
+  "profile": {
+    "claim": "Functional and local regression evidence only.",
+    "implemented_phase": "LS05",
+    "independent_failure_domains": false,
+    "leader_loss_seconds": 10,
+    "low_load": {
+      "max_batch_records": 128,
+      "p99_ms": 250,
+      "producers": 4,
+      "readers": 1,
+      "record_bytes": 1024,
+      "records_per_second": 2000
+    },
+    "ls01": {
+      "health_p99_ms": 100,
+      "max_records_per_publish": 128,
+      "public_message_bytes": 8388608,
+      "startup_seconds": 5
+    },
+    "ls02a": {
+      "max_fetch_bytes": 8388608,
+      "max_fetch_records": 1024,
+      "receipt_window": 4096,
+      "voters": 1
+    },
+    "ls02b": {
+      "directed_delay_ms": 1500,
+      "independent_hosts": false,
+      "majority_publish_deadline_ms": 5000,
+      "peer_rpc_deadline": "openraft_rpc_option_soft_ttl",
+      "purge": "disabled_without_snapshots",
+      "snapshot_policy": "never",
+      "voters": 3
+    },
+    "ls03": {
+      "data_groups": 4,
+      "max_partitions_per_stream": 4,
+      "max_streams": 4,
+      "rocksdb_cache_bytes": 268435456,
+      "rocksdb_write_buffer_bytes": 134217728,
+      "verification_delay_group_id": 2,
+      "verification_delay_ms": 800
+    },
+    "ls05": {
+      "lease_operation_p99_ms": 250,
+      "max_active_leases": 256,
+      "max_clock_skew_ms": 2000,
+      "max_group_reserved_lease_bytes": 4294967296,
+      "max_lease_bytes": 536870912,
+      "max_lease_duration_ms": 60000,
+      "max_total_lease_lifetime_ms": 900000,
+      "reclaim_batch_bytes": 8388608,
+      "reclaim_batch_records": 1024
+    },
+    "name": "local",
+    "nodes": 3,
+    "process_liveness_seconds": 5,
+    "security_modes": [
+      "local-insecure",
+      "secured"
+    ],
+    "write_readiness_seconds": 10
+  },
+  "publication": "BLOCKED_NO_GIT_REPOSITORY",
+  "scenario": "retention-replay",
+  "security": "all",
+  "seed": 10101,
+  "source_revision": "c0fffcf17f81d242f6a479e6d23291d0b74428d5bb67b73d911cb3ab6e27ffd6",
+  "suite": null
+}

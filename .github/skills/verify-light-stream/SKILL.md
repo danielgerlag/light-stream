@@ -1,6 +1,6 @@
 ---
 name: verify-light-stream
-description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS04, including bookmarks and cursor vectors.
+description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS05, including retention and protected replay.
 ---
 
 # Verify Light Stream
@@ -71,6 +71,17 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS04/skill-bookmarks-final
 ```
 
+For the LS05 retention and protected replay journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS05 \
+  --scenario retention-replay \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS05/skill-retention-replay-final-3
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -84,5 +95,7 @@ Inspect `e09.json`. Confirm that the verifier drops the first response, kills th
 For LS03, inspect `partition-journey.json` and `l02.json` through `l10.json`. Confirm five databases per node, four bounded data groups, partition routes spanning groups 2 through 5, byte-for-byte reads, response-loss create idempotency, quota rejection, name reuse with a new stream identity, stale-route refresh, group-local delay isolation, and full-cluster restart. `l04.json` records single-process multi-group recovery as `DEFERRED_LS06`.
 
 For LS04, inspect `bookmark-journey.json` and `l01.json` through `l10.json`. Confirm atomic publish-plus-bookmark, exact resume, response-loss retry with one bookmark ID, backdated publication order, stable pagination, terminal deletion and name reuse, independent stream cursor vectors, a last-100 lookup below 100 ms over 10,000 records, and full-cluster restart. `l10.json` records partial-node failover as `DEFERRED_LS06`.
+
+For LS05, inspect `retention-journey.json` and `l01.json` through `l10.json`. Confirm that bookmark metadata survives payload expiry, ordinary fetch returns `cursor_expired`, protected replay returns the exact admitted range, renewal and release survive dropped responses, idle maintenance expires abandoned leases, reclaim work stays bounded, and full restart preserves floors and lease lifecycle. Treat `raft_only_bytes` as retained by the Raft log. Filesystem payload reclamation and partial-node recovery remain `DEFERRED_LS06`.
 
 Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report secured mode as `UNSUPPORTED_LS08`. Report independent-host verification as `BLOCKED`.

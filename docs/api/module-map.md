@@ -64,6 +64,16 @@ Data groups store immutable partition bookmarks by ID, active name, and publicat
 
 The control group stores stream bookmarks as explicitly independent partition positions. Creation requires one position for every stream partition and rejects a position past its current committed tail. The type and API do not represent a cross-group consistent cut.
 
+## LS05 implementation
+
+`light-stream-core::replay` owns mutation identities, replay ranges, lease lifecycle, retention results, and typed expiry errors.
+
+The data-group state machine orders lease admission, renewal, release, floor advancement, expiry, and bounded reclaim. An admitted lease protects only its exact range. The logical floor can move past that range and reclaim surrounding records.
+
+`light-stream-server` samples the declared bounded clock at the request boundary. The state machine only uses clock observations stored in Raft commands. A leader-only worker advances idle expiry and reclaim from durable cursors.
+
+`light-stream-client` retries lease and retention writes with the same mutation identity and one decreasing deadline. Cached-route methods let the verifier drop the mutation response after commit.
+
 ## Synthesis decision
 
 The repository selected the design recorded in `artifacts/LS02b/design/synthesis.md`. LS02a implements its per-group RocksDB database, compact log descriptors, single payload objects, separate control and data configurations, explicit bootstrap, and current-read barrier.

@@ -1,0 +1,38 @@
+{
+  "bookmark_survived_expiry": true,
+  "filesystem_payload_reclaim": "DEFERRED_LS06",
+  "lease_mutation_p99_seconds": 0.07998866700000207,
+  "lease_mutation_seconds": [
+    0.046901125000005095,
+    0.07099691699999511,
+    0.07723716699999983,
+    0.07998866700000207
+  ],
+  "logical_floor": 9,
+  "logical_reclaimed_bytes": 41,
+  "protected_replay_complete": true,
+  "raft_only_bytes": 41,
+  "revision": "693f85a9294c887a206d5f21ae8d82def14b50704ccd8985f32f8ccfe719a054",
+  "stream": {
+    "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+    "lifecycle": "active",
+    "name": "retained-orders",
+    "placements": [
+      {
+        "group": 2,
+        "partition": 0
+      },
+      {
+        "group": 2,
+        "partition": 1
+      }
+    ],
+    "ready_groups": [
+      2
+    ],
+    "revision": 4,
+    "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+  },
+  "unleased_replay_explicitly_expired": true,
+  "verdict": "PASS"
+}

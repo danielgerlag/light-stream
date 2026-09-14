@@ -39,6 +39,18 @@ Each payload ownership value has separate flags for:
 
 Log truncation and purge clear only the Raft-log flag. A payload is deleted only when no flag remains.
 
+## LS05 retention schema
+
+LS05 keeps the column-family layout at version 1 and adds record schema version 2. `StoredRecord` now stores the payload length and the cumulative byte position for its partition.
+
+The opener migrates legacy record values before it returns a store handle. Migration writes at most 1,024 records per synchronous batch and stores a durable cursor in `ls_v1_meta`. A restart resumes at that cursor.
+
+Each partition stores a monotonic logical floor, a reclaim cursor, the cumulative byte position at the floor, and logical byte counters. Ordinary fetch checks the floor in the same RocksDB snapshot that it uses for records.
+
+Replay leases store an exact half-open range, a byte charge, a safe-time deadline, a hard lifetime, and a terminal lifecycle. Mutation receipts make admission, renewal, release, and floor advancement safe to retry after a lost response.
+
+Retention maintenance deletes only expired record indexes that no active lease protects. It clears applied-state ownership in the same batch. Raft purge still clears only Raft-log ownership. `raft_only_bytes` reports logically expired payloads that retained Raft entries still own.
+
 ## Snapshots
 
 LS02a snapshots are versioned byte bundles capped at 64 MiB. A bundle contains the group identity, Openraft snapshot metadata, every committed state entry, and every payload that the applied state references.

@@ -1,0 +1,167 @@
+{
+  "budget_ms": 100,
+  "cli": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "diagnostics",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bookmarks",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "retention",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "protected-replay",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "http://127.0.0.1:63953",
+    "health": {
+      "bootstrapped": false,
+      "cluster_id": null,
+      "peer_address": "http://127.0.0.1:63954",
+      "public_address": "http://127.0.0.1:63953",
+      "status": {
+        "ready": true,
+        "revision": "23682a11748218d57fccc1d2163a43a2fecbc5329fc4950ecbb5947a5ad42e3e",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true
+  },
+  "health_latency_ms": [
+    1.50275,
+    0.766708,
+    0.6807920000000001,
+    0.5830839999999999,
+    0.5866250000000001,
+    0.612667,
+    0.587125,
+    0.5786250000000001,
+    0.585917,
+    0.6672089999999999,
+    0.6529170000000001,
+    0.620833,
+    0.572875,
+    0.577625,
+    0.5649160000000001,
+    0.5313749999999999,
+    0.516917,
+    0.512291,
+    0.509458,
+    0.728708
+  ],
+  "health_p99_ms": 1.50275,
+  "process": {
+    "command": [
+      "/Users/danielgerlag/dev/light-stream/target/release/light-streamd",
+      "--data-dir",
+      "/Users/danielgerlag/dev/light-stream/artifacts/LS01/ls05-regression-final-2/scratch/success/health",
+      "--public-listen",
+      "127.0.0.1:0",
+      "--peer-listen",
+      "127.0.0.1:0",
+      "--security-mode",
+      "local-insecure",
+      "--node-id",
+      "1"
+    ],
+    "data_directory": "/Users/danielgerlag/dev/light-stream/artifacts/LS01/ls05-regression-final-2/scratch/success/health",
+    "label": "health",
+    "peer_address": "127.0.0.1:63954",
+    "pid": 90054,
+    "public_address": "127.0.0.1:63953",
+    "revision": "23682a11748218d57fccc1d2163a43a2fecbc5329fc4950ecbb5947a5ad42e3e"
+  },
+  "public_api_on_peer_port": {
+    "error": {
+      "code": "client_error",
+      "message": "request failed: code: 'Operation is not implemented or not supported'"
+    },
+    "ok": false
+  },
+  "revision": "23682a11748218d57fccc1d2163a43a2fecbc5329fc4950ecbb5947a5ad42e3e",
+  "rust_client": {
+    "command": "health-samples",
+    "endpoint": "http://127.0.0.1:63953",
+    "entrypoint": "rust-client",
+    "health": {
+      "bootstrapped": false,
+      "cluster_id": null,
+      "peer_address": "http://127.0.0.1:63954",
+      "public_address": "http://127.0.0.1:63953",
+      "status": {
+        "ready": true,
+        "revision": "23682a11748218d57fccc1d2163a43a2fecbc5329fc4950ecbb5947a5ad42e3e",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true,
+    "samples_ms": [
+      1.50275,
+      0.766708,
+      0.6807920000000001,
+      0.5830839999999999,
+      0.5866250000000001,
+      0.612667,
+      0.587125,
+      0.5786250000000001,
+      0.585917,
+      0.6672089999999999,
+      0.6529170000000001,
+      0.620833,
+      0.572875,
+      0.577625,
+      0.5649160000000001,
+      0.5313749999999999,
+      0.516917,
+      0.512291,
+      0.509458,
+      0.728708
+    ]
+  },
+  "verdict": "PASS"
+}

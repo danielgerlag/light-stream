@@ -4,15 +4,18 @@ use light_stream_core::{
     Capability, CapabilityReport, CapabilitySupport, HealthStatus, SecurityMode,
 };
 use light_stream_proto::{
-    bookmark_page_to_wire, bookmark_to_wire, bootstrap_from_wire, bootstrap_to_wire,
-    capabilities_to_wire, create_bookmark_from_wire, create_stream_bookmark_from_wire,
-    create_stream_from_wire, delete_bookmark_from_wire, delete_stream_bookmark_from_wire,
-    domain_error_to_wire, fetch_from_wire, fetch_to_wire, health_to_wire, list_bookmarks_from_wire,
-    list_stream_bookmarks_from_wire, publish_batch_and_route_from_wire, publish_probe_from_wire,
-    publish_receipt_to_wire, receipt_from_wire, resolve_bookmark_from_wire,
-    resolve_stream_bookmark_from_wire, route_to_wire, stream_bookmark_page_to_wire,
-    stream_bookmark_to_wire, stream_selector_from_wire, stream_to_wire,
-    unsupported_publish_to_wire,
+    admit_replay_lease_from_wire, advance_retention_from_wire, bookmark_page_to_wire,
+    bookmark_to_wire, bootstrap_from_wire, bootstrap_to_wire, capabilities_to_wire,
+    create_bookmark_from_wire, create_stream_bookmark_from_wire, create_stream_from_wire,
+    delete_bookmark_from_wire, delete_stream_bookmark_from_wire, domain_error_to_wire,
+    fetch_from_wire, fetch_protected_from_wire, fetch_to_wire, get_replay_lease_from_wire,
+    health_to_wire, list_bookmarks_from_wire, list_stream_bookmarks_from_wire,
+    publish_batch_and_route_from_wire, publish_probe_from_wire, publish_receipt_to_wire,
+    receipt_from_wire, release_replay_lease_from_wire, renew_replay_lease_from_wire,
+    replay_lease_to_wire, resolve_bookmark_from_wire, resolve_stream_bookmark_from_wire,
+    retention_result_to_wire, retention_status_from_wire, retention_status_to_wire, route_to_wire,
+    stream_bookmark_page_to_wire, stream_bookmark_to_wire, stream_selector_from_wire,
+    stream_to_wire, unsupported_publish_to_wire,
     v1::{self, light_stream_server::LightStream},
 };
 use tonic::{Request, Response, Status};
@@ -50,6 +53,8 @@ impl PublicApi {
             Capability::Receipt,
             Capability::Diagnostics,
             Capability::Bookmarks,
+            Capability::Retention,
+            Capability::ProtectedReplay,
         ]
         .into_iter()
         .map(|capability| CapabilityReport::new(capability, CapabilitySupport::Available))
@@ -438,6 +443,150 @@ impl LightStream for PublicApi {
                 )),
             })),
         }
+    }
+
+    async fn advance_retention(
+        &self,
+        request: Request<v1::AdvanceRetentionRequest>,
+    ) -> Result<Response<v1::AdvanceRetentionResponse>, Status> {
+        let (cluster, request, group, revision) = advance_retention_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .advance_retention(cluster, request, group, revision)
+            .await
+        {
+            Ok(result) => {
+                v1::advance_retention_response::Result::Success(retention_result_to_wire(&result))
+            }
+            Err(error) => {
+                v1::advance_retention_response::Result::Error(domain_error_to_wire(&error))
+            }
+        };
+        Ok(Response::new(v1::AdvanceRetentionResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn get_retention_status(
+        &self,
+        request: Request<v1::RetentionStatusRequest>,
+    ) -> Result<Response<v1::RetentionStatusResponse>, Status> {
+        let (cluster, partition, group, revision) =
+            retention_status_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .retention_status(cluster, partition, group, revision)
+            .await
+        {
+            Ok(status) => {
+                v1::retention_status_response::Result::Status(retention_status_to_wire(&status))
+            }
+            Err(error) => {
+                v1::retention_status_response::Result::Error(domain_error_to_wire(&error))
+            }
+        };
+        Ok(Response::new(v1::RetentionStatusResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn admit_replay_lease(
+        &self,
+        request: Request<v1::AdmitReplayLeaseRequest>,
+    ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let (cluster, request, group, revision) =
+            admit_replay_lease_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .admit_replay_lease(cluster, request, group, revision)
+            .await
+        {
+            Ok(lease) => v1::replay_lease_response::Result::Lease(replay_lease_to_wire(&lease)),
+            Err(error) => v1::replay_lease_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::ReplayLeaseResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn renew_replay_lease(
+        &self,
+        request: Request<v1::RenewReplayLeaseRequest>,
+    ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let (cluster, request, group, revision) =
+            renew_replay_lease_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .renew_replay_lease(cluster, request, group, revision)
+            .await
+        {
+            Ok(lease) => v1::replay_lease_response::Result::Lease(replay_lease_to_wire(&lease)),
+            Err(error) => v1::replay_lease_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::ReplayLeaseResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn release_replay_lease(
+        &self,
+        request: Request<v1::ReleaseReplayLeaseRequest>,
+    ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let (cluster, request, group, revision) =
+            release_replay_lease_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .release_replay_lease(cluster, request, group, revision)
+            .await
+        {
+            Ok(lease) => v1::replay_lease_response::Result::Lease(replay_lease_to_wire(&lease)),
+            Err(error) => v1::replay_lease_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::ReplayLeaseResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn get_replay_lease(
+        &self,
+        request: Request<v1::GetReplayLeaseRequest>,
+    ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let (cluster, partition, lease, group, revision) =
+            get_replay_lease_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .replay_lease(cluster, partition, lease, group, revision)
+            .await
+        {
+            Ok(lease) => v1::replay_lease_response::Result::Lease(replay_lease_to_wire(&lease)),
+            Err(error) => v1::replay_lease_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::ReplayLeaseResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn fetch_protected(
+        &self,
+        request: Request<v1::FetchProtectedRequest>,
+    ) -> Result<Response<v1::FetchResponse>, Status> {
+        let (request, group, revision) = fetch_protected_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let response = match self.cluster.fetch_protected(request, group, revision).await {
+            Ok(page) => fetch_to_wire(&page),
+            Err(error) => v1::FetchResponse {
+                result: Some(v1::fetch_response::Result::Error(domain_error_to_wire(
+                    &error,
+                ))),
+            },
+        };
+        Ok(Response::new(response))
     }
 
     async fn diagnostics(

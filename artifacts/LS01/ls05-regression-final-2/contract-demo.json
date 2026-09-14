@@ -1,0 +1,72 @@
+{
+  "capabilities": [
+    {
+      "capability": "health",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "bootstrap",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "publish",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "fetch",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "receipt",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "diagnostics",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "bookmarks",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "retention",
+      "support": {
+        "status": "available"
+      }
+    },
+    {
+      "capability": "protected-replay",
+      "support": {
+        "status": "available"
+      }
+    }
+  ],
+  "command": "health",
+  "endpoint": "http://127.0.0.1:63953",
+  "health": {
+    "bootstrapped": false,
+    "cluster_id": null,
+    "peer_address": "http://127.0.0.1:63954",
+    "public_address": "http://127.0.0.1:63953",
+    "status": {
+      "ready": true,
+      "revision": "23682a11748218d57fccc1d2163a43a2fecbc5329fc4950ecbb5947a5ad42e3e",
+      "security_mode": "local-insecure"
+    }
+  },
+  "ok": true
+}

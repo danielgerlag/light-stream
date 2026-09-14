@@ -1,0 +1,29 @@
+{
+  "aggregate_and_active_quota_unit_coverage": true,
+  "configured_limits": {
+    "lease_operation_p99_ms": 250,
+    "max_active_leases": 256,
+    "max_clock_skew_ms": 2000,
+    "max_group_reserved_lease_bytes": 4294967296,
+    "max_lease_bytes": 536870912,
+    "max_lease_duration_ms": 60000,
+    "max_total_lease_lifetime_ms": 900000,
+    "reclaim_batch_bytes": 8388608,
+    "reclaim_batch_records": 1024
+  },
+  "duration_rejection": {
+    "command": "request",
+    "error": {
+      "code": "resource_limit",
+      "detail": {
+        "code": "resource_limit",
+        "limit": 60000,
+        "resource": "replay_lease_duration_ms"
+      },
+      "message": "replay_lease_duration_ms limit 60000 was exceeded"
+    },
+    "ok": false
+  },
+  "recovery_headroom": "LOGICAL_GUARD_ONLY_LS05",
+  "verdict": "PASS"
+}

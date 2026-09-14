@@ -1,0 +1,15 @@
+{
+  "command": [
+    "/Users/danielgerlag/dev/light-stream/target/release/stream-poc",
+    "inspect",
+    "--engine",
+    "fjall",
+    "--dir",
+    "/Users/danielgerlag/dev/light-stream/.poc-data/9a76a4c78baa4cfeaee0cf876fdd2de5/smoke-r3-fjall-r1/follower-1",
+    "--shards",
+    "2"
+  ],
+  "returncode": 0,
+  "stderr": "",
+  "wall_seconds": 0.055677833999999926
+}

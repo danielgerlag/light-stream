@@ -1,0 +1,112 @@
+{
+  "background_maintenance_progress": {
+    "after_applied": 36,
+    "before_applied": 35
+  },
+  "clock_source": "system_time_with_declared_bound",
+  "declared_max_clock_skew_ms": 2000,
+  "expired": {
+    "expires_at": 1789405513871,
+    "generation": 2,
+    "hard_expires_at": 1789406413870,
+    "id": "67cb288a-ec95-3b6b-fc4a-c6ed3845cb3e",
+    "lifecycle": "expired",
+    "protected_bytes": 5,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 1,
+      "max_bytes": 1024,
+      "range": {
+        "end": 8,
+        "partition": {
+          "partition": 0,
+          "stream": "8471b6bf-3bd4-4d2e-ae66-78efa95bf62b"
+        },
+        "start": 7
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "48e101b4-b8b4-7e67-6c51-a6066974f879"
+      }
+    }
+  },
+  "immediate_read": {
+    "command": "replay-fetch",
+    "endpoint": "http://127.0.0.1:49308",
+    "lease": {
+      "expires_at": 1789405513871,
+      "generation": 1,
+      "hard_expires_at": 1789406413870,
+      "id": "67cb288a-ec95-3b6b-fc4a-c6ed3845cb3e",
+      "lifecycle": "active",
+      "protected_bytes": 5,
+      "request": {
+        "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+        "duration": 1,
+        "max_bytes": 1024,
+        "range": {
+          "end": 8,
+          "partition": {
+            "partition": 0,
+            "stream": "8471b6bf-3bd4-4d2e-ae66-78efa95bf62b"
+          },
+          "start": 7
+        },
+        "request": {
+          "principal": "replay-job",
+          "sequence": 1,
+          "session": "48e101b4-b8b4-7e67-6c51-a6066974f879"
+        }
+      }
+    },
+    "ok": true,
+    "page": {
+      "next_offset": 8,
+      "partition": {
+        "partition": 0,
+        "stream": "8471b6bf-3bd4-4d2e-ae66-78efa95bf62b"
+      },
+      "records": [
+        {
+          "offset": 7,
+          "payload": [
+            115,
+            104,
+            111,
+            114,
+            116
+          ]
+        }
+      ]
+    }
+  },
+  "lease": {
+    "expires_at": 1789405513871,
+    "generation": 1,
+    "hard_expires_at": 1789406413870,
+    "id": "67cb288a-ec95-3b6b-fc4a-c6ed3845cb3e",
+    "lifecycle": "active",
+    "protected_bytes": 5,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 1,
+      "max_bytes": 1024,
+      "range": {
+        "end": 8,
+        "partition": {
+          "partition": 0,
+          "stream": "8471b6bf-3bd4-4d2e-ae66-78efa95bf62b"
+        },
+        "start": 7
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "48e101b4-b8b4-7e67-6c51-a6066974f879"
+      }
+    }
+  },
+  "verdict": "PASS",
+  "wait_seconds": 4.5621274999999955
+}

@@ -7,6 +7,7 @@ mod cursor;
 mod error;
 mod identity;
 mod publish;
+mod replay;
 mod security;
 
 pub use bookmark::{
@@ -30,12 +31,18 @@ pub use cursor::{
 pub use error::{DomainError, ErrorCode};
 pub use identity::{
     BookmarkId, BookmarkName, BookmarkPublicationSequence, CatalogRequestId, ClusterId, ConsumerId,
-    GroupId, NodeId, PartitionId, PrincipalId, ProducerSessionId, RequestSequence, StreamId,
-    StreamName,
+    GroupId, MutationSessionId, NodeId, PartitionId, PrincipalId, ProducerSessionId, ReplayLeaseId,
+    RequestSequence, StreamId, StreamName,
 };
 pub use publish::{
     MAX_PUBLISH_BYTES, MAX_RECORD_BYTES, MAX_RECORDS_PER_PUBLISH, ProducerRequestId, PublishBatch,
     PublishProbe, PublishReceipt,
+};
+pub use replay::{
+    AmbiguousRequest, ByteCount, ByteLimit, LeaseDeadline, LeaseDuration, LeaseGeneration,
+    LeaseRelease, LeaseRenewal, MutationRequestId, ProtectedFetchRequest, ReplayAvailability,
+    ReplayLease, ReplayLeaseLifecycle, ReplayLeaseRequest, ReplayRange, RetentionRequest,
+    RetentionResult, RetentionStatus,
 };
 pub use security::SecurityMode;
 

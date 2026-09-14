@@ -1,0 +1,57 @@
+{
+  "bookmark": {
+    "cursor": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+      }
+    },
+    "id": "3c1ba6b4-b233-385d-b136-4af391779300",
+    "lifecycle": "available",
+    "name": "old-replay",
+    "publication": 1
+  },
+  "fetch_error": {
+    "command": "request",
+    "error": {
+      "code": "cursor_expired",
+      "detail": {
+        "available_from": 6,
+        "code": "cursor_expired",
+        "requested": 1
+      },
+      "message": "record offset RecordOffset(1) expired; earliest available offset is RecordOffset(6)"
+    },
+    "ok": false
+  },
+  "floor": {
+    "floor": 6,
+    "partition": {
+      "partition": 0,
+      "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+    },
+    "previous_floor": 0,
+    "request": {
+      "principal": "retention-operator",
+      "sequence": 1,
+      "session": "853b50b4-29ac-66f3-8ef9-579202fa8115"
+    }
+  },
+  "resolved_after_expiry": {
+    "cursor": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "dd09cfc5-12ed-465b-8b89-5f852dfb98d6"
+      }
+    },
+    "id": "3c1ba6b4-b233-385d-b136-4af391779300",
+    "lifecycle": "available",
+    "name": "old-replay",
+    "publication": 1
+  },
+  "verdict": "PASS"
+}

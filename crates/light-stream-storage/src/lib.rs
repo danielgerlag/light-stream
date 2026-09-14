@@ -1,3 +1,10 @@
+mod retention;
+pub use retention::ClockObservation;
+use retention::{
+    AdmissionState, LeaseBudget, PartitionRetentionState, RetentionLimits, SafeLeaseClock, admit,
+    advance_floor, lease_is_effectively_active,
+};
+
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fmt::{self, Debug},
@@ -15,12 +22,14 @@ use crc32fast::Hasher as Crc32;
 use futures_util::{Stream, StreamExt};
 use light_stream_core::{
     BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest, BookmarkPublicationSequence,
-    BootstrapResult, BootstrapSpec, CatalogRequestId, ClusterId, CommittedBookmark,
+    BootstrapResult, BootstrapSpec, ByteCount, CatalogRequestId, ClusterId, CommittedBookmark,
     CommittedCursor, CommittedRecord, CommittedRecordRange, CommittedStreamBookmark,
-    CreateStreamSpec, DomainError, FetchPage, GroupId, PartitionId, PartitionKey,
-    PartitionPlacement, PartitionRoute, ProducerRequestId, PublishBatch, PublishReceipt,
-    RecordOffset, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
-    StreamDescriptor, StreamId, StreamLifecycle, StreamName,
+    CreateStreamSpec, DomainError, FetchPage, GroupId, LeaseDeadline, LeaseRelease, LeaseRenewal,
+    MutationRequestId, PartitionId, PartitionKey, PartitionPlacement, PartitionRoute,
+    ProducerRequestId, PublishBatch, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId,
+    ReplayLeaseRequest, RetentionRequest, RetentionResult, RetentionStatus, StreamBookmarkPage,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
+    StreamName,
 };
 use openraft::{
     BasicNode, EntryPayload,
@@ -69,6 +78,8 @@ const COLUMN_FAMILIES: [&str; 6] = [
 ];
 
 const KEY_IDENTITY: &[u8] = b"identity";
+const KEY_SCHEMA_VERSION: &[u8] = b"schema-version";
+const KEY_SCHEMA_MIGRATION_CURSOR: &[u8] = b"schema-migration-cursor";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_PURGED: &[u8] = b"purged";
@@ -90,6 +101,8 @@ const PAYLOAD_OWNERS_PREFIX: &[u8] = b"owners/";
 const RECORD_PREFIX: &[u8] = b"record/";
 const RECEIPT_PREFIX: &[u8] = b"receipt/";
 const SESSION_PREFIX: &[u8] = b"session/";
+const MUTATION_RECEIPT_PREFIX: &[u8] = b"mutation-receipt/";
+const MUTATION_SESSION_PREFIX: &[u8] = b"mutation-session/";
 const BOOKMARK_ID_PREFIX: &[u8] = b"bookmark/id/";
 const BOOKMARK_NAME_PREFIX: &[u8] = b"bookmark/name/";
 const BOOKMARK_ORDER_PREFIX: &[u8] = b"bookmark/order/";
@@ -98,6 +111,14 @@ const STREAM_BOOKMARK_ID_PREFIX: &[u8] = b"stream-bookmark/id/";
 const STREAM_BOOKMARK_NAME_PREFIX: &[u8] = b"stream-bookmark/name/";
 const STREAM_BOOKMARK_ORDER_PREFIX: &[u8] = b"stream-bookmark/order/";
 const STREAM_BOOKMARK_PUBLICATION_PREFIX: &[u8] = b"stream-bookmark/publication/";
+const RETENTION_PREFIX: &[u8] = b"retention/";
+const KEY_LEASE_CLOCK: &[u8] = b"lease-clock";
+const KEY_LEASE_BUDGET: &[u8] = b"lease-budget";
+const LEASE_ID_PREFIX: &[u8] = b"lease/id/";
+const LEASE_REQUEST_PREFIX: &[u8] = b"lease/request/";
+const CURRENT_SCHEMA_VERSION: u32 = 2;
+const LEGACY_SCHEMA_VERSION: u32 = 1;
+const MIGRATION_BATCH_RECORDS: usize = 1024;
 
 type GroupLeaderId = openraft::impls::leader_id_adv::LeaderId<u64, u64>;
 pub type GroupLogId = openraft::LogId<GroupLeaderId>;
@@ -210,6 +231,29 @@ pub enum GroupCommand {
         stream_id: StreamId,
         id: BookmarkId,
     },
+    AdvanceRetention {
+        request: RetentionRequest,
+        clock: ClockObservation,
+    },
+    AdmitReplayLease {
+        request: ReplayLeaseRequest,
+        clock: ClockObservation,
+    },
+    RenewReplayLease {
+        request: LeaseRenewal,
+        clock: ClockObservation,
+    },
+    ReleaseReplayLease {
+        request: LeaseRelease,
+        clock: ClockObservation,
+    },
+    MaintainRetention {
+        partition: PartitionKey,
+        expected_cursor: RecordOffset,
+        max_records: u32,
+        max_payload_bytes: u64,
+        clock: ClockObservation,
+    },
 }
 
 impl fmt::Display for GroupCommand {
@@ -227,6 +271,11 @@ impl fmt::Display for GroupCommand {
             Self::DeleteBookmark { .. } => formatter.write_str("delete-bookmark"),
             Self::CreateStreamBookmark { .. } => formatter.write_str("create-stream-bookmark"),
             Self::DeleteStreamBookmark { .. } => formatter.write_str("delete-stream-bookmark"),
+            Self::AdvanceRetention { .. } => formatter.write_str("advance-retention"),
+            Self::AdmitReplayLease { .. } => formatter.write_str("admit-replay-lease"),
+            Self::RenewReplayLease { .. } => formatter.write_str("renew-replay-lease"),
+            Self::ReleaseReplayLease { .. } => formatter.write_str("release-replay-lease"),
+            Self::MaintainRetention { .. } => formatter.write_str("maintain-retention"),
         }
     }
 }
@@ -238,6 +287,9 @@ pub enum ApplyResult {
     Published(PublishReceipt),
     Bookmark(CommittedBookmark),
     StreamBookmark(CommittedStreamBookmark),
+    Retention(RetentionResult),
+    ReplayLease(ReplayLease),
+    RetentionStatus(RetentionStatus),
     Rejected(DomainError),
     Noop,
 }
@@ -250,6 +302,17 @@ impl fmt::Display for ApplyResult {
             Self::Published(_) => formatter.write_str("published"),
             Self::Bookmark(value) => write!(formatter, "bookmark {}", value.id()),
             Self::StreamBookmark(value) => write!(formatter, "stream bookmark {}", value.id()),
+            Self::Retention(value) => {
+                write!(formatter, "retention floor {}", value.floor().get())
+            }
+            Self::ReplayLease(value) => write!(formatter, "replay lease {}", value.id()),
+            Self::RetentionStatus(value) => {
+                write!(
+                    formatter,
+                    "retention cursor {}",
+                    value.reclaim_cursor().get()
+                )
+            }
             Self::Rejected(error) => write!(formatter, "rejected: {error}"),
             Self::Noop => formatter.write_str("noop"),
         }
@@ -450,6 +513,29 @@ enum ThinCommand {
         stream_id: StreamId,
         id: BookmarkId,
     },
+    AdvanceRetention {
+        request: RetentionRequest,
+        clock: ClockObservation,
+    },
+    AdmitReplayLease {
+        request: ReplayLeaseRequest,
+        clock: ClockObservation,
+    },
+    RenewReplayLease {
+        request: LeaseRenewal,
+        clock: ClockObservation,
+    },
+    ReleaseReplayLease {
+        request: LeaseRelease,
+        clock: ClockObservation,
+    },
+    MaintainRetention {
+        partition: PartitionKey,
+        expected_cursor: RecordOffset,
+        max_records: u32,
+        max_payload_bytes: u64,
+        clock: ClockObservation,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -468,6 +554,10 @@ impl PayloadOwners {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct StoredRecord {
     payload_key: Vec<u8>,
+    #[serde(default)]
+    payload_bytes: u64,
+    #[serde(default)]
+    cumulative_end_bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -476,10 +566,28 @@ struct StoredReceipt {
     receipt: PublishReceipt,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct StoredMutationReceipt {
+    fingerprint: String,
+    result: ApplyResult,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct ProducerSessionState {
     highest_sequence: Option<u64>,
     retained_sequences: VecDeque<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct MutationSessionState {
+    highest_sequence: Option<u64>,
+    retained_sequences: VecDeque<u64>,
+}
+
+struct LeaseExpiryState {
+    budget: LeaseBudget,
+    active: Vec<ReplayLease>,
+    retentions: Vec<(PartitionKey, PartitionRetentionState)>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -605,6 +713,9 @@ fn create_store<C>(
     group_db
         .put_sync(CF_META, KEY_IDENTITY, &identity)
         .map_err(storage_open)?;
+    group_db
+        .put_sync(CF_META, KEY_SCHEMA_VERSION, &CURRENT_SCHEMA_VERSION)
+        .map_err(storage_open)?;
     Ok(StoreHandles::new(group_db))
 }
 
@@ -652,6 +763,7 @@ fn open_store<C>(
             actual,
         });
     }
+    group_db.migrate_schema().map_err(storage_open)?;
     Ok(StoreHandles::new(group_db))
 }
 
@@ -757,6 +869,132 @@ impl GroupDb {
         }
         Ok(values)
     }
+
+    fn migrate_schema(&self) -> io::Result<()> {
+        let schema = self
+            .get::<u32>(CF_META, KEY_SCHEMA_VERSION)?
+            .unwrap_or(LEGACY_SCHEMA_VERSION);
+        if schema == CURRENT_SCHEMA_VERSION {
+            return Ok(());
+        }
+        if schema != LEGACY_SCHEMA_VERSION {
+            return Err(io_error(format!("unsupported record schema {schema}")));
+        }
+        loop {
+            let cursor = self.get::<Vec<u8>>(CF_META, KEY_SCHEMA_MIGRATION_CURSOR)?;
+            let records = self.migration_record_batch(cursor.as_deref())?;
+            let _guard = self.write_lane.enter()?;
+            let mut write = WriteBatch::default();
+            let meta = self.cf(CF_META)?;
+            if records.is_empty() {
+                write.put_cf(&meta, KEY_SCHEMA_VERSION, encode(&CURRENT_SCHEMA_VERSION)?);
+                write.delete_cf(&meta, KEY_SCHEMA_MIGRATION_CURSOR);
+                self.write_sync(write)?;
+                return Ok(());
+            }
+            let state = self.cf(CF_STATE)?;
+            let mut partitions = Vec::<(PartitionKey, PartitionRetentionState)>::new();
+            let mut last_key = None;
+            for (key, value) in records {
+                let partition = partition_from_record_key(&key)?;
+                let index = match partitions
+                    .iter()
+                    .position(|(candidate, _)| *candidate == partition)
+                {
+                    Some(index) => index,
+                    None => {
+                        let retention = self
+                            .get::<PartitionRetentionState>(CF_STATE, &retention_key(partition))?
+                            .unwrap_or_default();
+                        partitions.push((partition, retention));
+                        partitions.len() - 1
+                    }
+                };
+                let mut record = decode::<StoredRecord>(&value)?;
+                let payload_bytes = if record.payload_bytes == 0 {
+                    let bytes = self
+                        .get::<Vec<u8>>(CF_PAYLOAD, &payload_bytes_key(&record.payload_key))?
+                        .ok_or_else(|| io_error("migration record payload is missing"))?;
+                    u64::try_from(bytes.len()).map_err(io_error)?
+                } else {
+                    record.payload_bytes
+                };
+                let retention = &mut partitions[index].1;
+                retention.next_byte_position = retention
+                    .next_byte_position
+                    .checked_add(payload_bytes)
+                    .ok_or_else(|| io_error("partition byte position overflow during migration"))?;
+                record.payload_bytes = payload_bytes;
+                record.cumulative_end_bytes = retention.next_byte_position;
+                write.put_cf(&state, &key, encode(&record)?);
+                last_key = Some(key);
+            }
+            for (partition, retention) in partitions {
+                write.put_cf(&state, retention_key(partition), encode(&retention)?);
+            }
+            write.put_cf(
+                &meta,
+                KEY_SCHEMA_MIGRATION_CURSOR,
+                encode(&last_key.expect("nonempty migration batch has a last key"))?,
+            );
+            self.write_sync(write)?;
+        }
+    }
+
+    fn migration_record_batch(&self, cursor: Option<&[u8]>) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let state = self.cf(CF_STATE)?;
+        let start = cursor.unwrap_or(RECORD_PREFIX);
+        let mut records = Vec::with_capacity(MIGRATION_BATCH_RECORDS);
+        for item in self
+            .db
+            .iterator_cf(&state, IteratorMode::From(start, Direction::Forward))
+        {
+            let (key, value) = item.map_err(io_error)?;
+            if !key.starts_with(RECORD_PREFIX) {
+                break;
+            }
+            if cursor.is_some_and(|cursor| key.as_ref() <= cursor) {
+                continue;
+            }
+            records.push((key.to_vec(), value.to_vec()));
+            if records.len() == MIGRATION_BATCH_RECORDS {
+                break;
+            }
+        }
+        Ok(records)
+    }
+}
+
+fn partition_from_record_key(key: &[u8]) -> io::Result<PartitionKey> {
+    let expected = RECORD_PREFIX.len() + 16 + 4 + 8;
+    if key.len() != expected || !key.starts_with(RECORD_PREFIX) {
+        return Err(io_error("invalid record key during schema migration"));
+    }
+    let stream_start = RECORD_PREFIX.len();
+    let stream_end = stream_start + 16;
+    let stream = StreamId::from_uuid(
+        uuid::Uuid::from_slice(&key[stream_start..stream_end]).map_err(io_error)?,
+    );
+    let partition = u32::from_be_bytes(
+        key[stream_end..stream_end + 4]
+            .try_into()
+            .map_err(io_error)?,
+    );
+    Ok(PartitionKey::new(stream, PartitionId::new(partition)))
+}
+
+fn partition_from_retention_key(key: &[u8]) -> io::Result<PartitionKey> {
+    let expected = RETENTION_PREFIX.len() + 16 + 4;
+    if key.len() != expected || !key.starts_with(RETENTION_PREFIX) {
+        return Err(io_error("invalid retention key"));
+    }
+    let stream_start = RETENTION_PREFIX.len();
+    let stream_end = stream_start + 16;
+    let stream = StreamId::from_uuid(
+        uuid::Uuid::from_slice(&key[stream_start..stream_end]).map_err(io_error)?,
+    );
+    let partition = u32::from_be_bytes(key[stream_end..].try_into().map_err(io_error)?);
+    Ok(PartitionKey::new(stream, PartitionId::new(partition)))
 }
 
 fn fingerprint(batch: &PublishBatch) -> io::Result<String> {
@@ -774,6 +1012,16 @@ fn fingerprint(batch: &PublishBatch) -> io::Result<String> {
         records: batch.records(),
     })
     .map_err(io_error)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn retention_fingerprint(request: &RetentionRequest) -> io::Result<String> {
+    let bytes = serde_json::to_vec(request).map_err(io_error)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn mutation_fingerprint(value: &impl Serialize) -> io::Result<String> {
+    let bytes = serde_json::to_vec(value).map_err(io_error)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
@@ -819,6 +1067,14 @@ fn next_offset_key(partition: PartitionKey) -> Vec<u8> {
     key
 }
 
+fn retention_key(partition: PartitionKey) -> Vec<u8> {
+    let mut key = Vec::with_capacity(RETENTION_PREFIX.len() + 20);
+    key.extend_from_slice(RETENTION_PREFIX);
+    key.extend_from_slice(partition.stream().as_uuid().as_bytes());
+    key.extend_from_slice(&partition.partition().get().to_be_bytes());
+    key
+}
+
 fn stream_key(stream: StreamId) -> Vec<u8> {
     [STREAM_PREFIX, stream.as_uuid().as_bytes()].concat()
 }
@@ -847,6 +1103,38 @@ fn session_key(partition: PartitionKey, request: &ProducerRequestId) -> Vec<u8> 
     digest.update(request.principal().as_str().as_bytes());
     digest.update(request.session().as_uuid().as_bytes());
     [SESSION_PREFIX, digest.finalize().as_slice()].concat()
+}
+
+fn mutation_receipt_key(request: &MutationRequestId) -> io::Result<Vec<u8>> {
+    let body = serde_json::to_vec(request).map_err(io_error)?;
+    let mut digest = Sha256::new();
+    digest.update(body);
+    Ok([MUTATION_RECEIPT_PREFIX, digest.finalize().as_slice()].concat())
+}
+
+fn mutation_session_key(request: &MutationRequestId) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(request.principal().as_str().as_bytes());
+    digest.update(request.session().as_uuid().as_bytes());
+    [MUTATION_SESSION_PREFIX, digest.finalize().as_slice()].concat()
+}
+
+fn replay_lease_id_key(id: ReplayLeaseId) -> Vec<u8> {
+    [LEASE_ID_PREFIX, id.as_uuid().as_bytes()].concat()
+}
+
+fn replay_lease_request_key(request: &MutationRequestId) -> io::Result<Vec<u8>> {
+    let body = serde_json::to_vec(request).map_err(io_error)?;
+    Ok([LEASE_REQUEST_PREFIX, Sha256::digest(body).as_slice()].concat())
+}
+
+fn replay_lease_id(request: &MutationRequestId) -> io::Result<ReplayLeaseId> {
+    let body = serde_json::to_vec(request).map_err(io_error)?;
+    let digest = Sha256::digest(body);
+    let bytes: [u8; 16] = digest[..16]
+        .try_into()
+        .map_err(|_| io_error("replay lease digest width is invalid"))?;
+    Ok(ReplayLeaseId::from_uuid(uuid::Uuid::from_bytes(bytes)))
 }
 
 fn bookmark_id_key(id: BookmarkId) -> Vec<u8> {
@@ -1108,6 +1396,56 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                 },
                 Vec::new(),
             )),
+            GroupCommand::AdvanceRetention { request, clock } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::AdvanceRetention { request, clock }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::AdmitReplayLease { request, clock } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::AdmitReplayLease { request, clock }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::RenewReplayLease { request, clock } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::RenewReplayLease { request, clock }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::ReleaseReplayLease { request, clock } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::ReleaseReplayLease {
+                        request,
+                        clock,
+                    }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor,
+                max_records,
+                max_payload_bytes,
+                clock,
+            } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::MaintainRetention {
+                        partition,
+                        expected_cursor,
+                        max_records,
+                        max_payload_bytes,
+                        clock,
+                    }),
+                },
+                Vec::new(),
+            )),
         },
     }
 }
@@ -1229,6 +1567,31 @@ macro_rules! impl_log_storage {
                                 ThinCommand::DeleteStreamBookmark { stream_id, id } => {
                                     GroupCommand::DeleteStreamBookmark { stream_id, id }
                                 }
+                                ThinCommand::AdvanceRetention { request, clock } => {
+                                    GroupCommand::AdvanceRetention { request, clock }
+                                }
+                                ThinCommand::AdmitReplayLease { request, clock } => {
+                                    GroupCommand::AdmitReplayLease { request, clock }
+                                }
+                                ThinCommand::RenewReplayLease { request, clock } => {
+                                    GroupCommand::RenewReplayLease { request, clock }
+                                }
+                                ThinCommand::ReleaseReplayLease { request, clock } => {
+                                    GroupCommand::ReleaseReplayLease { request, clock }
+                                }
+                                ThinCommand::MaintainRetention {
+                                    partition,
+                                    expected_cursor,
+                                    max_records,
+                                    max_payload_bytes,
+                                    clock,
+                                } => GroupCommand::MaintainRetention {
+                                    partition,
+                                    expected_cursor,
+                                    max_records,
+                                    max_payload_bytes,
+                                    clock,
+                                },
                             };
                             EntryPayload::Normal(hydrated)
                         }
@@ -1594,6 +1957,32 @@ impl GroupDb {
             GroupCommand::DeleteStreamBookmark { stream_id, id } => {
                 self.apply_delete_stream_bookmark(stream_id, id, write)
             }
+            GroupCommand::AdvanceRetention { request, clock } => {
+                self.apply_advance_retention(request, clock, write)
+            }
+            GroupCommand::AdmitReplayLease { request, clock } => {
+                self.apply_admit_replay_lease(request, clock, write)
+            }
+            GroupCommand::RenewReplayLease { request, clock } => {
+                self.apply_renew_replay_lease(request, clock, write)
+            }
+            GroupCommand::ReleaseReplayLease { request, clock } => {
+                self.apply_release_replay_lease(request, clock, write)
+            }
+            GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor,
+                max_records,
+                max_payload_bytes,
+                clock,
+            } => self.apply_maintain_retention(
+                partition,
+                expected_cursor,
+                max_records,
+                max_payload_bytes,
+                clock,
+                write,
+            ),
         }
     }
 
@@ -2173,6 +2562,618 @@ impl GroupDb {
         Ok(ApplyResult::StreamBookmark(bookmark))
     }
 
+    fn apply_advance_retention(
+        &self,
+        request: RetentionRequest,
+        observation: ClockObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Data {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "retention command reached the control group".to_owned(),
+            }));
+        }
+        let fingerprint = retention_fingerprint(&request)?;
+        let receipt_key = mutation_receipt_key(request.request())?;
+        if let Some(existing) = self.get::<StoredMutationReceipt>(CF_STATE, &receipt_key)? {
+            return if existing.fingerprint == fingerprint {
+                Ok(existing.result)
+            } else {
+                Ok(ApplyResult::Rejected(DomainError::MutationConflict))
+            };
+        }
+        let session_key = mutation_session_key(request.request());
+        let mut session = self
+            .get::<MutationSessionState>(CF_STATE, &session_key)?
+            .unwrap_or_default();
+        let sequence = request.request().sequence().get();
+        if session
+            .highest_sequence
+            .is_some_and(|highest| sequence <= highest)
+        {
+            return Ok(ApplyResult::Rejected(DomainError::MutationReceiptExpired));
+        }
+        let tail = RecordOffset::new(
+            self.get::<u64>(CF_STATE, &next_offset_key(request.partition()))?
+                .unwrap_or_default(),
+        );
+        let previous = self
+            .get::<PartitionRetentionState>(CF_STATE, &retention_key(request.partition()))?
+            .unwrap_or_default();
+        let state = self.cf(CF_STATE)?;
+        let result = match advance_floor(
+            RecordOffset::new(previous.logical_floor),
+            request.target_floor(),
+            tail,
+        ) {
+            Ok(floor) => {
+                let clock = match self.get::<SafeLeaseClock>(CF_STATE, KEY_LEASE_CLOCK)? {
+                    Some(clock) => clock.advance(observation),
+                    None => SafeLeaseClock::new(observation),
+                };
+                match clock {
+                    Ok(clock) => {
+                        let floor_byte_position = if floor.get() == 0 {
+                            0
+                        } else {
+                            match self.get::<StoredRecord>(
+                                CF_STATE,
+                                &record_key(request.partition(), floor.get() - 1),
+                            )? {
+                                Some(record) => record.cumulative_end_bytes,
+                                None if floor == RecordOffset::new(previous.logical_floor) => {
+                                    previous.floor_byte_position
+                                }
+                                None => {
+                                    return Ok(ApplyResult::Rejected(DomainError::Storage {
+                                        reason: "retention floor byte boundary is unavailable"
+                                            .to_owned(),
+                                    }));
+                                }
+                            }
+                        };
+                        let status = PartitionRetentionState {
+                            logical_floor: floor.get(),
+                            floor_byte_position,
+                            ..previous
+                        };
+                        write.put_cf(&state, retention_key(request.partition()), encode(&status)?);
+                        write.put_cf(&state, KEY_LEASE_CLOCK, encode(&clock)?);
+                        ApplyResult::Retention(RetentionResult::new(
+                            request.request().clone(),
+                            request.partition(),
+                            RecordOffset::new(previous.logical_floor),
+                            floor,
+                        ))
+                    }
+                    Err(error) => ApplyResult::Rejected(error),
+                }
+            }
+            Err(error) => ApplyResult::Rejected(error),
+        };
+        write.put_cf(
+            &state,
+            receipt_key,
+            encode(&StoredMutationReceipt {
+                fingerprint,
+                result: result.clone(),
+            })?,
+        );
+        session.highest_sequence = Some(sequence);
+        session.retained_sequences.push_back(sequence);
+        if session.retained_sequences.len() > self.receipt_window
+            && let Some(expired) = session.retained_sequences.pop_front()
+        {
+            let expired_request = MutationRequestId::new(
+                request.request().principal().clone(),
+                request.request().session(),
+                light_stream_core::RequestSequence::new(expired),
+            );
+            write.delete_cf(&state, mutation_receipt_key(&expired_request)?);
+        }
+        write.put_cf(&state, session_key, encode(&session)?);
+        Ok(result)
+    }
+
+    fn prior_mutation_result(
+        &self,
+        request: &MutationRequestId,
+        fingerprint: &str,
+    ) -> io::Result<Option<ApplyResult>> {
+        let receipt_key = mutation_receipt_key(request)?;
+        if let Some(existing) = self.get::<StoredMutationReceipt>(CF_STATE, &receipt_key)? {
+            return if existing.fingerprint == fingerprint {
+                Ok(Some(existing.result))
+            } else {
+                Ok(Some(ApplyResult::Rejected(DomainError::MutationConflict)))
+            };
+        }
+        let session = self
+            .get::<MutationSessionState>(CF_STATE, &mutation_session_key(request))?
+            .unwrap_or_default();
+        if session
+            .highest_sequence
+            .is_some_and(|highest| request.sequence().get() <= highest)
+        {
+            return Ok(Some(ApplyResult::Rejected(
+                DomainError::MutationReceiptExpired,
+            )));
+        }
+        Ok(None)
+    }
+
+    fn store_mutation_result(
+        &self,
+        request: &MutationRequestId,
+        fingerprint: String,
+        result: &ApplyResult,
+        write: &mut WriteBatch,
+    ) -> io::Result<()> {
+        let state = self.cf(CF_STATE)?;
+        write.put_cf(
+            &state,
+            mutation_receipt_key(request)?,
+            encode(&StoredMutationReceipt {
+                fingerprint,
+                result: result.clone(),
+            })?,
+        );
+        let session_key = mutation_session_key(request);
+        let mut session = self
+            .get::<MutationSessionState>(CF_STATE, &session_key)?
+            .unwrap_or_default();
+        let sequence = request.sequence().get();
+        session.highest_sequence = Some(sequence);
+        session.retained_sequences.push_back(sequence);
+        if session.retained_sequences.len() > self.receipt_window
+            && let Some(expired) = session.retained_sequences.pop_front()
+        {
+            let expired_request = MutationRequestId::new(
+                request.principal().clone(),
+                request.session(),
+                light_stream_core::RequestSequence::new(expired),
+            );
+            write.delete_cf(&state, mutation_receipt_key(&expired_request)?);
+        }
+        write.put_cf(&state, session_key, encode(&session)?);
+        Ok(())
+    }
+
+    fn advance_lease_clock(
+        &self,
+        observation: ClockObservation,
+    ) -> io::Result<Result<SafeLeaseClock, DomainError>> {
+        Ok(
+            match self.get::<SafeLeaseClock>(CF_STATE, KEY_LEASE_CLOCK)? {
+                Some(clock) => clock.advance(observation),
+                None => SafeLeaseClock::new(observation),
+            },
+        )
+    }
+
+    fn expire_due_leases(
+        &self,
+        clock: &SafeLeaseClock,
+        write: &mut WriteBatch,
+    ) -> io::Result<LeaseExpiryState> {
+        let state = self.cf(CF_STATE)?;
+        let leases = self
+            .scan_prefix(CF_STATE, LEASE_ID_PREFIX)?
+            .into_iter()
+            .map(|(_, value)| decode::<ReplayLease>(&value))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut budget = self
+            .get::<LeaseBudget>(CF_STATE, KEY_LEASE_BUDGET)?
+            .unwrap_or_default();
+        let mut active = Vec::new();
+        let mut retentions = Vec::<(PartitionKey, PartitionRetentionState)>::new();
+        let mut expired_any = false;
+        for lease in leases {
+            if lease_is_effectively_active(&lease, clock) {
+                active.push(lease);
+                continue;
+            }
+            if lease.lifecycle() != light_stream_core::ReplayLeaseLifecycle::Active {
+                continue;
+            }
+            let range = lease.range();
+            let protected_bytes = lease.protected_bytes().get();
+            let expired = lease.expired();
+            write.put_cf(&state, replay_lease_id_key(expired.id()), encode(&expired)?);
+            budget.active_leases = budget.active_leases.saturating_sub(1);
+            budget.reserved_bytes = budget.reserved_bytes.saturating_sub(protected_bytes);
+            let index = match retentions
+                .iter()
+                .position(|(partition, _)| *partition == range.partition())
+            {
+                Some(index) => index,
+                None => {
+                    retentions.push((
+                        range.partition(),
+                        self.get::<PartitionRetentionState>(
+                            CF_STATE,
+                            &retention_key(range.partition()),
+                        )?
+                        .unwrap_or_default(),
+                    ));
+                    retentions.len() - 1
+                }
+            };
+            let retention = &mut retentions[index].1;
+            if range.start().get() < retention.logical_floor {
+                retention.reclaim_cursor = retention.reclaim_cursor.min(range.start().get());
+            }
+            expired_any = true;
+        }
+        if expired_any {
+            write.put_cf(&state, KEY_LEASE_BUDGET, encode(&budget)?);
+            for (partition, retention) in &retentions {
+                write.put_cf(&state, retention_key(*partition), encode(retention)?);
+            }
+        }
+        Ok(LeaseExpiryState {
+            budget,
+            active,
+            retentions,
+        })
+    }
+
+    fn replay_range_bytes(
+        &self,
+        request: &ReplayLeaseRequest,
+        retention: PartitionRetentionState,
+    ) -> io::Result<Result<ByteCount, DomainError>> {
+        let range = request.range();
+        let start_bytes = if range.start().get() == retention.logical_floor {
+            retention.floor_byte_position
+        } else {
+            let key = record_key(range.partition(), range.start().get() - 1);
+            let Some(record) = self.get::<StoredRecord>(CF_STATE, &key)? else {
+                return Ok(Err(DomainError::InvalidRange {
+                    reason: "replay lease start boundary is unavailable".to_owned(),
+                }));
+            };
+            record.cumulative_end_bytes
+        };
+        let Some(last_offset) = range.end().get().checked_sub(1) else {
+            return Ok(Err(DomainError::InvalidRange {
+                reason: "replay lease range is empty".to_owned(),
+            }));
+        };
+        let Some(last) =
+            self.get::<StoredRecord>(CF_STATE, &record_key(range.partition(), last_offset))?
+        else {
+            return Ok(Err(DomainError::InvalidRange {
+                reason: "replay lease end boundary is unavailable".to_owned(),
+            }));
+        };
+        Ok(last
+            .cumulative_end_bytes
+            .checked_sub(start_bytes)
+            .map(ByteCount::new)
+            .ok_or_else(|| DomainError::Storage {
+                reason: "replay lease byte index is not monotonic".to_owned(),
+            }))
+    }
+
+    fn apply_admit_replay_lease(
+        &self,
+        request: ReplayLeaseRequest,
+        observation: ClockObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let fingerprint = mutation_fingerprint(&request)?;
+        if let Some(result) = self.prior_mutation_result(request.request(), &fingerprint)? {
+            return Ok(result);
+        }
+        let result = match self.advance_lease_clock(observation)? {
+            Ok(clock) => {
+                let expiry = self.expire_due_leases(&clock, write)?;
+                let retention = self
+                    .get::<PartitionRetentionState>(
+                        CF_STATE,
+                        &retention_key(request.range().partition()),
+                    )?
+                    .unwrap_or_default();
+                let tail = RecordOffset::new(
+                    self.get::<u64>(CF_STATE, &next_offset_key(request.range().partition()))?
+                        .unwrap_or_default(),
+                );
+                if request.range().start() < RecordOffset::new(retention.logical_floor) {
+                    ApplyResult::Rejected(DomainError::CursorExpired {
+                        requested: request.range().start(),
+                        available_from: RecordOffset::new(retention.logical_floor),
+                    })
+                } else {
+                    match self.replay_range_bytes(&request, retention)? {
+                        Ok(bytes) => {
+                            let budget = expiry.budget;
+                            let limits = RetentionLimits::default();
+                            match admit(
+                                replay_lease_id(request.request())?,
+                                request.clone(),
+                                bytes,
+                                AdmissionState {
+                                    floor: RecordOffset::new(retention.logical_floor),
+                                    tail,
+                                    clock: &clock,
+                                    limits: &limits,
+                                    budget,
+                                },
+                            ) {
+                                Ok(lease) => {
+                                    let state = self.cf(CF_STATE)?;
+                                    write.put_cf(
+                                        &state,
+                                        replay_lease_id_key(lease.id()),
+                                        encode(&lease)?,
+                                    );
+                                    write.put_cf(
+                                        &state,
+                                        replay_lease_request_key(request.request())?,
+                                        encode(&lease.id())?,
+                                    );
+                                    write.put_cf(
+                                        &state,
+                                        KEY_LEASE_BUDGET,
+                                        encode(&LeaseBudget {
+                                            active_leases: budget.active_leases.saturating_add(1),
+                                            reserved_bytes: budget
+                                                .reserved_bytes
+                                                .saturating_add(bytes.get()),
+                                        })?,
+                                    );
+                                    write.put_cf(&state, KEY_LEASE_CLOCK, encode(&clock)?);
+                                    ApplyResult::ReplayLease(lease)
+                                }
+                                Err(error) => ApplyResult::Rejected(error),
+                            }
+                        }
+                        Err(error) => ApplyResult::Rejected(error),
+                    }
+                }
+            }
+            Err(error) => ApplyResult::Rejected(error),
+        };
+        self.store_mutation_result(request.request(), fingerprint, &result, write)?;
+        Ok(result)
+    }
+
+    fn apply_renew_replay_lease(
+        &self,
+        request: LeaseRenewal,
+        observation: ClockObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let fingerprint = mutation_fingerprint(&request)?;
+        if let Some(result) = self.prior_mutation_result(request.request(), &fingerprint)? {
+            return Ok(result);
+        }
+        let result = match self.advance_lease_clock(observation)? {
+            Ok(clock) => {
+                self.expire_due_leases(&clock, write)?;
+                let id_key = replay_lease_id_key(request.lease());
+                match self.get::<ReplayLease>(CF_STATE, &id_key)? {
+                    Some(lease) if lease.range().partition() != request.partition() => {
+                        ApplyResult::Rejected(DomainError::ReplayLeaseRangeViolation)
+                    }
+                    Some(lease) if lease_is_effectively_active(&lease, &clock) => {
+                        let expires_at = clock
+                            .upper_bound()
+                            .checked_add(request.duration().as_millis())
+                            .map(LeaseDeadline::new);
+                        match expires_at {
+                            Some(expires_at) => {
+                                let hard_expires_at = lease.hard_expires_at();
+                                match lease.renewed(expires_at, hard_expires_at) {
+                                    Ok(lease) => {
+                                        let state = self.cf(CF_STATE)?;
+                                        write.put_cf(&state, id_key, encode(&lease)?);
+                                        write.put_cf(&state, KEY_LEASE_CLOCK, encode(&clock)?);
+                                        ApplyResult::ReplayLease(lease)
+                                    }
+                                    Err(error) => ApplyResult::Rejected(error),
+                                }
+                            }
+                            None => ApplyResult::Rejected(DomainError::LeaseClockUnavailable),
+                        }
+                    }
+                    Some(lease) => ApplyResult::Rejected(DomainError::ReplayLeaseInactive {
+                        lease: lease.id(),
+                        lifecycle: if lease.lifecycle()
+                            == light_stream_core::ReplayLeaseLifecycle::Active
+                        {
+                            light_stream_core::ReplayLeaseLifecycle::Expired
+                        } else {
+                            lease.lifecycle()
+                        },
+                    }),
+                    None => ApplyResult::Rejected(DomainError::ReplayLeaseNotFound {
+                        lease: request.lease(),
+                    }),
+                }
+            }
+            Err(error) => ApplyResult::Rejected(error),
+        };
+        self.store_mutation_result(request.request(), fingerprint, &result, write)?;
+        Ok(result)
+    }
+
+    fn apply_release_replay_lease(
+        &self,
+        request: LeaseRelease,
+        observation: ClockObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let fingerprint = mutation_fingerprint(&request)?;
+        if let Some(result) = self.prior_mutation_result(request.request(), &fingerprint)? {
+            return Ok(result);
+        }
+        let result = match self.advance_lease_clock(observation)? {
+            Ok(clock) => {
+                let expiry = self.expire_due_leases(&clock, write)?;
+                let id_key = replay_lease_id_key(request.lease());
+                match self.get::<ReplayLease>(CF_STATE, &id_key)? {
+                    Some(lease) if lease.range().partition() != request.partition() => {
+                        ApplyResult::Rejected(DomainError::ReplayLeaseRangeViolation)
+                    }
+                    Some(lease) if lease_is_effectively_active(&lease, &clock) => {
+                        let released = lease.released();
+                        let budget = expiry.budget;
+                        let state = self.cf(CF_STATE)?;
+                        write.put_cf(&state, id_key, encode(&released)?);
+                        let partition = released.range().partition();
+                        let mut retention = expiry
+                            .retentions
+                            .iter()
+                            .find(|(candidate, _)| *candidate == partition)
+                            .map(|(_, retention)| *retention)
+                            .unwrap_or(
+                                self.get::<PartitionRetentionState>(
+                                    CF_STATE,
+                                    &retention_key(partition),
+                                )?
+                                .unwrap_or_default(),
+                            );
+                        if released.range().start().get() < retention.logical_floor {
+                            retention.reclaim_cursor =
+                                retention.reclaim_cursor.min(released.range().start().get());
+                            write.put_cf(&state, retention_key(partition), encode(&retention)?);
+                        }
+                        write.put_cf(
+                            &state,
+                            KEY_LEASE_BUDGET,
+                            encode(&LeaseBudget {
+                                active_leases: budget.active_leases.saturating_sub(1),
+                                reserved_bytes: budget
+                                    .reserved_bytes
+                                    .saturating_sub(released.protected_bytes().get()),
+                            })?,
+                        );
+                        write.put_cf(&state, KEY_LEASE_CLOCK, encode(&clock)?);
+                        ApplyResult::ReplayLease(released)
+                    }
+                    Some(lease) => ApplyResult::Rejected(DomainError::ReplayLeaseInactive {
+                        lease: lease.id(),
+                        lifecycle: if lease.lifecycle()
+                            == light_stream_core::ReplayLeaseLifecycle::Active
+                        {
+                            light_stream_core::ReplayLeaseLifecycle::Expired
+                        } else {
+                            lease.lifecycle()
+                        },
+                    }),
+                    None => ApplyResult::Rejected(DomainError::ReplayLeaseNotFound {
+                        lease: request.lease(),
+                    }),
+                }
+            }
+            Err(error) => ApplyResult::Rejected(error),
+        };
+        self.store_mutation_result(request.request(), fingerprint, &result, write)?;
+        Ok(result)
+    }
+
+    fn apply_maintain_retention(
+        &self,
+        partition: PartitionKey,
+        expected_cursor: RecordOffset,
+        max_records: u32,
+        max_payload_bytes: u64,
+        observation: ClockObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if max_records == 0 || max_payload_bytes == 0 {
+            return Ok(ApplyResult::Rejected(DomainError::InvalidRange {
+                reason: "retention maintenance limits must be greater than zero".to_owned(),
+            }));
+        }
+        let mut retention = self
+            .get::<PartitionRetentionState>(CF_STATE, &retention_key(partition))?
+            .unwrap_or_default();
+        if retention.reclaim_cursor != expected_cursor.get() {
+            return Ok(ApplyResult::RetentionStatus(RetentionStatus::new(
+                partition,
+                RecordOffset::new(retention.logical_floor),
+                RecordOffset::new(retention.reclaim_cursor),
+                ByteCount::new(retention.logically_expired_bytes),
+                ByteCount::new(retention.raft_only_bytes),
+            )));
+        }
+        let clock = match self.advance_lease_clock(observation)? {
+            Ok(clock) => clock,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        let expiry = self.expire_due_leases(&clock, write)?;
+        if let Some((_, updated)) = expiry
+            .retentions
+            .iter()
+            .find(|(candidate, _)| *candidate == partition)
+        {
+            retention = *updated;
+        }
+        let state = self.cf(CF_STATE)?;
+        let payload = self.cf(CF_PAYLOAD)?;
+        let active_ranges = expiry
+            .active
+            .into_iter()
+            .filter(|lease| lease.range().partition() == partition)
+            .map(|lease| lease.range())
+            .collect::<Vec<_>>();
+        let mut examined = 0_u32;
+        let mut reclaimed_bytes = 0_u64;
+        while retention.reclaim_cursor < retention.logical_floor && examined < max_records {
+            let offset = RecordOffset::new(retention.reclaim_cursor);
+            if let Some(range) = active_ranges.iter().find(|range| range.contains(offset)) {
+                retention.reclaim_cursor = range.end().get().min(retention.logical_floor);
+                continue;
+            }
+            let record_key = record_key(partition, retention.reclaim_cursor);
+            let Some(record) = self.get::<StoredRecord>(CF_STATE, &record_key)? else {
+                retention.reclaim_cursor = retention.reclaim_cursor.saturating_add(1);
+                examined = examined.saturating_add(1);
+                continue;
+            };
+            if examined > 0
+                && reclaimed_bytes.saturating_add(record.payload_bytes) > max_payload_bytes
+            {
+                break;
+            }
+            let owners_key = payload_owners_key(&record.payload_key);
+            let mut owners = self
+                .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
+                .ok_or_else(|| io_error("retained record payload is missing ownership"))?;
+            owners.applied_state = false;
+            write.delete_cf(&state, record_key);
+            if owners.reachable() {
+                if owners.raft_log {
+                    retention.raft_only_bytes = retention
+                        .raft_only_bytes
+                        .saturating_add(record.payload_bytes);
+                }
+                write.put_cf(&payload, owners_key, encode(&owners)?);
+            } else {
+                write.delete_cf(&payload, owners_key);
+                write.delete_cf(&payload, payload_bytes_key(&record.payload_key));
+            }
+            retention.logically_expired_bytes = retention
+                .logically_expired_bytes
+                .saturating_add(record.payload_bytes);
+            retention.reclaim_cursor = retention.reclaim_cursor.saturating_add(1);
+            reclaimed_bytes = reclaimed_bytes.saturating_add(record.payload_bytes);
+            examined = examined.saturating_add(1);
+        }
+        write.put_cf(&state, retention_key(partition), encode(&retention)?);
+        write.put_cf(&state, KEY_LEASE_CLOCK, encode(&clock)?);
+        Ok(ApplyResult::RetentionStatus(RetentionStatus::new(
+            partition,
+            RecordOffset::new(retention.logical_floor),
+            RecordOffset::new(retention.reclaim_cursor),
+            ByteCount::new(retention.logically_expired_bytes),
+            ByteCount::new(retention.raft_only_bytes),
+        )))
+    }
+
     fn apply_publish(
         &self,
         log_id: GroupLogId,
@@ -2242,7 +3243,10 @@ impl GroupDb {
         };
         let payload_cf = self.cf(CF_PAYLOAD)?;
         let state_cf = self.cf(CF_STATE)?;
-        for (slot, _record) in batch.records().iter().enumerate() {
+        let mut retention = self
+            .get::<PartitionRetentionState>(CF_STATE, &retention_key(batch.partition()))?
+            .unwrap_or_default();
+        for (slot, record) in batch.records().iter().enumerate() {
             let payload_key = payload_id(log_id, slot);
             let owners_key = payload_owners_key(&payload_key);
             let mut owners = self
@@ -2251,11 +3255,18 @@ impl GroupDb {
             owners.applied_state = true;
             write.put_cf(&payload_cf, owners_key, encode(&owners)?);
             let offset = first + u64::try_from(slot).map_err(io_error)?;
+            let payload_bytes = u64::try_from(record.len()).map_err(io_error)?;
+            retention.next_byte_position = retention
+                .next_byte_position
+                .checked_add(payload_bytes)
+                .ok_or_else(|| io_error("partition byte position overflow"))?;
             write.put_cf(
                 &state_cf,
                 record_key(batch.partition(), offset),
                 encode(&StoredRecord {
                     payload_key: payload_key.clone(),
+                    payload_bytes,
+                    cumulative_end_bytes: retention.next_byte_position,
                 })?,
             );
         }
@@ -2263,6 +3274,11 @@ impl GroupDb {
             &state_cf,
             next_offset_key(batch.partition()),
             encode(&(first + count))?,
+        );
+        write.put_cf(
+            &state_cf,
+            retention_key(batch.partition()),
+            encode(&retention)?,
         );
         let receipt = PublishReceipt::new(batch.request().clone(), range, bookmark);
         write.put_cf(
@@ -2317,6 +3333,15 @@ impl GroupDb {
                     .map_err(io_error)?
                     .ok_or_else(|| io_error("snapshot payload bytes are missing"))?;
                 payloads.push((bytes_key, bytes.to_vec()));
+            } else {
+                owners.snapshot_artifact = false;
+                if owners.reachable() {
+                    write.put_cf(&payload_cf, &key, encode(&owners)?);
+                } else {
+                    let id = &key[PAYLOAD_OWNERS_PREFIX.len()..];
+                    write.delete_cf(&payload_cf, &key);
+                    write.delete_cf(&payload_cf, payload_bytes_key(id));
+                }
             }
         }
         let bundle = SnapshotBundle {
@@ -2449,6 +3474,19 @@ impl CommittedStateReader {
         let state_cf = self.db.cf(CF_STATE).map_err(storage_domain)?;
         let payload_cf = self.db.cf(CF_PAYLOAD).map_err(storage_domain)?;
         let snapshot = self.db.db.snapshot();
+        let retention = snapshot
+            .get_cf(&state_cf, retention_key(partition))
+            .map_err(storage_domain)?
+            .map(|value| decode::<PartitionRetentionState>(&value).map_err(storage_domain))
+            .transpose()?
+            .unwrap_or_default();
+        let floor = RecordOffset::new(retention.logical_floor);
+        if offset < floor {
+            return Err(DomainError::CursorExpired {
+                requested: offset,
+                available_from: floor,
+            });
+        }
         let mut records = Vec::new();
         let mut payload_bytes = 0usize;
         for item in snapshot.iterator_cf(&state_cf, IteratorMode::From(&start, Direction::Forward))
@@ -2492,6 +3530,211 @@ impl CommittedStateReader {
             .get::<u64>(CF_STATE, &next_offset_key(partition))
             .map_err(storage_domain)
             .map(|value| RecordOffset::new(value.unwrap_or_default()))
+    }
+
+    pub fn retention_status(
+        &self,
+        partition: PartitionKey,
+    ) -> Result<RetentionStatus, DomainError> {
+        let value = self
+            .db
+            .get::<PartitionRetentionState>(CF_STATE, &retention_key(partition))
+            .map_err(storage_domain)?
+            .unwrap_or_default();
+        Ok(RetentionStatus::new(
+            partition,
+            RecordOffset::new(value.logical_floor),
+            RecordOffset::new(value.reclaim_cursor),
+            light_stream_core::ByteCount::new(value.logically_expired_bytes),
+            light_stream_core::ByteCount::new(value.raft_only_bytes),
+        ))
+    }
+
+    pub fn retention_maintenance_needed(
+        &self,
+        partition: PartitionKey,
+        safe_lower_bound_unix_ms: u64,
+    ) -> Result<bool, DomainError> {
+        let status = self
+            .db
+            .get::<PartitionRetentionState>(CF_STATE, &retention_key(partition))
+            .map_err(storage_domain)?
+            .unwrap_or_default();
+        if status.reclaim_cursor < status.logical_floor {
+            return Ok(true);
+        }
+        let leases = self
+            .db
+            .scan_prefix(CF_STATE, LEASE_ID_PREFIX)
+            .map_err(storage_domain)?
+            .into_iter()
+            .map(|(_, value)| decode::<ReplayLease>(&value).map_err(storage_domain))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(leases.into_iter().any(|lease| {
+            lease.range().partition() == partition
+                && lease.lifecycle() == light_stream_core::ReplayLeaseLifecycle::Active
+                && (safe_lower_bound_unix_ms >= lease.expires_at().unix_millis()
+                    || safe_lower_bound_unix_ms >= lease.hard_expires_at().unix_millis())
+        }))
+    }
+
+    pub fn retention_partitions(&self) -> Result<Vec<PartitionKey>, DomainError> {
+        self.db
+            .scan_prefix(CF_STATE, RETENTION_PREFIX)
+            .map_err(storage_domain)?
+            .into_iter()
+            .map(|(key, _)| partition_from_retention_key(&key).map_err(storage_domain))
+            .collect()
+    }
+
+    pub fn retention_receipt(
+        &self,
+        request: &MutationRequestId,
+    ) -> Result<RetentionResult, DomainError> {
+        let receipt = self
+            .db
+            .get::<StoredMutationReceipt>(
+                CF_STATE,
+                &mutation_receipt_key(request).map_err(storage_domain)?,
+            )
+            .map_err(storage_domain)?
+            .ok_or(DomainError::MutationReceiptExpired)?;
+        match receipt.result {
+            ApplyResult::Retention(result) => Ok(result),
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("mutation receipt contains unexpected result {other}"),
+            }),
+        }
+    }
+
+    pub fn replay_lease_by_request(
+        &self,
+        request: &MutationRequestId,
+    ) -> Result<ReplayLease, DomainError> {
+        let id = self
+            .db
+            .get::<ReplayLeaseId>(
+                CF_STATE,
+                &replay_lease_request_key(request).map_err(storage_domain)?,
+            )
+            .map_err(storage_domain)?
+            .ok_or(DomainError::MutationReceiptExpired)?;
+        self.db
+            .get::<ReplayLease>(CF_STATE, &replay_lease_id_key(id))
+            .map_err(storage_domain)?
+            .ok_or(DomainError::ReplayLeaseNotFound { lease: id })
+    }
+
+    pub fn replay_lease(
+        &self,
+        partition: PartitionKey,
+        id: ReplayLeaseId,
+    ) -> Result<ReplayLease, DomainError> {
+        let lease = self
+            .db
+            .get::<ReplayLease>(CF_STATE, &replay_lease_id_key(id))
+            .map_err(storage_domain)?
+            .ok_or(DomainError::ReplayLeaseNotFound { lease: id })?;
+        if lease.range().partition() != partition {
+            return Err(DomainError::ReplayLeaseRangeViolation);
+        }
+        Ok(lease)
+    }
+
+    pub fn fetch_protected(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        lease_id: ReplayLeaseId,
+        offset: RecordOffset,
+        limit: u32,
+    ) -> Result<FetchPage, DomainError> {
+        if limit == 0 || limit > MAX_FETCH_RECORDS {
+            return Err(DomainError::InvalidRange {
+                reason: format!("fetch limit must be between 1 and {MAX_FETCH_RECORDS}"),
+            });
+        }
+        let spec = self.bootstrap_spec()?.ok_or(DomainError::NotBootstrapped)?;
+        if cluster != self.db.identity.cluster_id || cluster != spec.cluster() {
+            return Err(DomainError::IdentityMismatch {
+                reason: "fetch cluster does not match the data group".to_owned(),
+            });
+        }
+        let state_cf = self.db.cf(CF_STATE).map_err(storage_domain)?;
+        let payload_cf = self.db.cf(CF_PAYLOAD).map_err(storage_domain)?;
+        let snapshot = self.db.db.snapshot();
+        let lease = snapshot
+            .get_cf(&state_cf, replay_lease_id_key(lease_id))
+            .map_err(storage_domain)?
+            .map(|value| decode::<ReplayLease>(&value).map_err(storage_domain))
+            .transpose()?
+            .ok_or(DomainError::ReplayLeaseNotFound { lease: lease_id })?;
+        if lease.request().cluster() != cluster || lease.range().partition() != partition {
+            return Err(DomainError::ReplayLeaseRangeViolation);
+        }
+        let clock = snapshot
+            .get_cf(&state_cf, KEY_LEASE_CLOCK)
+            .map_err(storage_domain)?
+            .map(|value| decode::<SafeLeaseClock>(&value).map_err(storage_domain))
+            .transpose()?
+            .ok_or(DomainError::LeaseClockUnavailable)?;
+        if !lease_is_effectively_active(&lease, &clock) {
+            return Err(DomainError::ReplayLeaseInactive {
+                lease: lease.id(),
+                lifecycle: if lease.lifecycle() == light_stream_core::ReplayLeaseLifecycle::Active {
+                    light_stream_core::ReplayLeaseLifecycle::Expired
+                } else {
+                    lease.lifecycle()
+                },
+            });
+        }
+        let range = lease.range();
+        if offset == range.end() {
+            return Ok(FetchPage::new(range.partition(), Vec::new(), offset));
+        }
+        if !range.contains(offset) {
+            return Err(DomainError::ReplayLeaseRangeViolation);
+        }
+        let prefix = record_prefix(range.partition());
+        let start = record_key(range.partition(), offset.get());
+        let mut records = Vec::new();
+        let mut payload_bytes = 0usize;
+        for item in snapshot.iterator_cf(&state_cf, IteratorMode::From(&start, Direction::Forward))
+        {
+            let (key, value) = item.map_err(storage_domain)?;
+            if !key.starts_with(&prefix) || records.len() >= limit as usize {
+                break;
+            }
+            let offset_bytes: [u8; 8] =
+                key[key.len() - 8..]
+                    .try_into()
+                    .map_err(|_| DomainError::Storage {
+                        reason: "invalid record key".to_owned(),
+                    })?;
+            let record_offset = RecordOffset::new(u64::from_be_bytes(offset_bytes));
+            if record_offset >= range.end() {
+                break;
+            }
+            let stored: StoredRecord = decode(&value).map_err(storage_domain)?;
+            let payload = snapshot
+                .get_cf(&payload_cf, payload_bytes_key(&stored.payload_key))
+                .map_err(storage_domain)?
+                .ok_or_else(|| DomainError::Storage {
+                    reason: "protected record payload is missing".to_owned(),
+                })?;
+            let payload: Vec<u8> = decode(&payload).map_err(storage_domain)?;
+            if !records.is_empty() && payload_bytes.saturating_add(payload.len()) > MAX_FETCH_BYTES
+            {
+                break;
+            }
+            payload_bytes = payload_bytes.saturating_add(payload.len());
+            records.push(CommittedRecord::new(record_offset, payload));
+        }
+        let next_offset = records.last().map_or(offset, |record| {
+            RecordOffset::new(record.offset().get() + 1)
+        });
+        Ok(FetchPage::new(range.partition(), records, next_offset))
     }
 
     pub fn resolve_bookmark(
@@ -3190,6 +4433,702 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_floor_expires_fetch_without_deleting_bookmarks() {
+        let directory = ProjectTestDir::new("retention-floor");
+        let (cluster, stream) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(DATA_GROUP_ID).unwrap(),
+            GroupKind::Data,
+        );
+        let handles = create_data_store(
+            &directory.0,
+            identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let bookmark_id = BookmarkId::from_uuid(Uuid::new_v4());
+        let mutation = MutationRequestId::new(
+            light_stream_core::PrincipalId::parse("operator").unwrap(),
+            light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+            light_stream_core::RequestSequence::new(1),
+        );
+        let retention_request =
+            RetentionRequest::new(mutation.clone(), partition, RecordOffset::new(2));
+        let entries = vec![
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::Publish {
+                    batch: PublishBatch::new(
+                        cluster,
+                        partition,
+                        ProducerRequestId::new(
+                            light_stream_core::PrincipalId::parse("test").unwrap(),
+                            light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+                            light_stream_core::RequestSequence::new(1),
+                        ),
+                        vec![b"zero".to_vec(), b"one".to_vec(), b"two".to_vec()],
+                    )
+                    .unwrap(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CreateBookmark {
+                    id: bookmark_id,
+                    partition,
+                    name: BookmarkName::parse("old-boundary").unwrap(),
+                    offset: RecordOffset::new(1),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    4,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::AdvanceRetention {
+                    request: retention_request.clone(),
+                    clock: ClockObservation::new(8_000, 12_000).unwrap(),
+                }),
+            },
+        ];
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter(
+                entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+        let duplicate = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                5,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::AdvanceRetention {
+                request: retention_request,
+                clock: ClockObservation::new(9_000, 13_000).unwrap(),
+            }),
+        };
+        log.append([duplicate.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter([Ok((duplicate, None))]))
+            .await
+            .unwrap();
+        let retained_result = handles.reader.retention_receipt(&mutation).unwrap();
+        assert_eq!(retained_result.previous_floor(), RecordOffset::new(0));
+        assert_eq!(retained_result.floor(), RecordOffset::new(2));
+        let conflict = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                6,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::AdvanceRetention {
+                request: RetentionRequest::new(mutation.clone(), partition, RecordOffset::new(3)),
+                clock: ClockObservation::new(10_000, 14_000).unwrap(),
+            }),
+        };
+        log.append([conflict.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter([Ok((conflict, None))]))
+            .await
+            .unwrap();
+        assert_eq!(
+            handles.reader.retention_receipt(&mutation).unwrap().floor(),
+            RecordOffset::new(2)
+        );
+
+        let error = handles
+            .reader
+            .fetch(cluster, partition, RecordOffset::new(1), 10)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            DomainError::CursorExpired {
+                requested,
+                available_from
+            } if requested == RecordOffset::new(1) && available_from == RecordOffset::new(2)
+        ));
+        assert_eq!(
+            handles
+                .reader
+                .fetch(cluster, partition, RecordOffset::new(2), 10)
+                .unwrap()
+                .records()[0]
+                .payload(),
+            b"two"
+        );
+        assert_eq!(
+            handles
+                .reader
+                .resolve_bookmark(partition, &BookmarkName::parse("old-boundary").unwrap())
+                .unwrap()
+                .id(),
+            bookmark_id
+        );
+        let status = handles.reader.retention_status(partition).unwrap();
+        assert_eq!(status.logical_floor(), RecordOffset::new(2));
+        assert_eq!(status.reclaim_cursor(), RecordOffset::new(0));
+    }
+
+    #[tokio::test]
+    async fn replay_lease_preserves_a_bounded_island_below_the_floor() {
+        let directory = ProjectTestDir::new("replay-lease");
+        let (cluster, stream) = ids();
+        let handles = create_data_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(DATA_GROUP_ID).unwrap(),
+                GroupKind::Data,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let session = light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4());
+        let admission_id = MutationRequestId::new(
+            light_stream_core::PrincipalId::parse("replay").unwrap(),
+            session,
+            light_stream_core::RequestSequence::new(1),
+        );
+        let lease_request = light_stream_core::ReplayLeaseRequest::new(
+            admission_id.clone(),
+            cluster,
+            light_stream_core::ReplayRange::new(
+                partition,
+                RecordOffset::new(1),
+                RecordOffset::new(3),
+            )
+            .unwrap(),
+            light_stream_core::LeaseDuration::from_millis(30_000).unwrap(),
+            light_stream_core::ByteLimit::new(1024).unwrap(),
+        );
+        let entries = vec![
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::Publish {
+                    batch: PublishBatch::new(
+                        cluster,
+                        partition,
+                        ProducerRequestId::new(
+                            light_stream_core::PrincipalId::parse("test").unwrap(),
+                            light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+                            light_stream_core::RequestSequence::new(1),
+                        ),
+                        vec![
+                            b"zero".to_vec(),
+                            b"one".to_vec(),
+                            b"two".to_vec(),
+                            b"three".to_vec(),
+                        ],
+                    )
+                    .unwrap(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::AdmitReplayLease {
+                    request: lease_request,
+                    clock: ClockObservation::new(8_000, 12_000).unwrap(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    4,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::AdvanceRetention {
+                    request: RetentionRequest::new(
+                        MutationRequestId::new(
+                            light_stream_core::PrincipalId::parse("operator").unwrap(),
+                            light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+                            light_stream_core::RequestSequence::new(1),
+                        ),
+                        partition,
+                        RecordOffset::new(4),
+                    ),
+                    clock: ClockObservation::new(9_000, 13_000).unwrap(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    5,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::MaintainRetention {
+                    partition,
+                    expected_cursor: RecordOffset::new(0),
+                    max_records: 128,
+                    max_payload_bytes: 1024,
+                    clock: ClockObservation::new(10_000, 14_000).unwrap(),
+                }),
+            },
+        ];
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter(
+                entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+        let lease = handles
+            .reader
+            .replay_lease_by_request(&admission_id)
+            .unwrap();
+        let page = handles
+            .reader
+            .fetch_protected(cluster, partition, lease.id(), RecordOffset::new(1), 10)
+            .unwrap();
+        assert_eq!(
+            page.records()
+                .iter()
+                .map(|record| record.payload())
+                .collect::<Vec<_>>(),
+            vec![b"one".as_slice(), b"two".as_slice()]
+        );
+        let other_partition = PartitionKey::new(stream, PartitionId::new(1));
+        assert!(matches!(
+            handles.reader.fetch_protected(
+                cluster,
+                other_partition,
+                lease.id(),
+                RecordOffset::new(1),
+                10,
+            ),
+            Err(DomainError::ReplayLeaseRangeViolation)
+        ));
+        let mismatched_release = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                6,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::ReleaseReplayLease {
+                request: light_stream_core::LeaseRelease::new(
+                    MutationRequestId::new(
+                        light_stream_core::PrincipalId::parse("replay").unwrap(),
+                        light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+                        light_stream_core::RequestSequence::new(1),
+                    ),
+                    other_partition,
+                    lease.id(),
+                ),
+                clock: ClockObservation::new(11_000, 15_000).unwrap(),
+            }),
+        };
+        log.append([mismatched_release.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter([Ok((mismatched_release, None))]))
+            .await
+            .unwrap();
+        assert_eq!(
+            handles
+                .reader
+                .replay_lease(partition, lease.id())
+                .unwrap()
+                .lifecycle(),
+            light_stream_core::ReplayLeaseLifecycle::Active
+        );
+        let expired_other = ReplayLease::admitted(
+            ReplayLeaseId::from_uuid(Uuid::new_v4()),
+            ReplayLeaseRequest::new(
+                MutationRequestId::new(
+                    light_stream_core::PrincipalId::parse("other").unwrap(),
+                    light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+                    light_stream_core::RequestSequence::new(1),
+                ),
+                cluster,
+                light_stream_core::ReplayRange::new(
+                    other_partition,
+                    RecordOffset::new(0),
+                    RecordOffset::new(1),
+                )
+                .unwrap(),
+                light_stream_core::LeaseDuration::from_millis(1).unwrap(),
+                light_stream_core::ByteLimit::new(1).unwrap(),
+            ),
+            ByteCount::new(1),
+            LeaseDeadline::new(10_000),
+            LeaseDeadline::new(10_000),
+        );
+        let mut fixture = WriteBatch::default();
+        fixture.put_cf(
+            &handles.reader.db.cf(CF_STATE).unwrap(),
+            replay_lease_id_key(expired_other.id()),
+            encode(&expired_other).unwrap(),
+        );
+        fixture.put_cf(
+            &handles.reader.db.cf(CF_STATE).unwrap(),
+            KEY_LEASE_BUDGET,
+            encode(&LeaseBudget {
+                active_leases: 2,
+                reserved_bytes: lease
+                    .protected_bytes()
+                    .get()
+                    .saturating_add(expired_other.protected_bytes().get()),
+            })
+            .unwrap(),
+        );
+        handles.reader.db.write_sync(fixture).unwrap();
+        assert!(matches!(
+            handles
+                .reader
+                .fetch(cluster, partition, RecordOffset::new(1), 10)
+                .unwrap_err(),
+            DomainError::CursorExpired { .. }
+        ));
+        let status = handles.reader.retention_status(partition).unwrap();
+        assert_eq!(status.reclaim_cursor(), RecordOffset::new(4));
+        assert_eq!(status.logically_expired_bytes(), ByteCount::new(9));
+        assert_eq!(status.raft_only_bytes(), ByteCount::new(9));
+
+        let release = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                7,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::ReleaseReplayLease {
+                request: light_stream_core::LeaseRelease::new(
+                    MutationRequestId::new(
+                        light_stream_core::PrincipalId::parse("replay").unwrap(),
+                        session,
+                        light_stream_core::RequestSequence::new(2),
+                    ),
+                    partition,
+                    lease.id(),
+                ),
+                clock: ClockObservation::new(12_000, 16_000).unwrap(),
+            }),
+        };
+        log.append([release.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter([Ok((release, None))]))
+            .await
+            .unwrap();
+        assert_eq!(
+            handles
+                .reader
+                .db
+                .get::<LeaseBudget>(CF_STATE, KEY_LEASE_BUDGET)
+                .unwrap(),
+            Some(LeaseBudget::default())
+        );
+        assert_eq!(
+            handles
+                .reader
+                .retention_status(partition)
+                .unwrap()
+                .reclaim_cursor(),
+            RecordOffset::new(1)
+        );
+        let finish = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                8,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor: RecordOffset::new(1),
+                max_records: 128,
+                max_payload_bytes: 1024,
+                clock: ClockObservation::new(13_000, 17_000).unwrap(),
+            }),
+        };
+        log.append([finish.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter([Ok((finish, None))]))
+            .await
+            .unwrap();
+        let status = handles.reader.retention_status(partition).unwrap();
+        assert_eq!(status.reclaim_cursor(), RecordOffset::new(4));
+        assert_eq!(status.logically_expired_bytes(), ByteCount::new(15));
+        assert_eq!(status.raft_only_bytes(), ByteCount::new(15));
+        assert!(matches!(
+            handles.reader.fetch_protected(
+                cluster,
+                partition,
+                lease.id(),
+                RecordOffset::new(1),
+                10,
+            ),
+            Err(DomainError::ReplayLeaseInactive {
+                lifecycle: light_stream_core::ReplayLeaseLifecycle::Released,
+                ..
+            })
+        ));
+        handles
+            .reader
+            .db
+            .db
+            .put_cf(
+                &handles.reader.db.cf(CF_STATE).unwrap(),
+                replay_lease_id_key(lease.id()),
+                b"corrupt",
+            )
+            .unwrap();
+        let corrupt_maintenance = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                9,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor: RecordOffset::new(4),
+                max_records: 16,
+                max_payload_bytes: 1024,
+                clock: ClockObservation::new(14_000, 18_000).unwrap(),
+            }),
+        };
+        log.append([corrupt_maintenance.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        assert!(
+            state
+                .apply(futures_util::stream::iter([Ok((
+                    corrupt_maintenance,
+                    None,
+                ))]))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_record_schema_migrates_with_a_durable_byte_index() {
+        #[derive(Serialize)]
+        struct LegacyStoredRecord {
+            payload_key: Vec<u8>,
+        }
+
+        let directory = ProjectTestDir::new("record-schema-migration");
+        let (cluster, stream) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(DATA_GROUP_ID).unwrap(),
+            GroupKind::Data,
+        );
+        {
+            let handles = create_data_store(
+                &directory.0,
+                identity.clone(),
+                DEFAULT_RECEIPT_WINDOW,
+                test_budget(),
+            )
+            .unwrap();
+            let mut log = handles.log_store;
+            let mut state_machine = handles.state_machine;
+            let partition = PartitionKey::new(stream, PartitionId::new(0));
+            let entries = vec![
+                GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        1,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                        spec: BootstrapSpec::new(
+                            cluster,
+                            stream,
+                            StreamName::parse("bootstrap").unwrap(),
+                        ),
+                    }),
+                },
+                GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        2,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::Publish {
+                        batch: PublishBatch::new(
+                            cluster,
+                            partition,
+                            ProducerRequestId::new(
+                                light_stream_core::PrincipalId::parse("test").unwrap(),
+                                light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+                                light_stream_core::RequestSequence::new(1),
+                            ),
+                            vec![b"legacy".to_vec()],
+                        )
+                        .unwrap(),
+                    }),
+                },
+            ];
+            log.append(entries.clone(), IOFlushed::noop())
+                .await
+                .unwrap();
+            state_machine
+                .apply(futures_util::stream::iter(
+                    entries.into_iter().map(|entry| Ok((entry, None))),
+                ))
+                .await
+                .unwrap();
+            let record_key = record_key(partition, 0);
+            let record = handles
+                .reader
+                .db
+                .get::<StoredRecord>(CF_STATE, &record_key)
+                .unwrap()
+                .unwrap();
+            let mut write = WriteBatch::default();
+            write.put_cf(
+                &handles.reader.db.cf(CF_STATE).unwrap(),
+                record_key,
+                encode(&LegacyStoredRecord {
+                    payload_key: record.payload_key,
+                })
+                .unwrap(),
+            );
+            write.delete_cf(&handles.reader.db.cf(CF_META).unwrap(), KEY_SCHEMA_VERSION);
+            write.delete_cf(
+                &handles.reader.db.cf(CF_STATE).unwrap(),
+                retention_key(partition),
+            );
+            handles.reader.db.write_sync(write).unwrap();
+        }
+
+        let handles = open_data_store(
+            &directory.0,
+            &identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let record = handles
+            .reader
+            .db
+            .get::<StoredRecord>(CF_STATE, &record_key(partition, 0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.payload_bytes, 6);
+        assert_eq!(record.cumulative_end_bytes, 6);
+        assert_eq!(
+            handles
+                .reader
+                .retention_status(partition)
+                .unwrap()
+                .logical_floor(),
+            RecordOffset::new(0)
+        );
+        assert_eq!(
+            handles
+                .reader
+                .db
+                .get::<u32>(CF_META, KEY_SCHEMA_VERSION)
+                .unwrap(),
+            Some(CURRENT_SCHEMA_VERSION)
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_contains_and_installs_payloads() {
         let source = ProjectTestDir::new("snapshot-source");
         let target = ProjectTestDir::new("snapshot-target");
@@ -3260,6 +5199,81 @@ mod tests {
             .unwrap();
         let mut builder = source_state.get_snapshot_builder().await;
         let snapshot = builder.build_snapshot().await.unwrap();
+        let stored = source_handles
+            .reader
+            .db
+            .get::<StoredRecord>(CF_STATE, &record_key(partition, 0))
+            .unwrap()
+            .unwrap();
+        let retention_entries = [
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::AdvanceRetention {
+                    request: RetentionRequest::new(
+                        MutationRequestId::new(
+                            light_stream_core::PrincipalId::parse("operator").unwrap(),
+                            light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+                            light_stream_core::RequestSequence::new(1),
+                        ),
+                        partition,
+                        RecordOffset::new(1),
+                    ),
+                    clock: ClockObservation::new(8_000, 12_000).unwrap(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    4,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::MaintainRetention {
+                    partition,
+                    expected_cursor: RecordOffset::new(0),
+                    max_records: 16,
+                    max_payload_bytes: 1024,
+                    clock: ClockObservation::new(9_000, 13_000).unwrap(),
+                }),
+            },
+        ];
+        source_log
+            .append(retention_entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        source_state
+            .apply(futures_util::stream::iter(
+                retention_entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+        source_log
+            .purge(GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                4,
+            ))
+            .await
+            .unwrap();
+        let mut replacement_builder = source_state.get_snapshot_builder().await;
+        replacement_builder.build_snapshot().await.unwrap();
+        assert!(
+            source_handles
+                .reader
+                .db
+                .get::<PayloadOwners>(CF_PAYLOAD, &payload_owners_key(&stored.payload_key),)
+                .unwrap()
+                .is_none()
+        );
 
         let target_handles =
             create_data_store(&target.0, identity, DEFAULT_RECEIPT_WINDOW, test_budget()).unwrap();

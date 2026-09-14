@@ -1,13 +1,17 @@
 use light_stream_core::{
-    BookmarkId, BookmarkLifecycle, BookmarkName, BookmarkPage, BookmarkPageRequest,
-    BookmarkPublicationSequence, BootstrapCommand, BootstrapResult, BootstrapSpec,
-    CapabilityReport, CapabilitySupport, CatalogRequestId, ClusterId, CommittedBookmark,
-    CommittedCursor, CommittedStreamBookmark, ConsensusGroup, CreateBookmarkSpec, CreateStreamSpec,
-    DomainError, FetchPage, GroupId, HealthStatus, LeaderHint, NodeDescriptor, NodeId, PartitionId,
-    PartitionKey, PartitionPlacement, PartitionRoute, PrincipalId, ProducerRequestId,
-    ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, RequestOutcome,
-    RequestSequence, SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName,
+    AmbiguousRequest, BookmarkId, BookmarkLifecycle, BookmarkName, BookmarkPage,
+    BookmarkPageRequest, BookmarkPublicationSequence, BootstrapCommand, BootstrapResult,
+    BootstrapSpec, ByteCount, ByteLimit, CapabilityReport, CapabilitySupport, CatalogRequestId,
+    ClusterId, CommittedBookmark, CommittedCursor, CommittedStreamBookmark, ConsensusGroup,
+    CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId, HealthStatus,
+    LeaderHint, LeaseDeadline, LeaseDuration, LeaseGeneration, LeaseRelease, LeaseRenewal,
+    MutationRequestId, MutationSessionId, NodeDescriptor, NodeId, PartitionId, PartitionKey,
+    PartitionPlacement, PartitionRoute, PrincipalId, ProducerRequestId, ProducerSessionId,
+    ProtectedFetchRequest, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, ReplayLease,
+    ReplayLeaseId, ReplayLeaseLifecycle, ReplayLeaseRequest, ReplayRange, RequestOutcome,
+    RequestSequence, RetentionRequest, RetentionResult, RetentionStatus, SecurityMode,
+    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
+    StreamLifecycle, StreamName,
 };
 
 use crate::v1;
@@ -509,6 +513,318 @@ pub fn stream_bookmark_page_to_wire(page: &StreamBookmarkPage) -> v1::ListStream
     }
 }
 
+pub type AdvanceRetentionParts = (ClusterId, RetentionRequest, Option<GroupId>, Option<u64>);
+
+pub fn advance_retention_from_wire(
+    request: v1::AdvanceRetentionRequest,
+) -> Result<AdvanceRetentionParts, DomainError> {
+    let request_id = request
+        .request_id
+        .ok_or_else(|| DomainError::InvalidIdentity {
+            kind: "mutation request ID".to_owned(),
+            reason: "request_id is required".to_owned(),
+        })?;
+    Ok((
+        request.cluster_id.parse()?,
+        RetentionRequest::new(
+            mutation_request_id_from_wire(request_id)?,
+            PartitionKey::new(
+                request.stream_id.parse()?,
+                PartitionId::new(request.partition_id),
+            ),
+            RecordOffset::new(request.target_floor),
+        ),
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub fn retention_result_to_wire(result: &RetentionResult) -> v1::RetentionAdvance {
+    v1::RetentionAdvance {
+        request_id: Some(mutation_request_id_to_wire(result.request())),
+        stream_id: result.partition().stream().to_string(),
+        partition_id: result.partition().partition().get(),
+        previous_floor: result.previous_floor().get(),
+        floor: result.floor().get(),
+    }
+}
+
+pub fn retention_result_from_wire(
+    result: v1::RetentionAdvance,
+) -> Result<RetentionResult, DomainError> {
+    Ok(RetentionResult::new(
+        mutation_request_id_from_wire(result.request_id.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "request_id is required".to_owned(),
+            }
+        })?)?,
+        PartitionKey::new(
+            result.stream_id.parse()?,
+            PartitionId::new(result.partition_id),
+        ),
+        RecordOffset::new(result.previous_floor),
+        RecordOffset::new(result.floor),
+    ))
+}
+
+pub type RetentionStatusParts = (ClusterId, PartitionKey, Option<GroupId>, Option<u64>);
+
+pub fn retention_status_from_wire(
+    request: v1::RetentionStatusRequest,
+) -> Result<RetentionStatusParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        PartitionKey::new(
+            request.stream_id.parse()?,
+            PartitionId::new(request.partition_id),
+        ),
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub fn retention_status_to_wire(status: &RetentionStatus) -> v1::RetentionStatus {
+    v1::RetentionStatus {
+        stream_id: status.partition().stream().to_string(),
+        partition_id: status.partition().partition().get(),
+        logical_floor: status.logical_floor().get(),
+        reclaim_cursor: status.reclaim_cursor().get(),
+        logically_expired_bytes: status.logically_expired_bytes().get(),
+        raft_only_bytes: status.raft_only_bytes().get(),
+    }
+}
+
+pub fn retention_status_from_response(
+    status: v1::RetentionStatus,
+) -> Result<RetentionStatus, DomainError> {
+    Ok(RetentionStatus::new(
+        PartitionKey::new(
+            status.stream_id.parse()?,
+            PartitionId::new(status.partition_id),
+        ),
+        RecordOffset::new(status.logical_floor),
+        RecordOffset::new(status.reclaim_cursor),
+        light_stream_core::ByteCount::new(status.logically_expired_bytes),
+        light_stream_core::ByteCount::new(status.raft_only_bytes),
+    ))
+}
+
+fn replay_range_from_wire(value: v1::ReplayRange) -> Result<ReplayRange, DomainError> {
+    ReplayRange::new(
+        PartitionKey::new(
+            value.stream_id.parse()?,
+            PartitionId::new(value.partition_id),
+        ),
+        RecordOffset::new(value.start_offset),
+        RecordOffset::new(value.end_offset),
+    )
+}
+
+fn replay_range_to_wire(value: ReplayRange) -> v1::ReplayRange {
+    v1::ReplayRange {
+        stream_id: value.partition().stream().to_string(),
+        partition_id: value.partition().partition().get(),
+        start_offset: value.start().get(),
+        end_offset: value.end().get(),
+    }
+}
+
+pub fn replay_lease_to_wire(value: &ReplayLease) -> v1::ReplayLease {
+    v1::ReplayLease {
+        lease_id: value.id().to_string(),
+        admission_request: Some(mutation_request_id_to_wire(value.request().request())),
+        cluster_id: value.request().cluster().to_string(),
+        range: Some(replay_range_to_wire(value.range())),
+        protected_bytes: value.protected_bytes().get(),
+        generation: value.generation().get(),
+        expires_at_unix_ms: value.expires_at().unix_millis(),
+        hard_expires_at_unix_ms: value.hard_expires_at().unix_millis(),
+        lifecycle: match value.lifecycle() {
+            ReplayLeaseLifecycle::Active => "active",
+            ReplayLeaseLifecycle::Released => "released",
+            ReplayLeaseLifecycle::Expired => "expired",
+        }
+        .to_owned(),
+        requested_duration_ms: value.request().duration().as_millis(),
+        requested_max_bytes: value.request().max_bytes().get(),
+    }
+}
+
+pub fn replay_lease_from_wire(value: v1::ReplayLease) -> Result<ReplayLease, DomainError> {
+    let request = ReplayLeaseRequest::new(
+        mutation_request_id_from_wire(value.admission_request.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "admission_request is required".to_owned(),
+            }
+        })?)?,
+        value.cluster_id.parse()?,
+        replay_range_from_wire(value.range.ok_or_else(|| DomainError::InvalidRange {
+            reason: "replay range is required".to_owned(),
+        })?)?,
+        LeaseDuration::from_millis(value.requested_duration_ms)?,
+        ByteLimit::new(value.requested_max_bytes)?,
+    );
+    let lifecycle = match value.lifecycle.as_str() {
+        "active" => ReplayLeaseLifecycle::Active,
+        "released" => ReplayLeaseLifecycle::Released,
+        "expired" => ReplayLeaseLifecycle::Expired,
+        other => {
+            return Err(DomainError::InvalidName {
+                kind: "replay lease lifecycle".to_owned(),
+                reason: format!("unknown lifecycle {other:?}"),
+            });
+        }
+    };
+    Ok(ReplayLease::restored(
+        value.lease_id.parse()?,
+        request,
+        ByteCount::new(value.protected_bytes),
+        LeaseGeneration::new(value.generation),
+        LeaseDeadline::new(value.expires_at_unix_ms),
+        LeaseDeadline::new(value.hard_expires_at_unix_ms),
+        lifecycle,
+    ))
+}
+
+pub type AdmitReplayLeaseParts = (ClusterId, ReplayLeaseRequest, Option<GroupId>, Option<u64>);
+
+pub fn admit_replay_lease_from_wire(
+    request: v1::AdmitReplayLeaseRequest,
+) -> Result<AdmitReplayLeaseParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        ReplayLeaseRequest::new(
+            mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+                DomainError::InvalidIdentity {
+                    kind: "mutation request ID".to_owned(),
+                    reason: "request_id is required".to_owned(),
+                }
+            })?)?,
+            request.cluster_id.parse()?,
+            replay_range_from_wire(request.range.ok_or_else(|| DomainError::InvalidRange {
+                reason: "replay range is required".to_owned(),
+            })?)?,
+            LeaseDuration::from_millis(request.duration_ms)?,
+            ByteLimit::new(request.max_bytes)?,
+        ),
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub type RenewReplayLeaseParts = (ClusterId, LeaseRenewal, Option<GroupId>, Option<u64>);
+
+pub fn renew_replay_lease_from_wire(
+    request: v1::RenewReplayLeaseRequest,
+) -> Result<RenewReplayLeaseParts, DomainError> {
+    let partition = PartitionKey::new(
+        request.stream_id.parse()?,
+        PartitionId::new(request.partition_id),
+    );
+    Ok((
+        request.cluster_id.parse()?,
+        LeaseRenewal::new(
+            mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+                DomainError::InvalidIdentity {
+                    kind: "mutation request ID".to_owned(),
+                    reason: "request_id is required".to_owned(),
+                }
+            })?)?,
+            partition,
+            request.lease_id.parse()?,
+            LeaseDuration::from_millis(request.duration_ms)?,
+        ),
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub type ReleaseReplayLeaseParts = (ClusterId, LeaseRelease, Option<GroupId>, Option<u64>);
+
+pub fn release_replay_lease_from_wire(
+    request: v1::ReleaseReplayLeaseRequest,
+) -> Result<ReleaseReplayLeaseParts, DomainError> {
+    let partition = PartitionKey::new(
+        request.stream_id.parse()?,
+        PartitionId::new(request.partition_id),
+    );
+    Ok((
+        request.cluster_id.parse()?,
+        LeaseRelease::new(
+            mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+                DomainError::InvalidIdentity {
+                    kind: "mutation request ID".to_owned(),
+                    reason: "request_id is required".to_owned(),
+                }
+            })?)?,
+            partition,
+            request.lease_id.parse()?,
+        ),
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub type ReplayLeaseReadParts = (
+    ClusterId,
+    PartitionKey,
+    ReplayLeaseId,
+    Option<GroupId>,
+    Option<u64>,
+);
+
+pub fn get_replay_lease_from_wire(
+    request: v1::GetReplayLeaseRequest,
+) -> Result<ReplayLeaseReadParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        PartitionKey::new(
+            request.stream_id.parse()?,
+            PartitionId::new(request.partition_id),
+        ),
+        request.lease_id.parse()?,
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub type FetchProtectedParts = (ProtectedFetchRequest, Option<GroupId>, Option<u64>);
+
+pub fn fetch_protected_from_wire(
+    request: v1::FetchProtectedRequest,
+) -> Result<FetchProtectedParts, DomainError> {
+    Ok((
+        ProtectedFetchRequest::new(
+            request.cluster_id.parse()?,
+            PartitionKey::new(
+                request.stream_id.parse()?,
+                PartitionId::new(request.partition_id),
+            ),
+            request.lease_id.parse()?,
+            RecordOffset::new(request.offset),
+            request.limit,
+        ),
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
 pub fn fetch_from_wire(request: v1::FetchRequest) -> Result<FetchRequestParts, DomainError> {
     Ok((
         request.cluster_id.parse::<ClusterId>()?,
@@ -689,28 +1005,43 @@ pub fn route_from_wire(value: v1::PartitionRoute) -> Result<PartitionRoute, Doma
 }
 
 pub fn domain_error_to_wire(error: &DomainError) -> v1::ErrorResult {
-    let (group, leader, outcome, request_id) = match error {
+    let (group, leader, outcome, request_id, mutation_request_json) = match error {
         DomainError::NotLeader { group, leader } => (
             consensus_group_to_wire(*group) as i32,
             leader.as_ref().map(leader_hint_to_wire),
             v1::RequestOutcome::Unspecified as i32,
             None,
+            String::new(),
         ),
         DomainError::QuorumUnavailable {
             group,
             outcome,
             request,
-        } => (
-            consensus_group_to_wire(*group) as i32,
-            None,
-            request_outcome_to_wire(*outcome) as i32,
-            request.as_ref().map(request_id_to_wire),
-        ),
+        } => {
+            let (request_id, mutation_request_json) = match request {
+                Some(AmbiguousRequest::Publish { request }) => {
+                    (Some(request_id_to_wire(request)), String::new())
+                }
+                Some(AmbiguousRequest::Mutation { request }) => (
+                    None,
+                    serde_json::to_string(request).expect("mutation request IDs serialize"),
+                ),
+                None => (None, String::new()),
+            };
+            (
+                consensus_group_to_wire(*group) as i32,
+                None,
+                request_outcome_to_wire(*outcome) as i32,
+                request_id,
+                mutation_request_json,
+            )
+        }
         _ => (
             v1::ConsensusGroup::Unspecified as i32,
             None,
             v1::RequestOutcome::Unspecified as i32,
             None,
+            String::new(),
         ),
     };
     v1::ErrorResult {
@@ -720,6 +1051,8 @@ pub fn domain_error_to_wire(error: &DomainError) -> v1::ErrorResult {
         leader,
         outcome,
         request_id,
+        mutation_request_json,
+        detail_json: serde_json::to_string(error).expect("domain errors serialize"),
     }
 }
 
@@ -766,10 +1099,16 @@ pub fn domain_error_from_wire(value: v1::ErrorResult) -> Result<DomainError, Dom
         "stream_name_conflict" => Ok(DomainError::StreamNameConflict),
         "bookmark_not_found" => Ok(DomainError::BookmarkNotFound),
         "bookmark_name_conflict" => Ok(DomainError::BookmarkNameConflict),
-        "resource_limit" => Ok(DomainError::ResourceLimit {
-            resource: "remote resource".to_owned(),
-            limit: 0,
-        }),
+        "cursor_expired"
+        | "replay_lease_not_found"
+        | "replay_lease_inactive"
+        | "replay_lease_conflict"
+        | "replay_lease_range_violation"
+        | "replay_lease_lifetime_exhausted"
+        | "mutation_conflict"
+        | "mutation_receipt_expired"
+        | "lease_clock_unavailable"
+        | "resource_limit" => decode_domain_error_detail(&value.detail_json, &value.code),
         "stale_route" => Ok(DomainError::StaleRoute),
         "unsupported_operation" => Ok(DomainError::UnsupportedOperation {
             operation: "remote operation".to_owned(),
@@ -790,12 +1129,50 @@ pub fn domain_error_from_wire(value: v1::ErrorResult) -> Result<DomainError, Dom
         "quorum_unavailable" => Ok(DomainError::QuorumUnavailable {
             group: consensus_group_from_wire(value.group)?,
             outcome: request_outcome_from_wire(value.outcome)?,
-            request: value.request_id.map(request_id_from_wire).transpose()?,
+            request: match (value.request_id, value.mutation_request_json.is_empty()) {
+                (Some(request), true) => Some(AmbiguousRequest::Publish {
+                    request: request_id_from_wire(request)?,
+                }),
+                (None, false) => Some(AmbiguousRequest::Mutation {
+                    request: serde_json::from_str(&value.mutation_request_json).map_err(
+                        |error| DomainError::InvalidIdentity {
+                            kind: "mutation request ID".to_owned(),
+                            reason: error.to_string(),
+                        },
+                    )?,
+                }),
+                (None, true) => None,
+                (Some(_), false) => {
+                    return Err(DomainError::InvalidIdentity {
+                        kind: "ambiguous request".to_owned(),
+                        reason: "wire error contained two request identities".to_owned(),
+                    });
+                }
+            },
         }),
         _ => Ok(DomainError::Storage {
             reason: value.message,
         }),
     }
+}
+
+fn decode_domain_error_detail(
+    detail_json: &str,
+    expected_code: &str,
+) -> Result<DomainError, DomainError> {
+    let error = serde_json::from_str::<DomainError>(detail_json).map_err(|error| {
+        DomainError::InvalidName {
+            kind: "domain error detail".to_owned(),
+            reason: error.to_string(),
+        }
+    })?;
+    if error.code().as_str() != expected_code {
+        return Err(DomainError::InvalidIdentity {
+            kind: "domain error detail".to_owned(),
+            reason: "detail code does not match the error envelope".to_owned(),
+        });
+    }
+    Ok(error)
 }
 
 pub fn unsupported_publish_to_wire() -> v1::PublishResponse {
@@ -886,6 +1263,24 @@ fn request_id_to_wire(value: &ProducerRequestId) -> v1::ProducerRequestId {
     v1::ProducerRequestId {
         principal_id: value.principal().to_string(),
         producer_session_id: value.session().to_string(),
+        sequence: value.sequence().get(),
+    }
+}
+
+pub fn mutation_request_id_from_wire(
+    value: v1::MutationRequestId,
+) -> Result<MutationRequestId, DomainError> {
+    Ok(MutationRequestId::new(
+        PrincipalId::parse(value.principal_id)?,
+        value.mutation_session_id.parse::<MutationSessionId>()?,
+        RequestSequence::new(value.sequence),
+    ))
+}
+
+pub fn mutation_request_id_to_wire(value: &MutationRequestId) -> v1::MutationRequestId {
+    v1::MutationRequestId {
+        principal_id: value.principal().to_string(),
+        mutation_session_id: value.session().to_string(),
         sequence: value.sequence().get(),
     }
 }

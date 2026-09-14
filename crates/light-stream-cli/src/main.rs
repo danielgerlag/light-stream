@@ -4,10 +4,12 @@ use clap::{Args as ClapArgs, Parser, Subcommand};
 use light_stream_client::{Client, ClientError, default_probe};
 use light_stream_core::{
     BookmarkId, BookmarkName, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapSpec,
-    CatalogRequestId, ClusterId, CommittedCursor, CreateStreamSpec, DomainError, GroupId,
+    ByteLimit, CatalogRequestId, ClusterId, CommittedCursor, CreateStreamSpec, DomainError,
+    GroupId, LeaseDuration, LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId,
     NodeDescriptor, NodeId, PartitionId, PartitionKey, PrincipalId, ProducerRequestId,
-    ProducerSessionId, PublishBatch, RecordOffset, RequestSequence, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamId, StreamName,
+    ProducerSessionId, PublishBatch, RecordOffset, ReplayLeaseId, ReplayLeaseRequest, ReplayRange,
+    RequestSequence, RetentionRequest, StreamBookmarkPageRequest, StreamCursorVector, StreamId,
+    StreamName,
 };
 use serde_json::json;
 
@@ -46,6 +48,14 @@ enum Command {
     Bookmark {
         #[command(subcommand)]
         command: BookmarkCommand,
+    },
+    Retention {
+        #[command(subcommand)]
+        command: RetentionCommand,
+    },
+    Replay {
+        #[command(subcommand)]
+        command: ReplayCommand,
     },
     Publish(PublishArgs),
     Fetch(FetchArgs),
@@ -190,6 +200,82 @@ enum BookmarkCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum RetentionCommand {
+    Advance {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        floor: u64,
+    },
+    Status {
+        #[command(flatten)]
+        target: TargetArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ReplayCommand {
+    Admit {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        start: u64,
+        #[arg(long)]
+        end: u64,
+        #[arg(long)]
+        duration_ms: u64,
+        #[arg(long)]
+        max_bytes: u64,
+    },
+    Renew {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        lease_id: String,
+        #[arg(long)]
+        duration_ms: u64,
+        #[arg(long, requires = "route_revision")]
+        route_group_id: Option<u64>,
+        #[arg(long, requires = "route_group_id")]
+        route_revision: Option<u64>,
+    },
+    Release {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        lease_id: String,
+        #[arg(long, requires = "route_revision")]
+        route_group_id: Option<u64>,
+        #[arg(long, requires = "route_group_id")]
+        route_revision: Option<u64>,
+    },
+    Status {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[arg(long)]
+        lease_id: String,
+    },
+    Fetch {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[arg(long)]
+        lease_id: String,
+        #[arg(long)]
+        offset: u64,
+        #[arg(long, default_value_t = 128)]
+        limit: u32,
+    },
+}
+
 #[derive(Debug, ClapArgs)]
 struct TargetArgs {
     #[arg(long)]
@@ -206,6 +292,16 @@ struct ProducerArgs {
     principal: String,
     #[arg(long)]
     session: String,
+    #[arg(long)]
+    sequence: u64,
+}
+
+#[derive(Debug, ClapArgs)]
+struct MutationArgs {
+    #[arg(long)]
+    principal: String,
+    #[arg(long)]
+    mutation_session: String,
     #[arg(long)]
     sequence: u64,
 }
@@ -598,6 +694,170 @@ async fn run(args: Args) -> Result<serde_json::Value, ClientError> {
                 }
             }
         }
+        Command::Retention { command } => {
+            let client =
+                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            match command {
+                RetentionCommand::Advance {
+                    target,
+                    mutation,
+                    floor,
+                } => {
+                    let cluster = target.cluster_id.parse::<ClusterId>()?;
+                    let result = client
+                        .advance_retention(
+                            cluster,
+                            RetentionRequest::new(
+                                parse_mutation(&mutation)?,
+                                parse_target(&target)?,
+                                RecordOffset::new(floor),
+                            ),
+                        )
+                        .await?;
+                    Ok(
+                        json!({"command":"retention-advance","ok":true,"endpoint":endpoint,"retention":result}),
+                    )
+                }
+                RetentionCommand::Status { target } => {
+                    let cluster = target.cluster_id.parse::<ClusterId>()?;
+                    let status = client
+                        .retention_status(cluster, parse_target(&target)?)
+                        .await?;
+                    Ok(
+                        json!({"command":"retention-status","ok":true,"endpoint":endpoint,"retention":status}),
+                    )
+                }
+            }
+        }
+        Command::Replay { command } => {
+            let client =
+                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            match command {
+                ReplayCommand::Admit {
+                    target,
+                    mutation,
+                    start,
+                    end,
+                    duration_ms,
+                    max_bytes,
+                } => {
+                    let cluster = target.cluster_id.parse::<ClusterId>()?;
+                    let partition = parse_target(&target)?;
+                    let lease = client
+                        .admit_replay_lease(ReplayLeaseRequest::new(
+                            parse_mutation(&mutation)?,
+                            cluster,
+                            ReplayRange::new(
+                                partition,
+                                RecordOffset::new(start),
+                                RecordOffset::new(end),
+                            )?,
+                            LeaseDuration::from_millis(duration_ms)?,
+                            ByteLimit::new(max_bytes)?,
+                        ))
+                        .await?;
+                    Ok(
+                        json!({"command":"replay-admit","ok":true,"endpoint":endpoint,"lease":lease}),
+                    )
+                }
+                ReplayCommand::Renew {
+                    target,
+                    mutation,
+                    lease_id,
+                    duration_ms,
+                    route_group_id,
+                    route_revision,
+                } => {
+                    let cluster = target.cluster_id.parse::<ClusterId>()?;
+                    let partition = parse_target(&target)?;
+                    let request = LeaseRenewal::new(
+                        parse_mutation(&mutation)?,
+                        partition,
+                        lease_id.parse::<ReplayLeaseId>()?,
+                        LeaseDuration::from_millis(duration_ms)?,
+                    );
+                    let lease = match (route_group_id, route_revision) {
+                        (Some(group), Some(revision)) => {
+                            client
+                                .renew_replay_lease_with_route_hint(
+                                    cluster,
+                                    request,
+                                    GroupId::new(group)?,
+                                    revision,
+                                )
+                                .await?
+                        }
+                        (None, None) => client.renew_replay_lease(cluster, request).await?,
+                        _ => unreachable!("clap requires both route hint fields"),
+                    };
+                    Ok(
+                        json!({"command":"replay-renew","ok":true,"endpoint":endpoint,"lease":lease}),
+                    )
+                }
+                ReplayCommand::Release {
+                    target,
+                    mutation,
+                    lease_id,
+                    route_group_id,
+                    route_revision,
+                } => {
+                    let cluster = target.cluster_id.parse::<ClusterId>()?;
+                    let partition = parse_target(&target)?;
+                    let request = LeaseRelease::new(
+                        parse_mutation(&mutation)?,
+                        partition,
+                        lease_id.parse::<ReplayLeaseId>()?,
+                    );
+                    let lease = match (route_group_id, route_revision) {
+                        (Some(group), Some(revision)) => {
+                            client
+                                .release_replay_lease_with_route_hint(
+                                    cluster,
+                                    request,
+                                    GroupId::new(group)?,
+                                    revision,
+                                )
+                                .await?
+                        }
+                        (None, None) => client.release_replay_lease(cluster, request).await?,
+                        _ => unreachable!("clap requires both route hint fields"),
+                    };
+                    Ok(
+                        json!({"command":"replay-release","ok":true,"endpoint":endpoint,"lease":lease}),
+                    )
+                }
+                ReplayCommand::Status { target, lease_id } => {
+                    let lease = client
+                        .replay_lease(
+                            target.cluster_id.parse()?,
+                            parse_target(&target)?,
+                            lease_id.parse()?,
+                        )
+                        .await?;
+                    Ok(
+                        json!({"command":"replay-status","ok":true,"endpoint":endpoint,"lease":lease}),
+                    )
+                }
+                ReplayCommand::Fetch {
+                    target,
+                    lease_id,
+                    offset,
+                    limit,
+                } => {
+                    let cluster = target.cluster_id.parse::<ClusterId>()?;
+                    let partition = parse_target(&target)?;
+                    let lease = client
+                        .replay_lease(cluster, partition, lease_id.parse()?)
+                        .await?;
+                    let page = client
+                        .fetch_protected(&lease, RecordOffset::new(offset), limit)
+                        .await?;
+                    Ok(
+                        json!({"command":"replay-fetch","ok":true,"endpoint":endpoint,"page":page,"lease":lease}),
+                    )
+                }
+            }
+        }
         Command::Publish(value) => {
             let partition = parse_target(&value.target)?;
             let request = parse_producer(&value.producer)?;
@@ -739,6 +999,14 @@ fn parse_producer(value: &ProducerArgs) -> Result<ProducerRequestId, DomainError
     Ok(ProducerRequestId::new(
         PrincipalId::parse(&value.principal)?,
         value.session.parse::<ProducerSessionId>()?,
+        RequestSequence::new(value.sequence),
+    ))
+}
+
+fn parse_mutation(value: &MutationArgs) -> Result<MutationRequestId, DomainError> {
+    Ok(MutationRequestId::new(
+        PrincipalId::parse(&value.principal)?,
+        value.mutation_session.parse::<MutationSessionId>()?,
         RequestSequence::new(value.sequence),
     ))
 }

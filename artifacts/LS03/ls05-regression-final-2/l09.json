@@ -1,0 +1,17 @@
+{
+  "active_stream_count": 4,
+  "rejection": {
+    "command": "request",
+    "error": {
+      "code": "resource_limit",
+      "detail": {
+        "code": "resource_limit",
+        "limit": 4,
+        "resource": "streams"
+      },
+      "message": "streams limit 4 was exceeded"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

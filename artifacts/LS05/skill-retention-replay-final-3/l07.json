@@ -1,0 +1,148 @@
+{
+  "admission_retry": {
+    "expires_at": 1789407632172,
+    "generation": 1,
+    "hard_expires_at": 1789408502172,
+    "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+    "lifecycle": "active",
+    "protected_bytes": 12,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 30000,
+      "max_bytes": 1024,
+      "range": {
+        "end": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "651dcf4c-dc2f-4f1d-893f-4171931237a9"
+        },
+        "start": 1
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+      }
+    }
+  },
+  "release_response_dropped": true,
+  "released": {
+    "expires_at": 1789407634261,
+    "generation": 3,
+    "hard_expires_at": 1789408502172,
+    "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+    "lifecycle": "released",
+    "protected_bytes": 12,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 30000,
+      "max_bytes": 1024,
+      "range": {
+        "end": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "651dcf4c-dc2f-4f1d-893f-4171931237a9"
+        },
+        "start": 1
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+      }
+    }
+  },
+  "released_fetch": {
+    "command": "request",
+    "error": {
+      "code": "replay_lease_inactive",
+      "detail": {
+        "code": "replay_lease_inactive",
+        "lease": "57d2b31b-9388-102e-c57f-2365185108dc",
+        "lifecycle": "released"
+      },
+      "message": "replay lease 57d2b31b-9388-102e-c57f-2365185108dc is Released"
+    },
+    "ok": false
+  },
+  "released_retry": {
+    "expires_at": 1789407634261,
+    "generation": 3,
+    "hard_expires_at": 1789408502172,
+    "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+    "lifecycle": "released",
+    "protected_bytes": 12,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 30000,
+      "max_bytes": 1024,
+      "range": {
+        "end": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "651dcf4c-dc2f-4f1d-893f-4171931237a9"
+        },
+        "start": 1
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+      }
+    }
+  },
+  "renew_response_dropped": true,
+  "renewed": {
+    "expires_at": 1789407634261,
+    "generation": 2,
+    "hard_expires_at": 1789408502172,
+    "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+    "lifecycle": "active",
+    "protected_bytes": 12,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 30000,
+      "max_bytes": 1024,
+      "range": {
+        "end": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "651dcf4c-dc2f-4f1d-893f-4171931237a9"
+        },
+        "start": 1
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+      }
+    }
+  },
+  "renewed_retry": {
+    "expires_at": 1789407634261,
+    "generation": 2,
+    "hard_expires_at": 1789408502172,
+    "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+    "lifecycle": "active",
+    "protected_bytes": 12,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 30000,
+      "max_bytes": 1024,
+      "range": {
+        "end": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "651dcf4c-dc2f-4f1d-893f-4171931237a9"
+        },
+        "start": 1
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+      }
+    }
+  },
+  "verdict": "PASS"
+}

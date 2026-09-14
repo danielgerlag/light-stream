@@ -4,23 +4,27 @@ use std::{
 };
 
 use light_stream_core::{
-    BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest, BookmarkPublicationSequence,
-    BootstrapResult, BootstrapSpec, Capability, CapabilityReport, CapabilitySupport, ClusterId,
-    CommittedBookmark, CommittedRecord, CommittedRecordRange, CommittedStreamBookmark,
-    ConsensusGroup, CreateStreamSpec, DomainError, FetchPage, HealthStatus, LeaderHint,
-    MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor, PartitionId, PartitionKey, PartitionRoute,
-    ProducerRequestId, ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt, RecordOffset,
-    RequestOutcome, RequestSequence, SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamDescriptor, StreamId, StreamName,
+    AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
+    BookmarkPublicationSequence, BootstrapResult, BootstrapSpec, Capability, CapabilityReport,
+    CapabilitySupport, ClusterId, CommittedBookmark, CommittedRecord, CommittedRecordRange,
+    CommittedStreamBookmark, ConsensusGroup, CreateStreamSpec, DomainError, FetchPage,
+    HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal, MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor,
+    PartitionId, PartitionKey, PartitionRoute, ProducerRequestId, ProducerSessionId, PublishBatch,
+    PublishProbe, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
+    RequestOutcome, RequestSequence, RetentionRequest, RetentionResult, RetentionStatus,
+    SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
+    StreamDescriptor, StreamId, StreamName,
 };
 use light_stream_proto::{
-    bookmark_from_wire, domain_error_from_wire, route_from_wire, security_mode_from_wire,
-    stream_bookmark_from_wire, stream_from_wire,
+    bookmark_from_wire, domain_error_from_wire, mutation_request_id_to_wire,
+    replay_lease_from_wire, retention_result_from_wire, retention_status_from_response,
+    route_from_wire, security_mode_from_wire, stream_bookmark_from_wire, stream_from_wire,
     v1::{
-        self, bookmark_response, bootstrap_response, fetch_response,
+        self, advance_retention_response, bookmark_response, bootstrap_response, fetch_response,
         light_stream_client::LightStreamClient, list_bookmarks_response,
         list_stream_bookmarks_response, list_streams_response, publish_response, receipt_response,
-        route_response, stream_bookmark_response, stream_response,
+        replay_lease_response, retention_status_response, route_response, stream_bookmark_response,
+        stream_response,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -74,6 +78,32 @@ enum StreamBookmarkCall {
     Delete(v1::DeleteStreamBookmarkRequest),
 }
 
+#[derive(Clone)]
+enum ReplayMutationCall {
+    Admit(v1::AdmitReplayLeaseRequest),
+    Renew(v1::RenewReplayLeaseRequest),
+    Release(v1::ReleaseReplayLeaseRequest),
+}
+
+impl ReplayMutationCall {
+    fn set_route(&mut self, group: light_stream_core::GroupId, revision: u64) {
+        match self {
+            Self::Admit(request) => {
+                request.route_group_id = group.get();
+                request.route_revision = revision;
+            }
+            Self::Renew(request) => {
+                request.route_group_id = group.get();
+                request.route_revision = revision;
+            }
+            Self::Release(request) => {
+                request.route_group_id = group.get();
+                request.route_revision = revision;
+            }
+        }
+    }
+}
+
 impl From<ClientError> for AttemptError {
     fn from(error: ClientError) -> Self {
         Self::Client(error)
@@ -121,6 +151,14 @@ impl ClientError {
                 | DomainError::StreamNameConflict
                 | DomainError::BookmarkNotFound
                 | DomainError::BookmarkNameConflict
+                | DomainError::CursorExpired { .. }
+                | DomainError::ReplayLeaseNotFound { .. }
+                | DomainError::ReplayLeaseInactive { .. }
+                | DomainError::ReplayLeaseConflict
+                | DomainError::ReplayLeaseRangeViolation
+                | DomainError::ReplayLeaseLifetimeExhausted
+                | DomainError::MutationConflict
+                | DomainError::MutationReceiptExpired
                 | DomainError::ResourceLimit { .. }
                 | DomainError::StaleRoute,
             ) => 4,
@@ -129,7 +167,8 @@ impl ClientError {
                 | DomainError::Storage { .. }
                 | DomainError::NotLeader { .. }
                 | DomainError::QuorumUnavailable { .. }
-                | DomainError::ClusterForming,
+                | DomainError::ClusterForming
+                | DomainError::LeaseClockUnavailable,
             ) => 5,
             Self::InvalidEndpoint { .. } => 2,
             _ => 1,
@@ -1189,6 +1228,663 @@ impl Client {
         }
     }
 
+    pub async fn advance_retention(
+        &self,
+        cluster: ClusterId,
+        request: RetentionRequest,
+    ) -> Result<RetentionResult, ClientError> {
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(request.partition().stream()),
+                None,
+                request.partition().partition(),
+            )
+            .await?;
+        let mutation = request.request().clone();
+        let mut wire_request = v1::AdvanceRetentionRequest {
+            cluster_id: cluster.to_string(),
+            stream_id: request.partition().stream().to_string(),
+            partition_id: request.partition().partition().get(),
+            request_id: Some(mutation_request_id_to_wire(request.request())),
+            target_floor: request.target_floor().get(),
+            route_group_id: route.route.group().get(),
+            route_revision: route.route.route_revision(),
+        };
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            if deadline.expired() {
+                return Err(mutation_deadline_error(mutation, request_may_have_reached));
+            }
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .advance_retention_once(
+                    &endpoint,
+                    wire_request.clone(),
+                    deadline,
+                    &mut request_may_have_reached,
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(mutation, request_may_have_reached));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) if self.retry => {
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(ClientError::Domain(DomainError::StaleRoute)))
+                    if self.retry =>
+                {
+                    let route = self
+                        .resolve_route(
+                            cluster,
+                            Some(request.partition().stream()),
+                            None,
+                            request.partition().partition(),
+                        )
+                        .await?;
+                    wire_request.route_group_id = route.route.group().get();
+                    wire_request.route_revision = route.route.route_revision();
+                    if let Some(leader) = route.leader {
+                        next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| mutation_deadline_error(mutation.clone(), request_may_have_reached))?;
+        }
+    }
+
+    pub async fn retention_status(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+    ) -> Result<RetentionStatus, ClientError> {
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(partition.stream()),
+                None,
+                partition.partition(),
+            )
+            .await?;
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut request = v1::RetentionStatusRequest {
+            cluster_id: cluster.to_string(),
+            stream_id: partition.stream().to_string(),
+            partition_id: partition.partition().get(),
+            route_group_id: route.route.group().get(),
+            route_revision: route.route.route_revision(),
+        };
+        let mut index = 0usize;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            let mut client = match connect_client(&endpoint, deadline).await {
+                Ok(client) => client,
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(_) if self.retry => {
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("retention status", error)),
+            };
+            let response = match execute_rpc(deadline, request.clone(), |request| {
+                client.get_retention_status(request)
+            })
+            .await
+            {
+                Ok(response) => response,
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(_) if self.retry => {
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("retention status", error)),
+            };
+            match response.result {
+                Some(retention_status_response::Result::Status(status)) => {
+                    return retention_status_from_response(status).map_err(ClientError::Domain);
+                }
+                Some(retention_status_response::Result::Error(value)) => {
+                    let error = decode_domain_error(value)?;
+                    match error {
+                        DomainError::NotLeader {
+                            leader: Some(hint), ..
+                        } if self.retry => {
+                            next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                        }
+                        DomainError::StaleRoute if self.retry => {
+                            let route = self
+                                .resolve_route(
+                                    cluster,
+                                    Some(partition.stream()),
+                                    None,
+                                    partition.partition(),
+                                )
+                                .await?;
+                            request.route_group_id = route.route.group().get();
+                            request.route_revision = route.route.route_revision();
+                            if let Some(leader) = route.leader {
+                                next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                            }
+                        }
+                        DomainError::QuorumUnavailable { .. } if self.retry => {}
+                        other => return Err(other.into()),
+                    }
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                }
+                None => {
+                    return Err(ClientError::Protocol(
+                        "retention status response omitted its typed result".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    pub async fn admit_replay_lease(
+        &self,
+        request: ReplayLeaseRequest,
+    ) -> Result<ReplayLease, ClientError> {
+        let cluster = request.cluster();
+        let partition = request.range().partition();
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(partition.stream()),
+                None,
+                partition.partition(),
+            )
+            .await?;
+        let route_group_id = route.route.group().get();
+        let route_revision = route.route.route_revision();
+        self.execute_replay_mutation(
+            cluster,
+            partition,
+            request.request().clone(),
+            route,
+            ReplayMutationCall::Admit(v1::AdmitReplayLeaseRequest {
+                cluster_id: cluster.to_string(),
+                range: Some(v1::ReplayRange {
+                    stream_id: partition.stream().to_string(),
+                    partition_id: partition.partition().get(),
+                    start_offset: request.range().start().get(),
+                    end_offset: request.range().end().get(),
+                }),
+                request_id: Some(mutation_request_id_to_wire(request.request())),
+                duration_ms: request.duration().as_millis(),
+                max_bytes: request.max_bytes().get(),
+                route_group_id,
+                route_revision,
+            }),
+        )
+        .await
+    }
+
+    pub async fn renew_replay_lease(
+        &self,
+        cluster: ClusterId,
+        request: LeaseRenewal,
+    ) -> Result<ReplayLease, ClientError> {
+        let partition = request.partition();
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(partition.stream()),
+                None,
+                partition.partition(),
+            )
+            .await?;
+        self.renew_replay_lease_with_resolved_route(cluster, partition, request, route)
+            .await
+    }
+
+    pub async fn renew_replay_lease_with_route_hint(
+        &self,
+        cluster: ClusterId,
+        request: LeaseRenewal,
+        group: light_stream_core::GroupId,
+        route_revision: u64,
+    ) -> Result<ReplayLease, ClientError> {
+        let partition = request.partition();
+        self.renew_replay_lease_with_resolved_route(
+            cluster,
+            partition,
+            request,
+            ResolvedRoute {
+                route: PartitionRoute::new(
+                    cluster,
+                    partition.stream(),
+                    StreamName::parse("cached-route")?,
+                    partition.partition(),
+                    group,
+                    route_revision,
+                ),
+                leader: None,
+            },
+        )
+        .await
+    }
+
+    async fn renew_replay_lease_with_resolved_route(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        request: LeaseRenewal,
+        route: ResolvedRoute,
+    ) -> Result<ReplayLease, ClientError> {
+        let route_group_id = route.route.group().get();
+        let route_revision = route.route.route_revision();
+        self.execute_replay_mutation(
+            cluster,
+            partition,
+            request.request().clone(),
+            route,
+            ReplayMutationCall::Renew(v1::RenewReplayLeaseRequest {
+                cluster_id: cluster.to_string(),
+                stream_id: partition.stream().to_string(),
+                partition_id: partition.partition().get(),
+                lease_id: request.lease().to_string(),
+                request_id: Some(mutation_request_id_to_wire(request.request())),
+                duration_ms: request.duration().as_millis(),
+                route_group_id,
+                route_revision,
+            }),
+        )
+        .await
+    }
+
+    pub async fn release_replay_lease(
+        &self,
+        cluster: ClusterId,
+        request: LeaseRelease,
+    ) -> Result<ReplayLease, ClientError> {
+        let partition = request.partition();
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(partition.stream()),
+                None,
+                partition.partition(),
+            )
+            .await?;
+        self.release_replay_lease_with_resolved_route(cluster, partition, request, route)
+            .await
+    }
+
+    pub async fn release_replay_lease_with_route_hint(
+        &self,
+        cluster: ClusterId,
+        request: LeaseRelease,
+        group: light_stream_core::GroupId,
+        route_revision: u64,
+    ) -> Result<ReplayLease, ClientError> {
+        let partition = request.partition();
+        self.release_replay_lease_with_resolved_route(
+            cluster,
+            partition,
+            request,
+            ResolvedRoute {
+                route: PartitionRoute::new(
+                    cluster,
+                    partition.stream(),
+                    StreamName::parse("cached-route")?,
+                    partition.partition(),
+                    group,
+                    route_revision,
+                ),
+                leader: None,
+            },
+        )
+        .await
+    }
+
+    async fn release_replay_lease_with_resolved_route(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        request: LeaseRelease,
+        route: ResolvedRoute,
+    ) -> Result<ReplayLease, ClientError> {
+        let route_group_id = route.route.group().get();
+        let route_revision = route.route.route_revision();
+        self.execute_replay_mutation(
+            cluster,
+            partition,
+            request.request().clone(),
+            route,
+            ReplayMutationCall::Release(v1::ReleaseReplayLeaseRequest {
+                cluster_id: cluster.to_string(),
+                stream_id: partition.stream().to_string(),
+                partition_id: partition.partition().get(),
+                lease_id: request.lease().to_string(),
+                request_id: Some(mutation_request_id_to_wire(request.request())),
+                route_group_id,
+                route_revision,
+            }),
+        )
+        .await
+    }
+
+    async fn execute_replay_mutation(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        mutation: light_stream_core::MutationRequestId,
+        route: ResolvedRoute,
+        mut call: ReplayMutationCall,
+    ) -> Result<ReplayLease, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            if deadline.expired() {
+                return Err(mutation_deadline_error(mutation, request_may_have_reached));
+            }
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .replay_mutation_once(
+                    &endpoint,
+                    call.clone(),
+                    deadline,
+                    &mut request_may_have_reached,
+                )
+                .await
+            {
+                Ok(lease) => return Ok(lease),
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(mutation, request_may_have_reached));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) if self.retry => {
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(ClientError::Domain(DomainError::StaleRoute)))
+                    if self.retry =>
+                {
+                    let route = self
+                        .resolve_route(
+                            cluster,
+                            Some(partition.stream()),
+                            None,
+                            partition.partition(),
+                        )
+                        .await?;
+                    call.set_route(route.route.group(), route.route.route_revision());
+                    if let Some(leader) = route.leader {
+                        next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| mutation_deadline_error(mutation.clone(), request_may_have_reached))?;
+        }
+    }
+
+    pub async fn replay_lease(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        lease: ReplayLeaseId,
+    ) -> Result<ReplayLease, ClientError> {
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(partition.stream()),
+                None,
+                partition.partition(),
+            )
+            .await?;
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut request = v1::GetReplayLeaseRequest {
+            cluster_id: cluster.to_string(),
+            stream_id: partition.stream().to_string(),
+            partition_id: partition.partition().get(),
+            lease_id: lease.to_string(),
+            route_group_id: route.route.group().get(),
+            route_revision: route.route.route_revision(),
+        };
+        let mut index = 0usize;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            let mut client = match connect_client(&endpoint, deadline).await {
+                Ok(client) => client,
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(_) if self.retry => {
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("replay lease", error)),
+            };
+            let response = match execute_rpc(deadline, request.clone(), |request| {
+                client.get_replay_lease(request)
+            })
+            .await
+            {
+                Ok(response) => response,
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(_) if self.retry => {
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("replay lease", error)),
+            };
+            match response.result {
+                Some(replay_lease_response::Result::Lease(lease)) => {
+                    return replay_lease_from_wire(lease).map_err(ClientError::Domain);
+                }
+                Some(replay_lease_response::Result::Error(value)) => {
+                    let error = decode_domain_error(value)?;
+                    match error {
+                        DomainError::NotLeader {
+                            leader: Some(hint), ..
+                        } if self.retry => {
+                            next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                        }
+                        DomainError::StaleRoute if self.retry => {
+                            let route = self
+                                .resolve_route(
+                                    cluster,
+                                    Some(partition.stream()),
+                                    None,
+                                    partition.partition(),
+                                )
+                                .await?;
+                            request.route_group_id = route.route.group().get();
+                            request.route_revision = route.route.route_revision();
+                            if let Some(leader) = route.leader {
+                                next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                            }
+                        }
+                        DomainError::QuorumUnavailable { .. } if self.retry => {}
+                        other => return Err(other.into()),
+                    }
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                }
+                None => {
+                    return Err(ClientError::Protocol(
+                        "replay lease response omitted its typed result".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    pub async fn fetch_protected(
+        &self,
+        lease: &ReplayLease,
+        offset: RecordOffset,
+        limit: u32,
+    ) -> Result<FetchPage, ClientError> {
+        let cluster = lease.request().cluster();
+        let partition = lease.range().partition();
+        let route = self
+            .resolve_route(
+                cluster,
+                Some(partition.stream()),
+                None,
+                partition.partition(),
+            )
+            .await?;
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut request = v1::FetchProtectedRequest {
+            cluster_id: cluster.to_string(),
+            stream_id: partition.stream().to_string(),
+            partition_id: partition.partition().get(),
+            lease_id: lease.id().to_string(),
+            offset: offset.get(),
+            limit,
+            route_group_id: route.route.group().get(),
+            route_revision: route.route.route_revision(),
+        };
+        let mut index = 0usize;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            let mut client = match connect_client(&endpoint, deadline).await {
+                Ok(client) => client,
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(_) if self.retry => {
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("protected fetch", error)),
+            };
+            let response = match execute_rpc(deadline, request.clone(), |request| {
+                client.fetch_protected(request)
+            })
+            .await
+            {
+                Ok(response) => response,
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(_) if self.retry => {
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("protected fetch", error)),
+            };
+            match response.result {
+                Some(fetch_response::Result::Success(value)) => {
+                    return fetch_success_from_wire(value);
+                }
+                Some(fetch_response::Result::Error(value)) => {
+                    let error = decode_domain_error(value)?;
+                    match error {
+                        DomainError::NotLeader {
+                            leader: Some(hint), ..
+                        } if self.retry => {
+                            next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                        }
+                        DomainError::StaleRoute if self.retry => {
+                            let route = self
+                                .resolve_route(
+                                    cluster,
+                                    Some(partition.stream()),
+                                    None,
+                                    partition.partition(),
+                                )
+                                .await?;
+                            request.route_group_id = route.route.group().get();
+                            request.route_revision = route.route.route_revision();
+                            if let Some(leader) = route.leader {
+                                next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                            }
+                        }
+                        DomainError::QuorumUnavailable { .. } if self.retry => {}
+                        other => return Err(other.into()),
+                    }
+                    index = next_index;
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                }
+                None => {
+                    return Err(ClientError::Protocol(
+                        "protected fetch response omitted its typed result".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
     pub async fn create_stream_bookmark(
         &self,
         cluster: ClusterId,
@@ -1488,6 +2184,68 @@ impl Client {
         }
     }
 
+    async fn advance_retention_once(
+        &self,
+        endpoint: &str,
+        request: v1::AdvanceRetentionRequest,
+        deadline: Deadline,
+        request_may_have_reached: &mut bool,
+    ) -> Result<RetentionResult, AttemptError> {
+        let mut client = connect_client(endpoint, deadline).await?;
+        let (request, timeout) = timed_request(deadline, request)?;
+        *request_may_have_reached = true;
+        let response = await_rpc(deadline, timeout, client.advance_retention(request)).await?;
+        match response.result {
+            Some(advance_retention_response::Result::Success(result)) => {
+                retention_result_from_wire(result)
+                    .map_err(ClientError::Domain)
+                    .map_err(AttemptError::Client)
+            }
+            Some(advance_retention_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "retention response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
+    async fn replay_mutation_once(
+        &self,
+        endpoint: &str,
+        call: ReplayMutationCall,
+        deadline: Deadline,
+        request_may_have_reached: &mut bool,
+    ) -> Result<ReplayLease, AttemptError> {
+        let mut client = connect_client(endpoint, deadline).await?;
+        *request_may_have_reached = true;
+        let response = match call {
+            ReplayMutationCall::Admit(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.admit_replay_lease(request)).await?
+            }
+            ReplayMutationCall::Renew(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.renew_replay_lease(request)).await?
+            }
+            ReplayMutationCall::Release(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.release_replay_lease(request)).await?
+            }
+        };
+        match response.result {
+            Some(replay_lease_response::Result::Lease(lease)) => replay_lease_from_wire(lease)
+                .map_err(ClientError::Domain)
+                .map_err(AttemptError::Client),
+            Some(replay_lease_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "replay lease response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
     async fn fetch_once(
         &self,
         endpoint: &str,
@@ -1693,9 +2451,40 @@ fn publish_deadline_error(
         } else {
             RequestOutcome::DefiniteNoCommit
         },
-        request: Some(request),
+        request: Some(AmbiguousRequest::Publish { request }),
     }
     .into()
+}
+
+fn mutation_deadline_error(
+    request: light_stream_core::MutationRequestId,
+    request_may_have_reached: bool,
+) -> ClientError {
+    DomainError::QuorumUnavailable {
+        group: ConsensusGroup::Data,
+        outcome: if request_may_have_reached {
+            RequestOutcome::AmbiguousCommit
+        } else {
+            RequestOutcome::DefiniteNoCommit
+        },
+        request: Some(AmbiguousRequest::Mutation { request }),
+    }
+    .into()
+}
+
+fn fetch_success_from_wire(value: v1::FetchSuccess) -> Result<FetchPage, ClientError> {
+    Ok(FetchPage::new(
+        PartitionKey::new(
+            value.stream_id.parse()?,
+            PartitionId::new(value.partition_id),
+        ),
+        value
+            .records
+            .into_iter()
+            .map(|record| CommittedRecord::new(RecordOffset::new(record.offset), record.payload))
+            .collect(),
+        RecordOffset::new(value.next_offset),
+    ))
 }
 
 fn non_write_deadline_error() -> ClientError {
@@ -1852,7 +2641,12 @@ mod tests {
             };
             assert_eq!(ConsensusGroup::Data, group);
             assert_eq!(expected, outcome);
-            assert_eq!(Some(request.clone()), actual);
+            assert_eq!(
+                Some(AmbiguousRequest::Publish {
+                    request: request.clone()
+                }),
+                actual
+            );
         }
     }
 

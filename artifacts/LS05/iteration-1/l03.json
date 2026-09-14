@@ -1,0 +1,44 @@
+{
+  "lease": {
+    "expires_at": 1789404055918,
+    "generation": 1,
+    "hard_expires_at": 1789404925918,
+    "id": "57d2b31b-9388-102e-c57f-2365185108dc",
+    "lifecycle": "active",
+    "protected_bytes": 12,
+    "request": {
+      "cluster": "47d173d1-1256-5750-3d94-f4b5dddb459c",
+      "duration": 30000,
+      "max_bytes": 1024,
+      "range": {
+        "end": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "ecd49f8a-955e-458f-81fd-68cbddfa54ec"
+        },
+        "start": 1
+      },
+      "request": {
+        "principal": "replay-job",
+        "sequence": 1,
+        "session": "632c8083-6a5b-1a11-2575-1cf08aaece05"
+      }
+    }
+  },
+  "protected_payloads": [
+    "p0-1",
+    "p0-2",
+    "p0-3"
+  ],
+  "retention": {
+    "logical_floor": 6,
+    "logically_expired_bytes": 12,
+    "partition": {
+      "partition": 0,
+      "stream": "ecd49f8a-955e-458f-81fd-68cbddfa54ec"
+    },
+    "raft_only_bytes": 12,
+    "reclaim_cursor": 6
+  },
+  "verdict": "PASS"
+}

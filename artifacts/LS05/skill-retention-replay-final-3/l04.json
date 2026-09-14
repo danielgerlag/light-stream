@@ -1,0 +1,34 @@
+{
+  "first_page": {
+    "next_offset": 1,
+    "partition": {
+      "partition": 1,
+      "stream": "651dcf4c-dc2f-4f1d-893f-4171931237a9"
+    },
+    "records": [
+      {
+        "offset": 0,
+        "payload": [
+          112,
+          49,
+          45,
+          48
+        ]
+      }
+    ]
+  },
+  "terminal_next_page": {
+    "command": "request",
+    "error": {
+      "code": "cursor_expired",
+      "detail": {
+        "available_from": 3,
+        "code": "cursor_expired",
+        "requested": 1
+      },
+      "message": "record offset RecordOffset(1) expired; earliest available offset is RecordOffset(3)"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

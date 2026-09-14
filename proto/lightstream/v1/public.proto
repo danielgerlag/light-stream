@@ -86,6 +86,8 @@ message ErrorResult {
   LeaderHint leader = 4;
   RequestOutcome outcome = 5;
   ProducerRequestId request_id = 6;
+  string mutation_request_json = 7;
+  string detail_json = 8;
 }
 
 message BootstrapResponse {
@@ -98,6 +100,12 @@ message BootstrapResponse {
 message ProducerRequestId {
   string principal_id = 1;
   string producer_session_id = 2;
+  uint64 sequence = 3;
+}
+
+message MutationRequestId {
+  string principal_id = 1;
+  string mutation_session_id = 2;
   uint64 sequence = 3;
 }
 
@@ -319,6 +327,134 @@ message ListStreamBookmarksResponse {
   }
 }
 
+message AdvanceRetentionRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  MutationRequestId request_id = 4;
+  uint64 target_floor = 5;
+  uint64 route_group_id = 6;
+  uint64 route_revision = 7;
+}
+
+message RetentionAdvance {
+  MutationRequestId request_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  uint64 previous_floor = 4;
+  uint64 floor = 5;
+}
+
+message AdvanceRetentionResponse {
+  oneof result {
+    RetentionAdvance success = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message RetentionStatusRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  uint64 route_group_id = 4;
+  uint64 route_revision = 5;
+}
+
+message RetentionStatus {
+  string stream_id = 1;
+  uint32 partition_id = 2;
+  uint64 logical_floor = 3;
+  uint64 reclaim_cursor = 4;
+  uint64 logically_expired_bytes = 5;
+  uint64 raft_only_bytes = 6;
+}
+
+message RetentionStatusResponse {
+  oneof result {
+    RetentionStatus status = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message ReplayRange {
+  string stream_id = 1;
+  uint32 partition_id = 2;
+  uint64 start_offset = 3;
+  uint64 end_offset = 4;
+}
+
+message ReplayLease {
+  string lease_id = 1;
+  MutationRequestId admission_request = 2;
+  string cluster_id = 3;
+  ReplayRange range = 4;
+  uint64 protected_bytes = 5;
+  uint64 generation = 6;
+  uint64 expires_at_unix_ms = 7;
+  uint64 hard_expires_at_unix_ms = 8;
+  string lifecycle = 9;
+  uint64 requested_duration_ms = 10;
+  uint64 requested_max_bytes = 11;
+}
+
+message AdmitReplayLeaseRequest {
+  string cluster_id = 1;
+  ReplayRange range = 2;
+  MutationRequestId request_id = 3;
+  uint64 duration_ms = 4;
+  uint64 max_bytes = 5;
+  uint64 route_group_id = 6;
+  uint64 route_revision = 7;
+}
+
+message RenewReplayLeaseRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  string lease_id = 4;
+  MutationRequestId request_id = 5;
+  uint64 duration_ms = 6;
+  uint64 route_group_id = 7;
+  uint64 route_revision = 8;
+}
+
+message ReleaseReplayLeaseRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  string lease_id = 4;
+  MutationRequestId request_id = 5;
+  uint64 route_group_id = 6;
+  uint64 route_revision = 7;
+}
+
+message GetReplayLeaseRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  string lease_id = 4;
+  uint64 route_group_id = 5;
+  uint64 route_revision = 6;
+}
+
+message FetchProtectedRequest {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  string lease_id = 4;
+  uint64 offset = 5;
+  uint32 limit = 6;
+  uint64 route_group_id = 7;
+  uint64 route_revision = 8;
+}
+
+message ReplayLeaseResponse {
+  oneof result {
+    ReplayLease lease = 1;
+    ErrorResult error = 2;
+  }
+}
+
 message DiagnosticsRequest {}
 
 message ReplicationProgress {
@@ -422,5 +558,12 @@ service LightStream {
   rpc ResolveStreamBookmark(ResolveStreamBookmarkRequest) returns (StreamBookmarkResponse);
   rpc DeleteStreamBookmark(DeleteStreamBookmarkRequest) returns (StreamBookmarkResponse);
   rpc ListStreamBookmarks(ListStreamBookmarksRequest) returns (ListStreamBookmarksResponse);
+  rpc AdvanceRetention(AdvanceRetentionRequest) returns (AdvanceRetentionResponse);
+  rpc GetRetentionStatus(RetentionStatusRequest) returns (RetentionStatusResponse);
+  rpc AdmitReplayLease(AdmitReplayLeaseRequest) returns (ReplayLeaseResponse);
+  rpc RenewReplayLease(RenewReplayLeaseRequest) returns (ReplayLeaseResponse);
+  rpc ReleaseReplayLease(ReleaseReplayLeaseRequest) returns (ReplayLeaseResponse);
+  rpc GetReplayLease(GetReplayLeaseRequest) returns (ReplayLeaseResponse);
+  rpc FetchProtected(FetchProtectedRequest) returns (FetchResponse);
   rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
 }

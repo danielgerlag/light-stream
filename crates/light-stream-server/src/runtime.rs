@@ -3,22 +3,27 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use light_stream_core::{
-    BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest, BootstrapCommand, BootstrapResult,
-    BootstrapSpec, BootstrapTopology, ClusterId, CommittedBookmark, CommittedStreamBookmark,
-    ConsensusGroup, CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId,
-    LeaderHint, NodeDescriptor, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId,
-    PublishBatch, PublishReceipt, RecordOffset, RequestOutcome, StreamBookmarkPage,
-    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
-    StreamName,
+    AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
+    BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology, ClusterId,
+    CommittedBookmark, CommittedStreamBookmark, ConsensusGroup, CreateBookmarkSpec,
+    CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint, LeaseRelease, LeaseRenewal,
+    NodeDescriptor, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId,
+    ProtectedFetchRequest, PublishBatch, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId,
+    ReplayLeaseRequest, RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus,
+    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
+    StreamLifecycle, StreamName,
 };
 use light_stream_storage::{
-    ApplyResult, CONTROL_GROUP_ID, CommittedStateReader, ControlRaftConfig, DATA_GROUP_ID,
-    DataRaftConfig, GroupCommand, GroupIdentity, GroupKind, GroupStorageBudget,
+    ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
+    DATA_GROUP_ID, DataRaftConfig, GroupCommand, GroupIdentity, GroupKind, GroupStorageBudget,
     NoRemoteNetworkFactory, RocksStateMachine, create_control_store, create_data_store,
     open_control_store, open_data_store,
 };
@@ -45,6 +50,7 @@ pub(crate) type DataRaft = Raft<DataRaftConfig, RocksStateMachine<DataRaftConfig
 const ROOT_MANIFEST: &str = "cluster.json";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const FORMATION_TIMEOUT: Duration = Duration::from_secs(15);
+const LEASE_CLOCK_SKEW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
 enum ActiveManifest {
@@ -95,6 +101,7 @@ struct ActiveCluster {
     control: ControlRaft,
     data: BTreeMap<u64, DataGroup>,
     control_reader: CommittedStateReader,
+    maintenance_shutdown: AtomicBool,
 }
 
 struct DataGroup {
@@ -106,6 +113,7 @@ struct DataGroup {
 
 impl ActiveCluster {
     async fn shutdown(&self) -> Result<(), DomainError> {
+        self.maintenance_shutdown.store(true, Ordering::Release);
         self.control.shutdown().await.map_err(raft_fatal)?;
         for group in self.data.values() {
             group.raft.shutdown().await.map_err(raft_fatal)?;
@@ -213,7 +221,9 @@ impl ClusterManager {
                     manager.open_v2(manifest).await?
                 }
             };
-            *manager.active.write().await = Some(Arc::new(active));
+            let active = Arc::new(active);
+            spawn_retention_maintenance(active.clone());
+            *manager.active.write().await = Some(active);
         }
         Ok(manager)
     }
@@ -276,7 +286,9 @@ impl ClusterManager {
         };
         write_manifest(&self.data_dir, &manifest)?;
         let active = self.create_v1(manifest).await?;
-        *self.active.write().await = Some(Arc::new(active));
+        let active = Arc::new(active);
+        spawn_retention_maintenance(active.clone());
+        *self.active.write().await = Some(active);
         bootstrap_result(spec)
     }
 
@@ -322,6 +334,7 @@ impl ClusterManager {
             );
             write_manifest(&self.data_dir, &manifest)?;
             let active = Arc::new(self.create_v2(manifest, true).await?);
+            spawn_retention_maintenance(active.clone());
             *self.active.write().await = Some(active.clone());
             active
         };
@@ -466,6 +479,7 @@ impl ClusterManager {
                 .await
                 .map_err(internal_status)?,
         );
+        spawn_retention_maintenance(active.clone());
         *self.active.write().await = Some(active);
         Ok(())
     }
@@ -743,7 +757,9 @@ impl ClusterManager {
         .map_err(|_| DomainError::QuorumUnavailable {
             group: ConsensusGroup::Data,
             outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(request.clone()),
+            request: Some(AmbiguousRequest::Publish {
+                request: request.clone(),
+            }),
         })?
         .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
         match response.data {
@@ -917,6 +933,261 @@ impl ClusterManager {
             .ok_or(DomainError::StaleRoute)?;
         linearize(&active, &group.raft).await?;
         group.reader.list_bookmarks(request)
+    }
+
+    pub async fn advance_retention(
+        &self,
+        cluster: ClusterId,
+        request: RetentionRequest,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<RetentionResult, DomainError> {
+        let active = self.application_cluster().await?;
+        let route = resolve_data_route(
+            &active,
+            cluster,
+            request.partition(),
+            route_group_id,
+            route_revision,
+        )
+        .await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        maintain_group_retention(&active, group, request.partition()).await?;
+        let mutation = request.request().clone();
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            group.raft.client_write(GroupCommand::AdvanceRetention {
+                request,
+                clock: lease_clock_observation()?,
+            }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: Some(AmbiguousRequest::Mutation { request: mutation }),
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        match response.data {
+            ApplyResult::Retention(result) => {
+                if let Err(error) =
+                    maintain_group_retention(&active, group, result.partition()).await
+                {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "retention_maintenance_failed",
+                            "partition": result.partition(),
+                            "detail": error.to_string(),
+                        })
+                    );
+                }
+                Ok(result)
+            }
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected retention apply result {other}"),
+            }),
+        }
+    }
+
+    pub async fn retention_status(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<RetentionStatus, DomainError> {
+        let active = self.application_cluster().await?;
+        let route =
+            resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        maintain_group_retention(&active, group, partition).await
+    }
+
+    pub async fn admit_replay_lease(
+        &self,
+        cluster: ClusterId,
+        request: ReplayLeaseRequest,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<ReplayLease, DomainError> {
+        let partition = request.range().partition();
+        let mutation = request.request().clone();
+        let active = self.application_cluster().await?;
+        let route =
+            resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        maintain_group_retention(&active, group, partition).await?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            group.raft.client_write(GroupCommand::AdmitReplayLease {
+                request,
+                clock: lease_clock_observation()?,
+            }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: Some(AmbiguousRequest::Mutation { request: mutation }),
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        match response.data {
+            ApplyResult::ReplayLease(lease) => Ok(lease),
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected replay lease apply result {other}"),
+            }),
+        }
+    }
+
+    pub async fn renew_replay_lease(
+        &self,
+        cluster: ClusterId,
+        request: LeaseRenewal,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<ReplayLease, DomainError> {
+        let partition = request.partition();
+        let mutation = request.request().clone();
+        let active = self.application_cluster().await?;
+        let route =
+            resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        maintain_group_retention(&active, group, partition).await?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            group.raft.client_write(GroupCommand::RenewReplayLease {
+                request,
+                clock: lease_clock_observation()?,
+            }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: Some(AmbiguousRequest::Mutation { request: mutation }),
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        match response.data {
+            ApplyResult::ReplayLease(lease) => Ok(lease),
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected replay lease renewal result {other}"),
+            }),
+        }
+    }
+
+    pub async fn release_replay_lease(
+        &self,
+        cluster: ClusterId,
+        request: LeaseRelease,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<ReplayLease, DomainError> {
+        let partition = request.partition();
+        let mutation = request.request().clone();
+        let active = self.application_cluster().await?;
+        let route =
+            resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            group.raft.client_write(GroupCommand::ReleaseReplayLease {
+                request,
+                clock: lease_clock_observation()?,
+            }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: Some(AmbiguousRequest::Mutation { request: mutation }),
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        match response.data {
+            ApplyResult::ReplayLease(lease) => {
+                if let Err(error) = maintain_group_retention(&active, group, partition).await {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "retention_maintenance_failed",
+                            "partition": partition,
+                            "detail": error.to_string(),
+                        })
+                    );
+                }
+                Ok(lease)
+            }
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected replay lease release result {other}"),
+            }),
+        }
+    }
+
+    pub async fn replay_lease(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        lease: ReplayLeaseId,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<ReplayLease, DomainError> {
+        let active = self.application_cluster().await?;
+        let route =
+            resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        maintain_group_retention(&active, group, partition).await?;
+        group.reader.replay_lease(partition, lease)
+    }
+
+    pub async fn fetch_protected(
+        &self,
+        request: ProtectedFetchRequest,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<FetchPage, DomainError> {
+        let active = self.application_cluster().await?;
+        let route = resolve_data_route(
+            &active,
+            request.cluster(),
+            request.partition(),
+            route_group_id,
+            route_revision,
+        )
+        .await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        maintain_group_retention(&active, group, request.partition()).await?;
+        group.reader.fetch_protected(
+            request.cluster(),
+            request.partition(),
+            request.lease(),
+            request.offset(),
+            request.limit(),
+        )
     }
 
     pub async fn create_stream_bookmark(
@@ -1198,6 +1469,7 @@ impl ClusterManager {
             control,
             data,
             control_reader,
+            maintenance_shutdown: AtomicBool::new(false),
         })
     }
 
@@ -1302,6 +1574,7 @@ impl ClusterManager {
             control,
             data,
             control_reader,
+            maintenance_shutdown: AtomicBool::new(false),
         })
     }
 
@@ -1439,6 +1712,7 @@ impl ClusterManager {
             control,
             data,
             control_reader,
+            maintenance_shutdown: AtomicBool::new(false),
         })
     }
 }
@@ -1784,6 +2058,136 @@ async fn linearize(active: &Arc<ActiveCluster>, raft: &DataRaft) -> Result<(), D
     Ok(())
 }
 
+async fn maintain_group_retention(
+    active: &Arc<ActiveCluster>,
+    group: &DataGroup,
+    partition: PartitionKey,
+) -> Result<RetentionStatus, DomainError> {
+    for _ in 0..64 {
+        let observation = lease_clock_observation()?;
+        if !group
+            .reader
+            .retention_maintenance_needed(partition, observation.lower_bound())?
+        {
+            linearize(active, &group.raft).await?;
+            return group.reader.retention_status(partition);
+        }
+        let status = group.reader.retention_status(partition)?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            group.raft.client_write(GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor: status.reclaim_cursor(),
+                max_records: 1024,
+                max_payload_bytes: 8 * 1024 * 1024,
+                clock: observation,
+            }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: None,
+        })?
+        .map_err(|error| map_write_error(error, active, ConsensusGroup::Data))?;
+        match response.data {
+            ApplyResult::RetentionStatus(next) => {
+                if next.reclaim_cursor() == status.reclaim_cursor()
+                    && next.logical_floor() != next.reclaim_cursor()
+                {
+                    return Err(DomainError::Storage {
+                        reason: "retention maintenance made no progress".to_owned(),
+                    });
+                }
+            }
+            ApplyResult::Rejected(error) => return Err(error),
+            other => {
+                return Err(DomainError::Storage {
+                    reason: format!("unexpected retention maintenance result {other}"),
+                });
+            }
+        }
+    }
+    Err(DomainError::ResourceLimit {
+        resource: "retention_maintenance_steps".to_owned(),
+        limit: 64,
+    })
+}
+
+fn spawn_retention_maintenance(active: Arc<ActiveCluster>) {
+    tokio::spawn(async move {
+        while !active.maintenance_shutdown.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            if active.maintenance_shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            for group in active.data.values() {
+                if group.raft.metrics().borrow_watched().state != ServerState::Leader {
+                    continue;
+                }
+                let partitions = match group.reader.retention_partitions() {
+                    Ok(partitions) => partitions,
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "retention_partition_scan_failed",
+                                "detail": error.to_string(),
+                            })
+                        );
+                        continue;
+                    }
+                };
+                for partition in partitions {
+                    let observation = match lease_clock_observation() {
+                        Ok(observation) => observation,
+                        Err(error) => {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "retention_clock_unavailable",
+                                    "detail": error.to_string(),
+                                })
+                            );
+                            break;
+                        }
+                    };
+                    match group
+                        .reader
+                        .retention_maintenance_needed(partition, observation.lower_bound())
+                    {
+                        Ok(true) => {
+                            if let Err(error) =
+                                maintain_group_retention(&active, group, partition).await
+                            {
+                                eprintln!(
+                                    "{}",
+                                    serde_json::json!({
+                                        "event": "retention_background_maintenance_failed",
+                                        "partition": partition,
+                                        "detail": error.to_string(),
+                                    })
+                                );
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "retention_maintenance_probe_failed",
+                                    "partition": partition,
+                                    "detail": error.to_string(),
+                                })
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
 fn map_write_error<C>(
     error: RaftError<C, ClientWriteError<C>>,
     active: &Arc<ActiveCluster>,
@@ -2062,10 +2466,9 @@ fn validate_group_directories(data_dir: &Path, data_groups: &[GroupId]) -> Resul
 fn unsupported_claims() -> Vec<String> {
     vec![
         "snapshot_after_purge:UNSUPPORTED_LS06".to_owned(),
+        "raft_owned_payload_reclaim:DEFERRED_LS06".to_owned(),
         "secured_mode:UNSUPPORTED_LS08".to_owned(),
         "independent_hosts:BLOCKED".to_owned(),
-        "bookmarks:UNSUPPORTED_LS04".to_owned(),
-        "retention:UNSUPPORTED_LS05".to_owned(),
     ]
 }
 
@@ -2079,6 +2482,16 @@ fn storage_error(error: impl std::fmt::Display) -> DomainError {
     DomainError::Storage {
         reason: error.to_string(),
     }
+}
+
+fn lease_clock_observation() -> Result<ClockObservation, DomainError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| DomainError::LeaseClockUnavailable)?;
+    let now = u64::try_from(now.as_millis()).map_err(|_| DomainError::LeaseClockUnavailable)?;
+    let skew = u64::try_from(LEASE_CLOCK_SKEW.as_millis())
+        .map_err(|_| DomainError::LeaseClockUnavailable)?;
+    ClockObservation::new(now.saturating_sub(skew), now.saturating_add(skew))
 }
 
 fn internal_status(error: impl std::fmt::Display) -> tonic::Status {

@@ -1,0 +1,13 @@
+{
+  "modes": [
+    {
+      "mode": "local-insecure",
+      "verdict": "PASS"
+    },
+    {
+      "available_phase": "LS08",
+      "mode": "secured",
+      "verdict": "UNSUPPORTED"
+    }
+  ]
+}

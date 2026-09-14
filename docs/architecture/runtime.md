@@ -1,6 +1,6 @@
 # Production runtime architecture
 
-Status: implementation contract for LS01 to LS06. LS04 is implemented.
+Status: implementation contract for LS01 to LS06. LS05 is implemented.
 
 The arena result is preserved in `artifacts/LS02b/design/synthesis.md`.
 The independent judge scored the selected design 28/30 and preferred its auditable payload ownership and exact Openraft 0.10 API mapping.
@@ -145,6 +145,20 @@ Newest-first listing reads only the bookmark order index. The first page fixes a
 Stream bookmarks live in the control group as vectors with one committed position per stream partition. The server performs a linearizable tail check in each owning data group before it commits the vector. Positions are independent and the API makes no cross-group consistent-cut guarantee.
 
 The LS04 verifier uses three release processes. It proves exact resume, lost-response retry, conflict atomicity, backdated ordering, stable pagination, deletion and name reuse, stream vectors, indexed last-100 lookup over 10,000 records, and full-cluster restart. Partial-node recovery remains deferred to LS06.
+
+## LS05 implementation
+
+Each data group owns a monotonic retention floor and durable replay leases. Lease admission and floor advancement share one Raft order. Admission first protects an exact range below a later floor. Floor advancement first rejects a lease that starts below the floor.
+
+The leader writes a bounded wall-clock observation into each retention command. The state machine advances a monotonic safe lower bound and never reads the local clock. The local profile declares a two-second maximum clock error. A hard total lifetime prevents endless renewal.
+
+Retention maintenance is a bounded replicated command. It skips active lease ranges, deletes expired record indexes, clears applied-state ownership, and advances a durable cursor. Release or expiry moves the cursor back to the protected range so maintenance can revisit it.
+
+A leader-only worker runs every 250 milliseconds only when a partition needs expiry or reclaim work. A deposed leader stops proposing because it no longer reports `ServerState::Leader`.
+
+Logical expiry does not imply physical payload deletion. Retained Raft entries still own payloads because production groups use `SnapshotPolicy::Never`. LS05 reports those bytes as `raft_only_bytes`. Raft-owned payload reclamation remains LS06.
+
+Legacy record values migrate to schema version 2 before the store opens. The migration adds payload length and cumulative partition bytes in bounded synchronous batches.
 
 ## Rejected combinations
 

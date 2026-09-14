@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 light-stream-core = { path = "../light-stream-core" }
 prost.workspace = true
+serde_json.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 
@@ -14,4 +15,3 @@ tonic-prost.workspace = true
 prost-build = "0.14"
 protoc-bin-vendored = "3"
 tonic-prost-build = "0.14"
-

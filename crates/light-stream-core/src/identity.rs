@@ -46,6 +46,8 @@ uuid_id!(StreamId, "stream ID");
 uuid_id!(CatalogRequestId, "catalog request ID");
 uuid_id!(ProducerSessionId, "producer session ID");
 uuid_id!(BookmarkId, "bookmark ID");
+uuid_id!(MutationSessionId, "mutation session ID");
+uuid_id!(ReplayLeaseId, "replay lease ID");
 
 macro_rules! nonzero_id {
     ($name:ident, $kind:literal) => {

@@ -1,0 +1,7 @@
+{
+  "request_id": "ca7675b9-574c-6db7-79b6-852eb9dc2836",
+  "response_dropped": true,
+  "single_process_failure_with_multiple_groups": "DEFERRED_LS06",
+  "stream_id": "2cb90eb6-f5c6-47b6-b767-4e26f692dbe5",
+  "verdict": "PASS"
+}

@@ -1,0 +1,8 @@
+{
+  "age_based_retention": "NOT_IMPLEMENTED",
+  "independent_hosts": "BLOCKED",
+  "partial_node_recovery": "DEFERRED_LS06",
+  "raft_owned_payload_reclaim": "DEFERRED_LS06",
+  "response_loss_proxy_for_lease_mutations": "UNIT_COVERAGE_ONLY",
+  "secured_mode": "UNSUPPORTED_LS08"
+}

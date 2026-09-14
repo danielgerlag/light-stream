@@ -1,6 +1,6 @@
 # `light-streamctl` reference
 
-Status: implemented through LS04.
+Status: implemented through LS05.
 
 `light-streamctl` writes one JSON object to standard output for each command. Diagnostics go to standard error. Every command requires `--endpoint`.
 
@@ -14,7 +14,7 @@ Use `--seed` more than once to add fallback public endpoints. `--deadline-ms` se
 | `1` | The client could not connect, the RPC failed, or the response violated the protocol. |
 | `2` | The endpoint or local input was invalid. |
 | `3` | The LS01 `publish-probe` call returned `unsupported_operation`. |
-| `4` | The server rejected an identity, bootstrap, receipt, stream, or bookmark request. |
+| `4` | The server rejected an identity, bootstrap, receipt, stream, bookmark, retention, or replay request. |
 | `5` | The cluster is forming, lacks a quorum, is not bootstrapped, is not leader, or durable storage failed. |
 
 ## `health`
@@ -153,6 +153,49 @@ light-streamctl --endpoint http://127.0.0.1:7101 bookmark stream-create \
 ```
 
 Use `bookmark stream-resolve`, `bookmark stream-list`, and `bookmark stream-delete` for stream bookmark lifecycle. The server validates every position against its partition tail before committing the vector in the control group. The positions are independent. The API does not claim that they represent one cross-group consistent cut.
+
+## `retention`
+
+Advance the earliest offset that ordinary fetch can read:
+
+```sh
+light-streamctl --endpoint http://127.0.0.1:7101 retention advance \
+  --cluster-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6501 \
+  --stream-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6502 \
+  --partition 0 \
+  --principal local-operator \
+  --mutation-session 018f3f7e-5b3b-7c11-98f7-b65ac15f6507 \
+  --sequence 1 \
+  --floor 5000
+```
+
+The floor only moves forward. `retention status` returns the logical floor, the reclaim cursor, logically expired bytes, and bytes that the retained Raft log still owns.
+
+Fetch below the floor returns `cursor_expired`. The server does not move the requested offset to the floor.
+
+## `replay`
+
+Admit a bounded range before promising a complete replay:
+
+```sh
+light-streamctl --endpoint http://127.0.0.1:7101 replay admit \
+  --cluster-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6501 \
+  --stream-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6502 \
+  --partition 0 \
+  --principal replay-job \
+  --mutation-session 018f3f7e-5b3b-7c11-98f7-b65ac15f6508 \
+  --sequence 1 \
+  --start 1000 \
+  --end 2000 \
+  --duration-ms 30000 \
+  --max-bytes 67108864
+```
+
+Use `replay fetch` for pages inside the admitted half-open range. Use `replay renew`, `replay release`, and `replay status` for lifecycle operations. Renewal keeps the range and byte charge fixed. Release and expiry are terminal.
+
+Lease admission, renewal, release, and retention advancement use mutation request identities. Retry the same identity and body after an ambiguous result. The server returns the original durable result.
+
+The local profile assumes a maximum two-second clock error. The server protects a lease for at least the requested duration under that assumption. Maintenance runs only on the current data-group leader.
 
 ## `diagnostics`
 

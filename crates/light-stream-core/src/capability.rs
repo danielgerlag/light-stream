@@ -12,6 +12,8 @@ pub enum Capability {
     Receipt,
     Diagnostics,
     Bookmarks,
+    Retention,
+    ProtectedReplay,
 }
 
 impl Capability {
@@ -24,6 +26,8 @@ impl Capability {
             Self::Receipt => "receipt",
             Self::Diagnostics => "diagnostics",
             Self::Bookmarks => "bookmarks",
+            Self::Retention => "retention",
+            Self::ProtectedReplay => "protected_replay",
         }
     }
 
@@ -36,6 +40,8 @@ impl Capability {
             "receipt" => Some(Self::Receipt),
             "diagnostics" => Some(Self::Diagnostics),
             "bookmarks" => Some(Self::Bookmarks),
+            "retention" => Some(Self::Retention),
+            "protected_replay" => Some(Self::ProtectedReplay),
             _ => None,
         }
     }
