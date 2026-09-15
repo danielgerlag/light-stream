@@ -13,10 +13,18 @@ use light_stream_core::{
 };
 use tonic::transport::{Endpoint, Uri};
 
+use crate::publish_scheduler::PublishSchedulerConfig;
 use crate::{StartupError, manifest::GroupPoolConfig};
 
 const DEFAULT_ROCKSDB_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES: usize = 128 * 1024 * 1024;
+const DEFAULT_PUBLISH_QUEUE_REQUESTS: usize = 512;
+const DEFAULT_PUBLISH_QUEUE_RECORDS: usize = 8_192;
+const DEFAULT_PUBLISH_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+const DEFAULT_PUBLISH_BATCH_REQUESTS: usize = 64;
+const DEFAULT_PUBLISH_BATCH_RECORDS: usize = 512;
+const DEFAULT_PUBLISH_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_PUBLISH_COALESCE_US: u64 = 200;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PeerRoutes(BTreeMap<u64, String>);
@@ -146,12 +154,30 @@ pub struct ServerArgs {
     pub rocksdb_cache_bytes: usize,
     #[arg(long, default_value_t = DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES)]
     pub rocksdb_write_buffer_bytes: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_QUEUE_REQUESTS)]
+    pub publish_queue_requests: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_QUEUE_RECORDS)]
+    pub publish_queue_records: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_QUEUE_BYTES)]
+    pub publish_queue_bytes: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_BATCH_REQUESTS)]
+    pub publish_batch_requests: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_BATCH_RECORDS)]
+    pub publish_batch_records: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_BATCH_BYTES)]
+    pub publish_batch_bytes: usize,
+    #[arg(long, default_value_t = DEFAULT_PUBLISH_COALESCE_US)]
+    pub publish_coalesce_us: u64,
     #[arg(long)]
     pub verification_enable_fault_hooks: bool,
     #[arg(long)]
     pub verification_delay_group_id: Option<u64>,
     #[arg(long, default_value_t = 0)]
     pub verification_delay_ms: u64,
+    #[arg(long)]
+    pub verification_response_delay_group_id: Option<u64>,
+    #[arg(long, default_value_t = 0)]
+    pub verification_response_delay_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -166,7 +192,9 @@ pub struct ServerConfig {
     advertise_peer_uri: Option<String>,
     peer_routes: PeerRoutes,
     group_pool: GroupPoolConfig,
+    publish_scheduler: PublishSchedulerConfig,
     verification_delay: Option<(u64, Duration)>,
+    verification_response_delay: Option<(u64, Duration)>,
 }
 
 impl TryFrom<ServerArgs> for ServerConfig {
@@ -233,22 +261,28 @@ impl TryFrom<ServerArgs> for ServerConfig {
             args.rocksdb_write_buffer_bytes,
         )
         .map_err(|error| StartupError::InvalidConfig(error.to_string()))?;
-        let verification_delay = match (
+        let publish_scheduler = PublishSchedulerConfig::try_new(
+            args.publish_queue_requests,
+            args.publish_queue_records,
+            args.publish_queue_bytes,
+            args.publish_batch_requests,
+            args.publish_batch_records,
+            args.publish_batch_bytes,
+            Duration::from_micros(args.publish_coalesce_us),
+        )
+        .map_err(StartupError::InvalidConfig)?;
+        let verification_delay = parse_verification_delay(
             args.verification_enable_fault_hooks,
             args.verification_delay_group_id,
             args.verification_delay_ms,
-        ) {
-            (false, None, 0) => None,
-            (true, Some(group), milliseconds @ 1..=5000) if group > 1 => {
-                Some((group, Duration::from_millis(milliseconds)))
-            }
-            _ => {
-                return Err(StartupError::InvalidConfig(
-                    "verification delay requires its explicit gate, a data group ID, and 1..=5000 ms"
-                        .to_owned(),
-                ));
-            }
-        };
+            "verification delay",
+        )?;
+        let verification_response_delay = parse_verification_delay(
+            args.verification_enable_fault_hooks,
+            args.verification_response_delay_group_id,
+            args.verification_response_delay_ms,
+            "verification response delay",
+        )?;
         Ok(Self {
             public_listen: args.public_listen,
             peer_listen: args.peer_listen,
@@ -260,7 +294,9 @@ impl TryFrom<ServerArgs> for ServerConfig {
             advertise_peer_uri: args.advertise_peer_uri,
             peer_routes,
             group_pool,
+            publish_scheduler,
             verification_delay,
+            verification_response_delay,
         })
     }
 }
@@ -306,8 +342,33 @@ impl ServerConfig {
         &self.group_pool
     }
 
+    pub(crate) const fn publish_scheduler(&self) -> PublishSchedulerConfig {
+        self.publish_scheduler
+    }
+
     pub const fn verification_delay(&self) -> Option<(u64, Duration)> {
         self.verification_delay
+    }
+
+    pub const fn verification_response_delay(&self) -> Option<(u64, Duration)> {
+        self.verification_response_delay
+    }
+}
+
+fn parse_verification_delay(
+    enabled: bool,
+    group: Option<u64>,
+    milliseconds: u64,
+    name: &str,
+) -> Result<Option<(u64, Duration)>, StartupError> {
+    match (enabled, group, milliseconds) {
+        (_, None, 0) => Ok(None),
+        (true, Some(group), milliseconds @ 1..=5000) if group > 1 => {
+            Ok(Some((group, Duration::from_millis(milliseconds))))
+        }
+        _ => Err(StartupError::InvalidConfig(format!(
+            "{name} requires its explicit gate, a data group ID, and 1..=5000 ms"
+        ))),
     }
 }
 
@@ -354,9 +415,18 @@ mod tests {
             max_partitions_per_stream: DEFAULT_MAX_PARTITIONS_PER_STREAM,
             rocksdb_cache_bytes: DEFAULT_ROCKSDB_CACHE_BYTES,
             rocksdb_write_buffer_bytes: DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES,
+            publish_queue_requests: DEFAULT_PUBLISH_QUEUE_REQUESTS,
+            publish_queue_records: DEFAULT_PUBLISH_QUEUE_RECORDS,
+            publish_queue_bytes: DEFAULT_PUBLISH_QUEUE_BYTES,
+            publish_batch_requests: DEFAULT_PUBLISH_BATCH_REQUESTS,
+            publish_batch_records: DEFAULT_PUBLISH_BATCH_RECORDS,
+            publish_batch_bytes: DEFAULT_PUBLISH_BATCH_BYTES,
+            publish_coalesce_us: DEFAULT_PUBLISH_COALESCE_US,
             verification_enable_fault_hooks: false,
             verification_delay_group_id: None,
             verification_delay_ms: 0,
+            verification_response_delay_group_id: None,
+            verification_response_delay_ms: 0,
         }
     }
 

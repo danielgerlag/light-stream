@@ -1,34 +1,42 @@
 use std::{
     future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use light_stream_core::{
     AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
     BookmarkPublicationSequence, BootstrapResult, BootstrapSpec, Capability, CapabilityReport,
-    CapabilitySupport, ClusterId, CommittedBookmark, CommittedRecord, CommittedRecordRange,
-    CommittedStreamBookmark, ConsensusGroup, CreateStreamSpec, DomainError, FetchPage,
-    HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal, MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor,
-    PartitionId, PartitionKey, PartitionRoute, ProducerRequestId, ProducerSessionId, PublishBatch,
-    PublishProbe, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
-    RequestOutcome, RequestSequence, RetentionRequest, RetentionResult, RetentionStatus,
-    SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
-    StreamDescriptor, StreamId, StreamName,
+    CapabilitySupport, CheckpointCasResult, CheckpointExpectation, CheckpointKey,
+    CheckpointMutation, ClusterId, CommittedBookmark, CommittedCheckpoint, CommittedRecord,
+    CommittedRecordRange, CommittedStreamBookmark, ConsensusGroup, CreateStreamSpec, DomainError,
+    FetchPage, HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal, MAX_PUBLIC_MESSAGE_BYTES,
+    NodeDescriptor, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId,
+    ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, ReplayLease,
+    ReplayLeaseId, ReplayLeaseRequest, RequestOutcome, RequestSequence, RetentionRequest,
+    RetentionResult, RetentionStatus, SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest,
+    StreamCursorVector, StreamDescriptor, StreamId, StreamName,
 };
 use light_stream_proto::{
-    bookmark_from_wire, domain_error_from_wire, mutation_request_id_to_wire,
-    replay_lease_from_wire, retention_result_from_wire, retention_status_from_response,
-    route_from_wire, security_mode_from_wire, stream_bookmark_from_wire, stream_from_wire,
+    bookmark_from_wire, checkpoint_cas_from_wire, checkpoint_from_wire, checkpoint_key_to_wire,
+    domain_error_from_wire, mutation_request_id_to_wire, replay_lease_from_wire,
+    retention_result_from_wire, retention_status_from_response, route_from_wire,
+    security_mode_from_wire, stream_bookmark_from_wire, stream_from_wire,
     v1::{
         self, administration_response, advance_retention_response, bookmark_response,
-        bootstrap_response, fetch_response, light_stream_client::LightStreamClient,
-        list_bookmarks_response, list_stream_bookmarks_response, list_streams_response,
-        publish_response, receipt_response, replay_lease_response, retention_status_response,
-        route_response, snapshot_group_response, stream_bookmark_response, stream_response,
+        bootstrap_response, fetch_response, get_checkpoint_response,
+        light_stream_client::LightStreamClient, list_bookmarks_response,
+        list_stream_bookmarks_response, list_streams_response, publish_response, receipt_response,
+        replay_lease_response, retention_status_response, route_response, snapshot_group_response,
+        stream_bookmark_response, stream_response,
     },
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::Notify;
 use tonic::{
     Code, Request, Response, Status,
     transport::{Channel, Endpoint},
@@ -56,6 +64,68 @@ impl Deadline {
 
     fn expired(self) -> bool {
         self.remaining().is_none()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct Cancellation {
+    inner: Arc<CancellationInner>,
+}
+
+#[derive(Default)]
+struct CancellationInner {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl Cancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::Release);
+        self.inner.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::Acquire)
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Interruption {
+    Cancelled,
+    Deadline,
+    Transport,
+}
+
+#[derive(Clone, Default)]
+pub struct PublishOptions {
+    cancellation: Option<Cancellation>,
+    resolve_ambiguous_receipt: bool,
+}
+
+impl PublishOptions {
+    pub fn cancellation(mut self, cancellation: Cancellation) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    pub const fn resolve_ambiguous_receipt(mut self, enabled: bool) -> Self {
+        self.resolve_ambiguous_receipt = enabled;
+        self
     }
 }
 
@@ -140,6 +210,12 @@ pub enum ClientError {
     Request(String),
     #[error("invalid server response: {0}")]
     Protocol(String),
+    #[error("request was interrupted by {reason:?} with outcome {outcome:?}")]
+    Interrupted {
+        reason: Interruption,
+        outcome: RequestOutcome,
+        request: Option<AmbiguousRequest>,
+    },
     #[error(transparent)]
     Domain(#[from] DomainError),
 }
@@ -147,6 +223,11 @@ pub enum ClientError {
 impl ClientError {
     pub const fn exit_code(&self) -> i32 {
         match self {
+            Self::Interrupted {
+                reason: Interruption::Cancelled,
+                ..
+            } => 130,
+            Self::Interrupted { .. } => 5,
             Self::Domain(DomainError::UnsupportedOperation { .. }) => 3,
             Self::Domain(
                 DomainError::InvalidIdentity { .. }
@@ -165,6 +246,9 @@ impl ClientError {
                 | DomainError::StreamNameConflict
                 | DomainError::BookmarkNotFound
                 | DomainError::BookmarkNameConflict
+                | DomainError::CheckpointNotFound
+                | DomainError::CheckpointAheadOfTail { .. }
+                | DomainError::CheckpointRegression { .. }
                 | DomainError::CursorExpired { .. }
                 | DomainError::ReplayLeaseNotFound { .. }
                 | DomainError::ReplayLeaseInactive { .. }
@@ -173,6 +257,7 @@ impl ClientError {
                 | DomainError::ReplayLeaseLifetimeExhausted
                 | DomainError::MutationConflict
                 | DomainError::MutationReceiptExpired
+                | DomainError::PublishOverloaded { .. }
                 | DomainError::ResourceLimit { .. }
                 | DomainError::StaleRoute,
             ) => 4,
@@ -679,6 +764,18 @@ impl Client {
         partition: PartitionId,
     ) -> Result<ResolvedRoute, ClientError> {
         let deadline = Deadline::after(self.deadline);
+        self.resolve_route_until(cluster, stream_id, name, partition, deadline)
+            .await
+    }
+
+    async fn resolve_route_until(
+        &self,
+        cluster: ClusterId,
+        stream_id: Option<StreamId>,
+        name: Option<&StreamName>,
+        partition: PartitionId,
+        deadline: Deadline,
+    ) -> Result<ResolvedRoute, ClientError> {
         let mut endpoints = self.seeds.clone();
         let mut index = 0usize;
         let request = v1::RouteRequest {
@@ -748,15 +845,49 @@ impl Client {
     }
 
     pub async fn publish(&self, batch: PublishBatch) -> Result<PublishReceipt, ClientError> {
-        let route = self
-            .resolve_route(
-                batch.cluster(),
-                Some(batch.partition().stream()),
-                None,
-                batch.partition().partition(),
-            )
-            .await?;
-        self.publish_with_resolved_route(batch, route).await
+        self.publish_with(batch, PublishOptions::default()).await
+    }
+
+    pub async fn publish_with(
+        &self,
+        batch: PublishBatch,
+        options: PublishOptions,
+    ) -> Result<PublishReceipt, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        if options
+            .cancellation
+            .as_ref()
+            .is_some_and(Cancellation::is_cancelled)
+        {
+            return Err(interrupted_publish_error(
+                Interruption::Cancelled,
+                batch.request().clone(),
+                false,
+            ));
+        }
+        let resolve = self.resolve_route_until(
+            batch.cluster(),
+            Some(batch.partition().stream()),
+            None,
+            batch.partition().partition(),
+            deadline,
+        );
+        let route = if let Some(cancellation) = options.cancellation.as_ref() {
+            tokio::select! {
+                route = resolve => route?,
+                () = cancellation.cancelled() => {
+                    return Err(interrupted_publish_error(
+                        Interruption::Cancelled,
+                        batch.request().clone(),
+                        false,
+                    ));
+                }
+            }
+        } else {
+            resolve.await?
+        };
+        self.publish_with_resolved_route(batch, route, deadline, options)
+            .await
     }
 
     pub async fn publish_with_route_hint(
@@ -764,6 +895,22 @@ impl Client {
         batch: PublishBatch,
         group: light_stream_core::GroupId,
         route_revision: u64,
+    ) -> Result<PublishReceipt, ClientError> {
+        self.publish_with_route_hint_and_options(
+            batch,
+            group,
+            route_revision,
+            PublishOptions::default(),
+        )
+        .await
+    }
+
+    pub async fn publish_with_route_hint_and_options(
+        &self,
+        batch: PublishBatch,
+        group: light_stream_core::GroupId,
+        route_revision: u64,
+        options: PublishOptions,
     ) -> Result<PublishReceipt, ClientError> {
         self.publish_with_resolved_route(
             batch.clone(),
@@ -778,6 +925,8 @@ impl Client {
                 ),
                 leader: None,
             },
+            Deadline::after(self.deadline),
+            options,
         )
         .await
     }
@@ -786,10 +935,10 @@ impl Client {
         &self,
         batch: PublishBatch,
         route: ResolvedRoute,
+        deadline: Deadline,
+        options: PublishOptions,
     ) -> Result<PublishReceipt, ClientError> {
-        let request_id = batch.request().clone();
         let mut request = publish_request_to_wire(&batch, &route.route);
-        let deadline = Deadline::after(self.deadline);
         let mut endpoints = self.seeds.clone();
         if let Some(leader) = route.leader {
             add_hint(&mut endpoints, leader.public_uri())?;
@@ -797,28 +946,81 @@ impl Client {
         let mut index = 0usize;
         let mut request_may_have_reached = false;
         loop {
+            if options
+                .cancellation
+                .as_ref()
+                .is_some_and(Cancellation::is_cancelled)
+            {
+                return self
+                    .finish_interrupted_publish(
+                        Interruption::Cancelled,
+                        &batch,
+                        &request,
+                        deadline,
+                        request_may_have_reached,
+                        options.resolve_ambiguous_receipt,
+                    )
+                    .await;
+            }
             if deadline.expired() {
-                return Err(publish_deadline_error(request_id, request_may_have_reached));
+                return self
+                    .finish_interrupted_publish(
+                        Interruption::Deadline,
+                        &batch,
+                        &request,
+                        deadline,
+                        request_may_have_reached,
+                        options.resolve_ambiguous_receipt,
+                    )
+                    .await;
             }
             let endpoint = endpoints[index % endpoints.len()].clone();
             let mut next_index = index.wrapping_add(1);
-            let result = self
-                .publish_once(
-                    &endpoint,
-                    request.clone(),
-                    deadline,
-                    &mut request_may_have_reached,
-                )
-                .await;
+            let ambiguity_before_attempt = request_may_have_reached;
+            let publish = self.publish_once(
+                &endpoint,
+                request.clone(),
+                deadline,
+                &mut request_may_have_reached,
+            );
+            let result = if let Some(cancellation) = options.cancellation.as_ref() {
+                tokio::select! {
+                    result = publish => result,
+                    () = cancellation.cancelled() => {
+                        return self
+                            .finish_interrupted_publish(
+                                Interruption::Cancelled,
+                                &batch,
+                                &request,
+                                deadline,
+                                request_may_have_reached,
+                                options.resolve_ambiguous_receipt,
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                publish.await
+            };
             match result {
                 Ok(receipt) => return Ok(receipt),
                 Err(AttemptError::Deadline) => {
-                    return Err(publish_deadline_error(request_id, request_may_have_reached));
+                    return self
+                        .finish_interrupted_publish(
+                            Interruption::Deadline,
+                            &batch,
+                            &request,
+                            deadline,
+                            request_may_have_reached,
+                            options.resolve_ambiguous_receipt,
+                        )
+                        .await;
                 }
                 Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
                     leader,
                     ..
                 }))) => {
+                    request_may_have_reached = ambiguity_before_attempt;
                     if !self.retry {
                         return Err(ClientError::Domain(DomainError::NotLeader {
                             group: ConsensusGroup::Data,
@@ -830,20 +1032,45 @@ impl Client {
                     }
                 }
                 Err(AttemptError::Client(ClientError::Domain(
-                    DomainError::QuorumUnavailable { .. },
-                )))
-                | Err(AttemptError::Client(ClientError::Connection(_)))
+                    DomainError::QuorumUnavailable { outcome, .. },
+                ))) if self.retry => {
+                    if outcome == RequestOutcome::DefiniteNoCommit {
+                        request_may_have_reached = ambiguity_before_attempt;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Connection(_)))
                 | Err(AttemptError::Client(ClientError::Request(_)))
                     if self.retry => {}
+                Err(AttemptError::Client(
+                    ClientError::Domain(DomainError::QuorumUnavailable {
+                        outcome: RequestOutcome::AmbiguousCommit,
+                        ..
+                    })
+                    | ClientError::Connection(_)
+                    | ClientError::Request(_),
+                )) if options.resolve_ambiguous_receipt && request_may_have_reached => {
+                    return self
+                        .finish_interrupted_publish(
+                            Interruption::Transport,
+                            &batch,
+                            &request,
+                            deadline,
+                            true,
+                            true,
+                        )
+                        .await;
+                }
                 Err(AttemptError::Client(ClientError::Domain(DomainError::StaleRoute)))
                     if self.retry =>
                 {
+                    request_may_have_reached = ambiguity_before_attempt;
                     let route = self
-                        .resolve_route(
+                        .resolve_route_until(
                             batch.cluster(),
                             Some(batch.partition().stream()),
                             None,
                             batch.partition().partition(),
+                            deadline,
                         )
                         .await?;
                     request.route_group_id = route.route.group().get();
@@ -855,9 +1082,48 @@ impl Client {
                 Err(AttemptError::Client(error)) => return Err(error),
             }
             index = next_index;
-            retry_sleep(deadline).await.map_err(|_| {
-                publish_deadline_error(request_id.clone(), request_may_have_reached)
-            })?;
+            let retry = retry_sleep(deadline);
+            if let Some(cancellation) = options.cancellation.as_ref() {
+                tokio::select! {
+                    result = retry => {
+                        if result.is_err() {
+                            return self
+                                .finish_interrupted_publish(
+                                    Interruption::Deadline,
+                                    &batch,
+                                    &request,
+                                    deadline,
+                                    request_may_have_reached,
+                                    options.resolve_ambiguous_receipt,
+                                )
+                                .await;
+                        }
+                    }
+                    () = cancellation.cancelled() => {
+                        return self
+                            .finish_interrupted_publish(
+                                Interruption::Cancelled,
+                                &batch,
+                                &request,
+                                deadline,
+                                request_may_have_reached,
+                                options.resolve_ambiguous_receipt,
+                            )
+                            .await;
+                    }
+                }
+            } else if retry.await.is_err() {
+                return self
+                    .finish_interrupted_publish(
+                        Interruption::Deadline,
+                        &batch,
+                        &request,
+                        deadline,
+                        request_may_have_reached,
+                        options.resolve_ambiguous_receipt,
+                    )
+                    .await;
+            }
         }
     }
 
@@ -1070,6 +1336,194 @@ impl Client {
         self.receipt_once(&self.endpoint, request, deadline)
             .await
             .map_err(|error| request_attempt_error("receipt", error))
+    }
+
+    pub async fn checkpoint(&self, key: CheckpointKey) -> Result<CommittedCheckpoint, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let route = self
+            .resolve_route_until(
+                key.cluster(),
+                Some(key.partition().stream()),
+                None,
+                key.partition().partition(),
+                deadline,
+            )
+            .await?;
+        let mut request = v1::GetCheckpointRequest {
+            key: Some(checkpoint_key_to_wire(&key)),
+            route_group_id: route.route.group().get(),
+            route_revision: route.route.route_revision(),
+        };
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut index = 0usize;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .checkpoint_once(&endpoint, request.clone(), deadline)
+                .await
+            {
+                Ok(value) => return Ok(value),
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) => {
+                    if !self.retry {
+                        return Err(ClientError::Domain(DomainError::NotLeader {
+                            group: ConsensusGroup::Data,
+                            leader,
+                        }));
+                    }
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(ClientError::Domain(DomainError::StaleRoute)))
+                    if self.retry =>
+                {
+                    let route = self
+                        .resolve_route_until(
+                            key.cluster(),
+                            Some(key.partition().stream()),
+                            None,
+                            key.partition().partition(),
+                            deadline,
+                        )
+                        .await?;
+                    request.route_group_id = route.route.group().get();
+                    request.route_revision = route.route.route_revision();
+                    if let Some(leader) = route.leader {
+                        next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| non_write_deadline_error())?;
+        }
+    }
+
+    pub async fn compare_and_set_checkpoint(
+        &self,
+        mutation: CheckpointMutation,
+    ) -> Result<CheckpointCasResult, ClientError> {
+        let key = mutation.key().clone();
+        let request_id = mutation.request().clone();
+        let deadline = Deadline::after(self.deadline);
+        let route = self
+            .resolve_route_until(
+                key.cluster(),
+                Some(key.partition().stream()),
+                None,
+                key.partition().partition(),
+                deadline,
+            )
+            .await?;
+        let expected = match mutation.expected() {
+            CheckpointExpectation::Missing => v1::checkpoint_expectation::Value::Missing(true),
+            CheckpointExpectation::Revision(revision) => {
+                v1::checkpoint_expectation::Value::Revision(revision.get())
+            }
+        };
+        let mut request = v1::CompareAndSetCheckpointRequest {
+            request_id: Some(mutation_request_id_to_wire(mutation.request())),
+            key: Some(checkpoint_key_to_wire(mutation.key())),
+            expected: Some(v1::CheckpointExpectation {
+                value: Some(expected),
+            }),
+            candidate_next_offset: mutation.candidate().next_offset().get(),
+            route_group_id: route.route.group().get(),
+            route_revision: route.route.route_revision(),
+        };
+        let mut endpoints = self.seeds.clone();
+        if let Some(leader) = route.leader {
+            add_hint(&mut endpoints, leader.public_uri())?;
+        }
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            let ambiguity_before_attempt = request_may_have_reached;
+            match self
+                .compare_and_set_checkpoint_once(
+                    &endpoint,
+                    request.clone(),
+                    deadline,
+                    &mut request_may_have_reached,
+                )
+                .await
+            {
+                Ok(value) => return Ok(value),
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(
+                        request_id,
+                        request_may_have_reached,
+                    ));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) => {
+                    request_may_have_reached = ambiguity_before_attempt;
+                    if !self.retry {
+                        return Err(ClientError::Domain(DomainError::NotLeader {
+                            group: ConsensusGroup::Data,
+                            leader,
+                        }));
+                    }
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { outcome, .. },
+                ))) if self.retry => {
+                    if outcome == RequestOutcome::DefiniteNoCommit {
+                        request_may_have_reached = ambiguity_before_attempt;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(ClientError::Domain(DomainError::StaleRoute)))
+                    if self.retry =>
+                {
+                    request_may_have_reached = ambiguity_before_attempt;
+                    let route = self
+                        .resolve_route_until(
+                            key.cluster(),
+                            Some(key.partition().stream()),
+                            None,
+                            key.partition().partition(),
+                            deadline,
+                        )
+                        .await?;
+                    request.route_group_id = route.route.group().get();
+                    request.route_revision = route.route.route_revision();
+                    if let Some(leader) = route.leader {
+                        next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline).await.map_err(|_| {
+                mutation_deadline_error(request_id.clone(), request_may_have_reached)
+            })?;
+        }
     }
 
     pub async fn create_bookmark(
@@ -2363,6 +2817,112 @@ impl Client {
         administration_status_from_wire(response).map_err(AttemptError::Client)
     }
 
+    async fn finish_interrupted_publish(
+        &self,
+        reason: Interruption,
+        batch: &PublishBatch,
+        request: &v1::PublishRequest,
+        deadline: Deadline,
+        request_may_have_reached: bool,
+        resolve_ambiguous_receipt: bool,
+    ) -> Result<PublishReceipt, ClientError> {
+        if request_may_have_reached && resolve_ambiguous_receipt && !deadline.expired() {
+            match self
+                .receipt_until(
+                    batch.cluster(),
+                    batch.partition(),
+                    batch.request().clone(),
+                    request.route_group_id,
+                    request.route_revision,
+                    deadline,
+                )
+                .await
+            {
+                Ok(receipt) => return Ok(receipt),
+                Err(ClientError::Domain(DomainError::ReceiptNotFound)) if deadline.expired() => {}
+                Err(ClientError::Domain(DomainError::ReceiptNotFound)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(interrupted_publish_error(
+            reason,
+            batch.request().clone(),
+            request_may_have_reached,
+        ))
+    }
+
+    async fn receipt_until(
+        &self,
+        cluster: ClusterId,
+        partition: PartitionKey,
+        request_id: ProducerRequestId,
+        route_group_id: u64,
+        route_revision: u64,
+        deadline: Deadline,
+    ) -> Result<PublishReceipt, ClientError> {
+        let mut request = v1::ReceiptRequest {
+            cluster_id: cluster.to_string(),
+            stream_id: partition.stream().to_string(),
+            partition_id: partition.partition().get(),
+            request_id: Some(request_id_to_wire(&request_id)),
+            route_group_id,
+            route_revision,
+        };
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        loop {
+            if deadline.expired() {
+                return Err(ClientError::Domain(DomainError::ReceiptNotFound));
+            }
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .receipt_once(&endpoint, request.clone(), deadline)
+                .await
+            {
+                Ok(receipt) => return Ok(receipt),
+                Err(AttemptError::Deadline) => {
+                    return Err(ClientError::Domain(DomainError::ReceiptNotFound));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::ReceiptNotFound)))
+                | Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_))) => {}
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) => {
+                    if let Some(leader) = leader {
+                        next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::StaleRoute))) => {
+                    let route = self
+                        .resolve_route_until(
+                            cluster,
+                            Some(partition.stream()),
+                            None,
+                            partition.partition(),
+                            deadline,
+                        )
+                        .await?;
+                    request.route_group_id = route.route.group().get();
+                    request.route_revision = route.route.route_revision();
+                    if let Some(leader) = route.leader {
+                        next_index = add_hint(&mut endpoints, leader.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| ClientError::Domain(DomainError::ReceiptNotFound))?;
+        }
+    }
+
     async fn publish_once(
         &self,
         endpoint: &str,
@@ -2511,6 +3071,54 @@ impl Client {
                 "receipt response omitted its typed result".to_owned(),
             ))),
         }
+    }
+
+    async fn checkpoint_once(
+        &self,
+        endpoint: &str,
+        request: v1::GetCheckpointRequest,
+        deadline: Deadline,
+    ) -> Result<CommittedCheckpoint, AttemptError> {
+        let mut client = connect_client(endpoint, deadline).await?;
+        let response =
+            execute_rpc(deadline, request, |request| client.get_checkpoint(request)).await?;
+        match response.result {
+            Some(get_checkpoint_response::Result::Checkpoint(value)) => checkpoint_from_wire(value)
+                .map_err(ClientError::Domain)
+                .map_err(AttemptError::Client),
+            Some(get_checkpoint_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "checkpoint response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
+    async fn compare_and_set_checkpoint_once(
+        &self,
+        endpoint: &str,
+        request: v1::CompareAndSetCheckpointRequest,
+        deadline: Deadline,
+        request_may_have_reached: &mut bool,
+    ) -> Result<CheckpointCasResult, AttemptError> {
+        let mut client = connect_client(endpoint, deadline).await?;
+        let (request, timeout) = timed_request(deadline, request)?;
+        *request_may_have_reached = true;
+        let response = await_rpc(
+            deadline,
+            timeout,
+            client.compare_and_set_checkpoint(request),
+        )
+        .await?;
+        let result = response.result.ok_or_else(|| {
+            AttemptError::Client(ClientError::Protocol(
+                "checkpoint CAS response omitted its typed result".to_owned(),
+            ))
+        })?;
+        checkpoint_cas_from_wire(result)
+            .map_err(ClientError::Domain)
+            .map_err(AttemptError::Client)
     }
 }
 
@@ -2680,12 +3288,13 @@ fn request_attempt_error(operation: &str, error: AttemptError) -> ClientError {
     }
 }
 
-fn publish_deadline_error(
+fn interrupted_publish_error(
+    reason: Interruption,
     request: ProducerRequestId,
     request_may_have_reached: bool,
 ) -> ClientError {
-    DomainError::QuorumUnavailable {
-        group: ConsensusGroup::Data,
+    ClientError::Interrupted {
+        reason,
         outcome: if request_may_have_reached {
             RequestOutcome::AmbiguousCommit
         } else {
@@ -2693,7 +3302,6 @@ fn publish_deadline_error(
         },
         request: Some(AmbiguousRequest::Publish { request }),
     }
-    .into()
 }
 
 fn mutation_deadline_error(
@@ -2871,15 +3479,15 @@ mod tests {
             (false, RequestOutcome::DefiniteNoCommit),
             (true, RequestOutcome::AmbiguousCommit),
         ] {
-            let ClientError::Domain(DomainError::QuorumUnavailable {
-                group,
+            let ClientError::Interrupted {
+                reason,
                 outcome,
                 request: actual,
-            }) = publish_deadline_error(request.clone(), reached)
+            } = interrupted_publish_error(Interruption::Deadline, request.clone(), reached)
             else {
-                panic!("publish deadline must be a typed quorum result");
+                panic!("publish deadline must be a typed interruption");
             };
-            assert_eq!(ConsensusGroup::Data, group);
+            assert_eq!(Interruption::Deadline, reason);
             assert_eq!(expected, outcome);
             assert_eq!(
                 Some(AmbiguousRequest::Publish {
@@ -2888,6 +3496,35 @@ mod tests {
                 actual
             );
         }
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_publish_is_definite_without_connecting() {
+        let probe = default_probe(b"cancelled".to_vec()).unwrap();
+        let batch = PublishBatch::new(
+            probe.cluster(),
+            probe.partition(),
+            probe.request().clone(),
+            probe.records().to_vec(),
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+        let client = Client::connect("http://127.0.0.1:1").await.unwrap();
+
+        let error = client
+            .publish_with(batch, PublishOptions::default().cancellation(cancellation))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ClientError::Interrupted {
+                reason: Interruption::Cancelled,
+                outcome: RequestOutcome::DefiniteNoCommit,
+                ..
+            }
+        ));
     }
 
     #[test]

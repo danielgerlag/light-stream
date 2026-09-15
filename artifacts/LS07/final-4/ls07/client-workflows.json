@@ -1,0 +1,24 @@
+{
+  "batching": {
+    "logical_requests": 32,
+    "physical_entries": 2
+  },
+  "bootstrap": {
+    "cluster": {
+      "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+      "control_group": 1,
+      "data_group": 2,
+      "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+      "stream_name": "bootstrap"
+    },
+    "command": "cluster-bootstrap",
+    "endpoint": "http://127.0.0.1:50529",
+    "ok": true
+  },
+  "checkpoint_revision": 2,
+  "independent_hosts": "BLOCKED",
+  "overload_recovered": true,
+  "revision": "690404e6b61efe4616c90fae6f3a019eb50f6e36a7842fb87a0ba7efbde208db",
+  "secured_mode": "UNSUPPORTED_LS08",
+  "verdict": "PASS"
+}

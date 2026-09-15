@@ -2,16 +2,17 @@ use light_stream_core::{
     AmbiguousRequest, BookmarkId, BookmarkLifecycle, BookmarkName, BookmarkPage,
     BookmarkPageRequest, BookmarkPublicationSequence, BootstrapCommand, BootstrapResult,
     BootstrapSpec, ByteCount, ByteLimit, CapabilityReport, CapabilitySupport, CatalogRequestId,
-    ClusterId, CommittedBookmark, CommittedCursor, CommittedStreamBookmark, ConsensusGroup,
-    CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId, HealthStatus,
-    LeaderHint, LeaseDeadline, LeaseDuration, LeaseGeneration, LeaseRelease, LeaseRenewal,
-    MutationRequestId, MutationSessionId, NodeDescriptor, NodeId, PartitionId, PartitionKey,
-    PartitionPlacement, PartitionRoute, PrincipalId, ProducerRequestId, ProducerSessionId,
-    ProtectedFetchRequest, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, ReplayLease,
-    ReplayLeaseId, ReplayLeaseLifecycle, ReplayLeaseRequest, ReplayRange, RequestOutcome,
-    RequestSequence, RetentionRequest, RetentionResult, RetentionStatus, SecurityMode,
-    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
-    StreamLifecycle, StreamName,
+    CheckpointCasResult, CheckpointExpectation, CheckpointKey, CheckpointMutation,
+    CheckpointRevision, ClusterId, CommittedBookmark, CommittedCheckpoint, CommittedCursor,
+    CommittedStreamBookmark, ConsensusGroup, ConsumerId, CreateBookmarkSpec, CreateStreamSpec,
+    DomainError, FetchPage, GroupId, HealthStatus, LeaderHint, LeaseDeadline, LeaseDuration,
+    LeaseGeneration, LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId,
+    NodeDescriptor, NodeId, PartitionId, PartitionKey, PartitionPlacement, PartitionRoute,
+    PrincipalId, ProducerRequestId, ProducerSessionId, ProtectedFetchRequest, PublishBatch,
+    PublishProbe, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseLifecycle,
+    ReplayLeaseRequest, ReplayRange, RequestOutcome, RequestSequence, RetentionRequest,
+    RetentionResult, RetentionStatus, SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest,
+    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName,
 };
 
 use crate::v1;
@@ -1004,6 +1005,180 @@ pub fn route_from_wire(value: v1::PartitionRoute) -> Result<PartitionRoute, Doma
     ))
 }
 
+pub type GetCheckpointParts = (CheckpointKey, Option<GroupId>, Option<u64>);
+
+pub fn get_checkpoint_from_wire(
+    request: v1::GetCheckpointRequest,
+) -> Result<GetCheckpointParts, DomainError> {
+    let key =
+        checkpoint_key_from_wire(request.key.ok_or_else(|| DomainError::InvalidIdentity {
+            kind: "checkpoint key".to_owned(),
+            reason: "key is required".to_owned(),
+        })?)?;
+    Ok((
+        key,
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub type CompareAndSetCheckpointParts = (CheckpointMutation, Option<GroupId>, Option<u64>);
+
+pub fn compare_and_set_checkpoint_from_wire(
+    request: v1::CompareAndSetCheckpointRequest,
+) -> Result<CompareAndSetCheckpointParts, DomainError> {
+    let key =
+        checkpoint_key_from_wire(request.key.ok_or_else(|| DomainError::InvalidIdentity {
+            kind: "checkpoint key".to_owned(),
+            reason: "key is required".to_owned(),
+        })?)?;
+    let expected = request
+        .expected
+        .and_then(|expected| expected.value)
+        .ok_or_else(|| DomainError::InvalidRange {
+            reason: "checkpoint expectation is required".to_owned(),
+        })
+        .and_then(|expected| match expected {
+            v1::checkpoint_expectation::Value::Missing(true) => Ok(CheckpointExpectation::Missing),
+            v1::checkpoint_expectation::Value::Missing(false) => Err(DomainError::InvalidRange {
+                reason: "checkpoint missing expectation must be true".to_owned(),
+            }),
+            v1::checkpoint_expectation::Value::Revision(revision) => {
+                CheckpointRevision::new(revision).map(CheckpointExpectation::Revision)
+            }
+        })?;
+    let mutation = CheckpointMutation::new(
+        mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "request_id is required".to_owned(),
+            }
+        })?)?,
+        key.clone(),
+        expected,
+        CommittedCursor::new(
+            key.cluster(),
+            key.partition(),
+            RecordOffset::new(request.candidate_next_offset),
+        ),
+    )?;
+    Ok((
+        mutation,
+        (request.route_group_id != 0)
+            .then(|| GroupId::new(request.route_group_id))
+            .transpose()?,
+        (request.route_revision != 0).then_some(request.route_revision),
+    ))
+}
+
+pub fn checkpoint_key_to_wire(key: &CheckpointKey) -> v1::CheckpointKey {
+    v1::CheckpointKey {
+        cluster_id: key.cluster().to_string(),
+        stream_id: key.partition().stream().to_string(),
+        partition_id: key.partition().partition().get(),
+        consumer_id: key.consumer().to_string(),
+    }
+}
+
+pub fn checkpoint_key_from_wire(value: v1::CheckpointKey) -> Result<CheckpointKey, DomainError> {
+    Ok(CheckpointKey::new(
+        value.cluster_id.parse()?,
+        PartitionKey::new(
+            value.stream_id.parse()?,
+            PartitionId::new(value.partition_id),
+        ),
+        ConsumerId::parse(value.consumer_id)?,
+    ))
+}
+
+pub fn checkpoint_to_wire(value: &CommittedCheckpoint) -> v1::ConsumerCheckpoint {
+    v1::ConsumerCheckpoint {
+        key: Some(checkpoint_key_to_wire(value.key())),
+        next_offset: value.cursor().next_offset().get(),
+        revision: value.revision().get(),
+    }
+}
+
+pub fn checkpoint_from_wire(
+    value: v1::ConsumerCheckpoint,
+) -> Result<CommittedCheckpoint, DomainError> {
+    let key = checkpoint_key_from_wire(value.key.ok_or_else(|| DomainError::InvalidIdentity {
+        kind: "checkpoint key".to_owned(),
+        reason: "key is required".to_owned(),
+    })?)?;
+    Ok(CommittedCheckpoint::new(
+        key.clone(),
+        CommittedCursor::new(
+            key.cluster(),
+            key.partition(),
+            RecordOffset::new(value.next_offset),
+        ),
+        CheckpointRevision::new(value.revision)?,
+    ))
+}
+
+pub fn checkpoint_cas_to_wire(
+    value: &CheckpointCasResult,
+) -> v1::compare_and_set_checkpoint_response::Result {
+    match value {
+        CheckpointCasResult::Advanced {
+            request,
+            previous,
+            checkpoint,
+        } => v1::compare_and_set_checkpoint_response::Result::Advanced(v1::CheckpointAdvanced {
+            request_id: Some(mutation_request_id_to_wire(request)),
+            previous: previous.as_ref().map(checkpoint_to_wire),
+            checkpoint: Some(checkpoint_to_wire(checkpoint)),
+        }),
+        CheckpointCasResult::Conflict { request, current } => {
+            v1::compare_and_set_checkpoint_response::Result::Conflict(v1::CheckpointConflict {
+                request_id: Some(mutation_request_id_to_wire(request)),
+                current: current.as_ref().map(checkpoint_to_wire),
+            })
+        }
+    }
+}
+
+pub fn checkpoint_cas_from_wire(
+    value: v1::compare_and_set_checkpoint_response::Result,
+) -> Result<CheckpointCasResult, DomainError> {
+    match value {
+        v1::compare_and_set_checkpoint_response::Result::Advanced(value) => {
+            Ok(CheckpointCasResult::Advanced {
+                request: mutation_request_id_from_wire(value.request_id.ok_or_else(|| {
+                    DomainError::InvalidIdentity {
+                        kind: "mutation request ID".to_owned(),
+                        reason: "request_id is required".to_owned(),
+                    }
+                })?)?,
+                previous: value.previous.map(checkpoint_from_wire).transpose()?,
+                checkpoint: checkpoint_from_wire(value.checkpoint.ok_or_else(|| {
+                    DomainError::InvalidIdentity {
+                        kind: "consumer checkpoint".to_owned(),
+                        reason: "checkpoint is required".to_owned(),
+                    }
+                })?)?,
+            })
+        }
+        v1::compare_and_set_checkpoint_response::Result::Conflict(value) => {
+            Ok(CheckpointCasResult::Conflict {
+                request: mutation_request_id_from_wire(value.request_id.ok_or_else(|| {
+                    DomainError::InvalidIdentity {
+                        kind: "mutation request ID".to_owned(),
+                        reason: "request_id is required".to_owned(),
+                    }
+                })?)?,
+                current: value.current.map(checkpoint_from_wire).transpose()?,
+            })
+        }
+        v1::compare_and_set_checkpoint_response::Result::Error(value) => {
+            Err(domain_error_from_wire(value)?)
+        }
+    }
+}
+
 pub fn domain_error_to_wire(error: &DomainError) -> v1::ErrorResult {
     let (group, leader, outcome, request_id, mutation_request_json) = match error {
         DomainError::NotLeader { group, leader } => (
@@ -1036,6 +1211,13 @@ pub fn domain_error_to_wire(error: &DomainError) -> v1::ErrorResult {
                 mutation_request_json,
             )
         }
+        DomainError::PublishOverloaded { .. } => (
+            v1::ConsensusGroup::Data as i32,
+            None,
+            v1::RequestOutcome::DefiniteNoCommit as i32,
+            None,
+            String::new(),
+        ),
         _ => (
             v1::ConsensusGroup::Unspecified as i32,
             None,
@@ -1099,7 +1281,10 @@ pub fn domain_error_from_wire(value: v1::ErrorResult) -> Result<DomainError, Dom
         "stream_name_conflict" => Ok(DomainError::StreamNameConflict),
         "bookmark_not_found" => Ok(DomainError::BookmarkNotFound),
         "bookmark_name_conflict" => Ok(DomainError::BookmarkNameConflict),
+        "checkpoint_not_found" => Ok(DomainError::CheckpointNotFound),
         "cursor_expired"
+        | "checkpoint_ahead_of_tail"
+        | "checkpoint_regression"
         | "replay_lease_not_found"
         | "replay_lease_inactive"
         | "replay_lease_conflict"
@@ -1108,6 +1293,7 @@ pub fn domain_error_from_wire(value: v1::ErrorResult) -> Result<DomainError, Dom
         | "mutation_conflict"
         | "mutation_receipt_expired"
         | "lease_clock_unavailable"
+        | "publish_overloaded"
         | "resource_limit" => decode_domain_error_detail(&value.detail_json, &value.code),
         "stale_route" => Ok(DomainError::StaleRoute),
         "unsupported_operation" => Ok(DomainError::UnsupportedOperation {

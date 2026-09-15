@@ -1,10 +1,13 @@
 use std::{fs, path::PathBuf, time::Duration};
 
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use light_stream_client::{Client, ClientError, default_probe};
+use light_stream_client::{
+    Cancellation, Client, ClientError, Interruption, PublishOptions, default_probe,
+};
 use light_stream_core::{
     BookmarkId, BookmarkName, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapSpec,
-    ByteLimit, CatalogRequestId, ClusterId, CommittedCursor, CreateStreamSpec, DomainError,
+    ByteLimit, CatalogRequestId, CheckpointExpectation, CheckpointKey, CheckpointMutation,
+    CheckpointRevision, ClusterId, CommittedCursor, ConsumerId, CreateStreamSpec, DomainError,
     GroupId, LeaseDuration, LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId,
     NodeDescriptor, NodeId, PartitionId, PartitionKey, PrincipalId, ProducerRequestId,
     ProducerSessionId, PublishBatch, RecordOffset, ReplayLeaseId, ReplayLeaseRequest, ReplayRange,
@@ -60,6 +63,10 @@ enum Command {
     Replay {
         #[command(subcommand)]
         command: ReplayCommand,
+    },
+    Checkpoint {
+        #[command(subcommand)]
+        command: CheckpointCommand,
     },
     Publish(PublishArgs),
     Fetch(FetchArgs),
@@ -326,6 +333,46 @@ enum ReplayCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum CheckpointCommand {
+    Get {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[arg(long)]
+        consumer: String,
+    },
+    Advance {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        consumer: String,
+        #[arg(
+            long,
+            conflicts_with = "expected_revision",
+            required_unless_present = "expected_revision"
+        )]
+        expect_missing: bool,
+        #[arg(
+            long,
+            conflicts_with = "expect_missing",
+            required_unless_present = "expect_missing"
+        )]
+        expected_revision: Option<u64>,
+        #[arg(long)]
+        offset: u64,
+    },
+    Fetch {
+        #[command(flatten)]
+        target: TargetArgs,
+        #[arg(long)]
+        consumer: String,
+        #[arg(long, default_value_t = 128)]
+        limit: u32,
+    },
+}
+
 #[derive(Debug, ClapArgs)]
 struct TargetArgs {
     #[arg(long)]
@@ -372,6 +419,8 @@ struct PublishArgs {
     route_revision: Option<u64>,
     #[arg(long)]
     bookmark: Option<String>,
+    #[arg(long)]
+    resolve_receipt: bool,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -403,7 +452,29 @@ struct ReceiptArgs {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    let result = run(args).await;
+    let cancellation = Cancellation::new();
+    let run = run(args, cancellation.clone());
+    tokio::pin!(run);
+    let result = tokio::select! {
+        result = &mut run => result,
+        signal = tokio::signal::ctrl_c() => {
+            if signal.is_err() {
+                run.await
+            } else {
+                cancellation.cancel();
+                tokio::select! {
+                    result = &mut run => result,
+                    () = tokio::time::sleep(Duration::from_millis(250)) => {
+                        Err(ClientError::Interrupted {
+                            reason: Interruption::Cancelled,
+                            outcome: light_stream_core::RequestOutcome::NotApplicable,
+                            request: None,
+                        })
+                    }
+                }
+            }
+        }
+    };
     match result {
         Ok(value) => println!(
             "{}",
@@ -419,7 +490,7 @@ async fn main() {
     }
 }
 
-async fn run(args: Args) -> Result<serde_json::Value, ClientError> {
+async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value, ClientError> {
     let endpoint = args.endpoint.clone();
     let seeds = args.seeds.clone();
     let deadline = Duration::from_millis(args.deadline_ms);
@@ -1003,6 +1074,82 @@ async fn run(args: Args) -> Result<serde_json::Value, ClientError> {
                 }
             }
         }
+        Command::Checkpoint { command } => {
+            let client =
+                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            match command {
+                CheckpointCommand::Get { target, consumer } => {
+                    let key = CheckpointKey::new(
+                        target.cluster_id.parse()?,
+                        parse_target(&target)?,
+                        ConsumerId::parse(consumer)?,
+                    );
+                    let checkpoint = client.checkpoint(key).await?;
+                    Ok(json!({
+                        "command": "checkpoint-get",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "checkpoint": checkpoint,
+                    }))
+                }
+                CheckpointCommand::Advance {
+                    target,
+                    mutation,
+                    consumer,
+                    expect_missing,
+                    expected_revision,
+                    offset,
+                } => {
+                    let cluster = target.cluster_id.parse()?;
+                    let partition = parse_target(&target)?;
+                    let expected = match (expect_missing, expected_revision) {
+                        (true, None) => CheckpointExpectation::Missing,
+                        (false, Some(revision)) => {
+                            CheckpointExpectation::Revision(CheckpointRevision::new(revision)?)
+                        }
+                        _ => unreachable!("clap requires one checkpoint expectation"),
+                    };
+                    let update = CheckpointMutation::new(
+                        parse_mutation(&mutation)?,
+                        CheckpointKey::new(cluster, partition, ConsumerId::parse(consumer)?),
+                        expected,
+                        CommittedCursor::new(cluster, partition, RecordOffset::new(offset)),
+                    )?;
+                    let result = client.compare_and_set_checkpoint(update).await?;
+                    Ok(json!({
+                        "command": "checkpoint-advance",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "result": result,
+                    }))
+                }
+                CheckpointCommand::Fetch {
+                    target,
+                    consumer,
+                    limit,
+                } => {
+                    let cluster = target.cluster_id.parse()?;
+                    let partition = parse_target(&target)?;
+                    let checkpoint = client
+                        .checkpoint(CheckpointKey::new(
+                            cluster,
+                            partition,
+                            ConsumerId::parse(consumer)?,
+                        ))
+                        .await?;
+                    let page = client
+                        .fetch(cluster, partition, checkpoint.cursor().next_offset(), limit)
+                        .await?;
+                    Ok(json!({
+                        "command": "checkpoint-fetch",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "checkpoint": checkpoint,
+                        "page": page,
+                    }))
+                }
+            }
+        }
         Command::Publish(value) => {
             let partition = parse_target(&value.target)?;
             let request = parse_producer(&value.producer)?;
@@ -1040,10 +1187,26 @@ async fn run(args: Args) -> Result<serde_json::Value, ClientError> {
             let receipt = match (value.route_group_id, value.route_revision) {
                 (Some(group), Some(revision)) => {
                     client
-                        .publish_with_route_hint(batch, GroupId::new(group)?, revision)
+                        .publish_with_route_hint_and_options(
+                            batch,
+                            GroupId::new(group)?,
+                            revision,
+                            PublishOptions::default()
+                                .cancellation(cancellation)
+                                .resolve_ambiguous_receipt(value.resolve_receipt),
+                        )
                         .await?
                 }
-                (None, None) => client.publish(batch).await?,
+                (None, None) => {
+                    client
+                        .publish_with(
+                            batch,
+                            PublishOptions::default()
+                                .cancellation(cancellation)
+                                .resolve_ambiguous_receipt(value.resolve_receipt),
+                        )
+                        .await?
+                }
                 _ => unreachable!("clap requires both route hint fields"),
             };
             Ok(json!({
@@ -1207,6 +1370,17 @@ fn error_json(error: &ClientError) -> serde_json::Value {
                 "available_phase": available_phase,
             }
         }),
+        ClientError::Domain(DomainError::PublishOverloaded { resource, limit }) => json!({
+            "command": "publish",
+            "ok": false,
+            "error": {
+                "code": "publish_overloaded",
+                "message": error.to_string(),
+                "outcome": "definite_no_commit",
+                "resource": resource,
+                "limit": limit,
+            }
+        }),
         ClientError::Domain(domain) => json!({
             "command": "request",
             "ok": false,
@@ -1214,6 +1388,24 @@ fn error_json(error: &ClientError) -> serde_json::Value {
                 "code": domain.code().as_str(),
                 "message": domain.to_string(),
                 "detail": domain,
+            }
+        }),
+        ClientError::Interrupted {
+            reason,
+            outcome,
+            request,
+        } => json!({
+            "command": "request",
+            "ok": false,
+            "error": {
+                "code": match reason {
+                    Interruption::Cancelled => "cancelled",
+                    Interruption::Deadline => "deadline",
+                    Interruption::Transport => "transport",
+                },
+                "message": error.to_string(),
+                "outcome": outcome,
+                "request": request,
             }
         }),
         ClientError::InvalidEndpoint { .. } => json!({

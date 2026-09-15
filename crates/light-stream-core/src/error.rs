@@ -28,6 +28,9 @@ pub enum ErrorCode {
     StreamNameConflict,
     BookmarkNotFound,
     BookmarkNameConflict,
+    CheckpointNotFound,
+    CheckpointAheadOfTail,
+    CheckpointRegression,
     CursorExpired,
     ReplayLeaseNotFound,
     ReplayLeaseInactive,
@@ -37,6 +40,7 @@ pub enum ErrorCode {
     MutationConflict,
     MutationReceiptExpired,
     LeaseClockUnavailable,
+    PublishOverloaded,
     ResourceLimit,
     StaleRoute,
     UnsupportedOperation,
@@ -64,6 +68,9 @@ impl ErrorCode {
             Self::StreamNameConflict => "stream_name_conflict",
             Self::BookmarkNotFound => "bookmark_not_found",
             Self::BookmarkNameConflict => "bookmark_name_conflict",
+            Self::CheckpointNotFound => "checkpoint_not_found",
+            Self::CheckpointAheadOfTail => "checkpoint_ahead_of_tail",
+            Self::CheckpointRegression => "checkpoint_regression",
             Self::CursorExpired => "cursor_expired",
             Self::ReplayLeaseNotFound => "replay_lease_not_found",
             Self::ReplayLeaseInactive => "replay_lease_inactive",
@@ -73,6 +80,7 @@ impl ErrorCode {
             Self::MutationConflict => "mutation_conflict",
             Self::MutationReceiptExpired => "mutation_receipt_expired",
             Self::LeaseClockUnavailable => "lease_clock_unavailable",
+            Self::PublishOverloaded => "publish_overloaded",
             Self::ResourceLimit => "resource_limit",
             Self::StaleRoute => "stale_route",
             Self::UnsupportedOperation => "unsupported_operation",
@@ -128,6 +136,18 @@ pub enum DomainError {
     BookmarkNotFound,
     #[error("bookmark name is already active")]
     BookmarkNameConflict,
+    #[error("consumer checkpoint was not found")]
+    CheckpointNotFound,
+    #[error("checkpoint offset {candidate:?} exceeds committed tail {tail:?}")]
+    CheckpointAheadOfTail {
+        candidate: RecordOffset,
+        tail: RecordOffset,
+    },
+    #[error("checkpoint offset {candidate:?} precedes current offset {current:?}")]
+    CheckpointRegression {
+        current: RecordOffset,
+        candidate: RecordOffset,
+    },
     #[error("record offset {requested:?} expired; earliest available offset is {available_from:?}")]
     CursorExpired {
         requested: RecordOffset,
@@ -152,6 +172,8 @@ pub enum DomainError {
     MutationReceiptExpired,
     #[error("the configured lease clock guarantee is unavailable")]
     LeaseClockUnavailable,
+    #[error("{resource} limit {limit} was exceeded before publish admission")]
+    PublishOverloaded { resource: String, limit: u64 },
     #[error("{resource} limit {limit} was exceeded")]
     ResourceLimit { resource: String, limit: u64 },
     #[error("routing metadata is stale")]
@@ -185,6 +207,9 @@ impl DomainError {
             Self::StreamNameConflict => ErrorCode::StreamNameConflict,
             Self::BookmarkNotFound => ErrorCode::BookmarkNotFound,
             Self::BookmarkNameConflict => ErrorCode::BookmarkNameConflict,
+            Self::CheckpointNotFound => ErrorCode::CheckpointNotFound,
+            Self::CheckpointAheadOfTail { .. } => ErrorCode::CheckpointAheadOfTail,
+            Self::CheckpointRegression { .. } => ErrorCode::CheckpointRegression,
             Self::CursorExpired { .. } => ErrorCode::CursorExpired,
             Self::ReplayLeaseNotFound { .. } => ErrorCode::ReplayLeaseNotFound,
             Self::ReplayLeaseInactive { .. } => ErrorCode::ReplayLeaseInactive,
@@ -194,6 +219,7 @@ impl DomainError {
             Self::MutationConflict => ErrorCode::MutationConflict,
             Self::MutationReceiptExpired => ErrorCode::MutationReceiptExpired,
             Self::LeaseClockUnavailable => ErrorCode::LeaseClockUnavailable,
+            Self::PublishOverloaded { .. } => ErrorCode::PublishOverloaded,
             Self::ResourceLimit { .. } => ErrorCode::ResourceLimit,
             Self::StaleRoute => ErrorCode::StaleRoute,
             Self::UnsupportedOperation { .. } => ErrorCode::UnsupportedOperation,

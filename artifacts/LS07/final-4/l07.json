@@ -1,0 +1,58 @@
+{
+  "outcomes": [
+    {
+      "command": "publish",
+      "endpoint": "http://127.0.0.1:50628",
+      "ok": true,
+      "receipt": {
+        "bookmark": null,
+        "range": {
+          "count": 1,
+          "first": 35,
+          "partition": {
+            "partition": 0,
+            "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+          }
+        },
+        "request": {
+          "principal": "ls07-overload",
+          "sequence": 1,
+          "session": "0fff4960-16df-e389-d6e3-81fa6411c342"
+        }
+      }
+    },
+    {
+      "command": "publish",
+      "error": {
+        "code": "publish_overloaded",
+        "limit": 1,
+        "message": "publish queue requests limit 1 was exceeded before publish admission",
+        "outcome": "definite_no_commit",
+        "resource": "publish queue requests"
+      },
+      "ok": false
+    }
+  ],
+  "recovery": {
+    "command": "publish",
+    "endpoint": "http://127.0.0.1:50628",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 36,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "ls07-overload",
+        "sequence": 1,
+        "session": "855b61a5-7bfc-4f58-af9a-f1de9ec41e09"
+      }
+    }
+  },
+  "verdict": "PASS"
+}

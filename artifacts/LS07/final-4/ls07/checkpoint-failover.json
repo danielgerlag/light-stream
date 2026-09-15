@@ -1,0 +1,62 @@
+{
+  "after": {
+    "checkpoint": {
+      "cursor": {
+        "cluster": "3b003688-f5a6-e8da-c0c2-8b90ae817df2",
+        "next_offset": 1,
+        "partition": {
+          "partition": 0,
+          "stream": "b2783893-d983-2c3e-7b08-bffb9bade3c7"
+        }
+      },
+      "key": {
+        "cluster": "3b003688-f5a6-e8da-c0c2-8b90ae817df2",
+        "consumer": "ls07-ha",
+        "partition": {
+          "partition": 0,
+          "stream": "b2783893-d983-2c3e-7b08-bffb9bade3c7"
+        }
+      },
+      "revision": 1
+    },
+    "command": "checkpoint-get",
+    "endpoint": "http://127.0.0.1:50644",
+    "ok": true
+  },
+  "before": {
+    "command": "checkpoint-advance",
+    "endpoint": "http://127.0.0.1:50640",
+    "ok": true,
+    "result": {
+      "checkpoint": {
+        "cursor": {
+          "cluster": "3b003688-f5a6-e8da-c0c2-8b90ae817df2",
+          "next_offset": 1,
+          "partition": {
+            "partition": 0,
+            "stream": "b2783893-d983-2c3e-7b08-bffb9bade3c7"
+          }
+        },
+        "key": {
+          "cluster": "3b003688-f5a6-e8da-c0c2-8b90ae817df2",
+          "consumer": "ls07-ha",
+          "partition": {
+            "partition": 0,
+            "stream": "b2783893-d983-2c3e-7b08-bffb9bade3c7"
+          }
+        },
+        "revision": 1
+      },
+      "kind": "advanced",
+      "previous": null,
+      "request": {
+        "principal": "ls07-ha-consumer",
+        "sequence": 1,
+        "session": "cf3eaea8-3cfc-e42b-52de-d830e06aeb53"
+      }
+    }
+  },
+  "new_leader": 3,
+  "old_leader": 1,
+  "verdict": "PASS"
+}

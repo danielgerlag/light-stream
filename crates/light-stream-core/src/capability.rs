@@ -14,6 +14,7 @@ pub enum Capability {
     Bookmarks,
     Retention,
     ProtectedReplay,
+    ConsumerCheckpoints,
 }
 
 impl Capability {
@@ -28,6 +29,7 @@ impl Capability {
             Self::Bookmarks => "bookmarks",
             Self::Retention => "retention",
             Self::ProtectedReplay => "protected_replay",
+            Self::ConsumerCheckpoints => "consumer_checkpoints",
         }
     }
 
@@ -42,6 +44,7 @@ impl Capability {
             "bookmarks" => Some(Self::Bookmarks),
             "retention" => Some(Self::Retention),
             "protected_replay" => Some(Self::ProtectedReplay),
+            "consumer_checkpoints" => Some(Self::ConsumerCheckpoints),
             _ => None,
         }
     }

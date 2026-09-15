@@ -1,0 +1,105 @@
+{
+  "advance": {
+    "checkpoint": {
+      "cursor": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "next_offset": 20,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "key": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "consumer": "billing",
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "revision": 2
+    },
+    "kind": "advanced",
+    "previous": {
+      "cursor": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "next_offset": 10,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "key": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "consumer": "billing",
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "revision": 1
+    },
+    "request": {
+      "principal": "ls07-consumer",
+      "sequence": 2,
+      "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+    }
+  },
+  "bookmarks_unchanged": true,
+  "conflict": {
+    "current": {
+      "cursor": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "next_offset": 20,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "key": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "consumer": "billing",
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "revision": 2
+    },
+    "kind": "conflict",
+    "request": {
+      "principal": "ls07-consumer",
+      "sequence": 3,
+      "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+    }
+  },
+  "create": {
+    "checkpoint": {
+      "cursor": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "next_offset": 10,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "key": {
+        "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+        "consumer": "billing",
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "revision": 1
+    },
+    "kind": "advanced",
+    "previous": null,
+    "request": {
+      "principal": "ls07-consumer",
+      "sequence": 1,
+      "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+    }
+  },
+  "verdict": "PASS"
+}

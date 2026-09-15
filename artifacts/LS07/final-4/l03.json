@@ -1,0 +1,25 @@
+{
+  "checkpoint": {
+    "cursor": {
+      "cluster": "3b003688-f5a6-e8da-c0c2-8b90ae817df2",
+      "next_offset": 1,
+      "partition": {
+        "partition": 0,
+        "stream": "b2783893-d983-2c3e-7b08-bffb9bade3c7"
+      }
+    },
+    "key": {
+      "cluster": "3b003688-f5a6-e8da-c0c2-8b90ae817df2",
+      "consumer": "ls07-ha",
+      "partition": {
+        "partition": 0,
+        "stream": "b2783893-d983-2c3e-7b08-bffb9bade3c7"
+      }
+    },
+    "revision": 1
+  },
+  "metadata_refresh": "PASS",
+  "new_leader": 3,
+  "old_leader": 1,
+  "verdict": "PASS"
+}

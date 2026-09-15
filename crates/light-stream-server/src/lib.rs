@@ -2,6 +2,7 @@ mod config;
 mod manifest;
 mod openraft_boundary;
 mod peer;
+mod publish_scheduler;
 mod runtime;
 mod service;
 
@@ -152,7 +153,11 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             config.receipt_window(),
             config.peer_routes().clone(),
             config.group_pool().clone(),
-            config.verification_delay(),
+            config.publish_scheduler(),
+            (
+                config.verification_delay(),
+                config.verification_response_delay(),
+            ),
         )
         .await?,
     );

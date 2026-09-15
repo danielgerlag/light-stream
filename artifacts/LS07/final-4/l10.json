@@ -1,0 +1,64 @@
+{
+  "all_outputs_parseable": true,
+  "cancellation": {
+    "command": "request",
+    "error": {
+      "code": "cancelled",
+      "message": "request was interrupted by Cancelled with outcome AmbiguousCommit",
+      "outcome": "ambiguous_commit",
+      "request": {
+        "kind": "publish",
+        "request": {
+          "principal": "ls07-cancelled",
+          "sequence": 1,
+          "session": "5544083f-8fda-e710-28d2-408acbeedd82"
+        }
+      }
+    },
+    "ok": false
+  },
+  "checkpoint_conflict": {
+    "command": "checkpoint-advance",
+    "endpoint": "http://127.0.0.1:50529",
+    "ok": true,
+    "result": {
+      "current": {
+        "cursor": {
+          "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+          "next_offset": 20,
+          "partition": {
+            "partition": 0,
+            "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+          }
+        },
+        "key": {
+          "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+          "consumer": "billing",
+          "partition": {
+            "partition": 0,
+            "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+          }
+        },
+        "revision": 2
+      },
+      "kind": "conflict",
+      "request": {
+        "principal": "ls07-consumer",
+        "sequence": 3,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "overload": {
+    "command": "publish",
+    "error": {
+      "code": "publish_overloaded",
+      "limit": 1,
+      "message": "publish queue requests limit 1 was exceeded before publish admission",
+      "outcome": "definite_no_commit",
+      "resource": "publish queue requests"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

@@ -4,7 +4,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -14,7 +14,8 @@ use light_stream_core::{
     AdministrationIntent, AdministrationLifecycle, AdministrationOperation,
     AdministrationRequestId, AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage,
     BookmarkPageRequest, BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology,
-    ClusterId, ClusterTopology, CommittedBookmark, CommittedStreamBookmark, ConsensusGroup,
+    CheckpointCasResult, CheckpointKey, CheckpointMutation, ClusterId, ClusterTopology,
+    CommittedBookmark, CommittedCheckpoint, CommittedStreamBookmark, ConsensusGroup,
     CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint,
     LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, OperationalProof, PartitionId,
     PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest, PublishBatch,
@@ -44,10 +45,12 @@ use crate::{
         NODE_MANIFEST_VERSION, NodeManifestV1, NodeManifestV2, PersistedNodeState,
     },
     peer::{self, TonicNetworkFactory, wire},
+    publish_scheduler::{PublishScheduler, PublishSchedulerConfig, PublishVerificationDelays},
 };
 
 pub(crate) type ControlRaft = Raft<ControlRaftConfig, RocksStateMachine<ControlRaftConfig>>;
 pub(crate) type DataRaft = Raft<DataRaftConfig, RocksStateMachine<DataRaftConfig>>;
+type VerificationDelayConfig = (Option<(u64, Duration)>, Option<(u64, Duration)>);
 
 const ROOT_MANIFEST: &str = "cluster.json";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -112,6 +115,7 @@ struct ActiveCluster {
     topology_manifest_dirty: AtomicBool,
     administration_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     administration_delay: Option<Duration>,
+    publish_leader_hints: Arc<StdRwLock<BTreeMap<u64, LeaderHint>>>,
     maintenance_shutdown: AtomicBool,
 }
 
@@ -119,6 +123,7 @@ struct DataGroup {
     group_id: GroupId,
     raft: DataRaft,
     reader: CommittedStateReader,
+    publisher: PublishScheduler,
     slot: u16,
     budget: GroupStorageBudget,
 }
@@ -131,6 +136,7 @@ impl ActiveCluster {
         }
         self.control.shutdown().await.map_err(raft_fatal)?;
         for group in self.data.values() {
+            group.publisher.shutdown().await;
             group.raft.shutdown().await.map_err(raft_fatal)?;
         }
         Ok(())
@@ -195,7 +201,8 @@ pub struct ClusterManager {
     receipt_window: usize,
     peer_routes: PeerRoutes,
     group_pool: GroupPoolConfig,
-    verification_delay: Option<(u64, Duration)>,
+    publish_scheduler: PublishSchedulerConfig,
+    verification_delays: VerificationDelayConfig,
     active: RwLock<Option<Arc<ActiveCluster>>>,
     bootstrap_lock: Mutex<()>,
 }
@@ -207,7 +214,8 @@ impl ClusterManager {
         receipt_window: usize,
         peer_routes: PeerRoutes,
         group_pool: GroupPoolConfig,
-        verification_delay: Option<(u64, Duration)>,
+        publish_scheduler: PublishSchedulerConfig,
+        verification_delays: VerificationDelayConfig,
     ) -> Result<Self, DomainError> {
         let manifest = read_manifest(&data_dir)?;
         if manifest.is_none() && has_group_storage(&data_dir)? {
@@ -221,7 +229,8 @@ impl ClusterManager {
             receipt_window,
             peer_routes,
             group_pool,
-            verification_delay,
+            publish_scheduler,
+            verification_delays,
             active: RwLock::new(None),
             bootstrap_lock: Mutex::new(()),
         };
@@ -731,7 +740,8 @@ impl ClusterManager {
     }
 
     pub(crate) fn snapshot_verification_delay(&self, group_id: u64) -> Option<Duration> {
-        self.verification_delay
+        self.verification_delays
+            .0
             .filter(|(configured_group, _)| *configured_group == group_id)
             .map(|(_, delay)| delay)
     }
@@ -954,31 +964,7 @@ impl ClusterManager {
             }),
         )
         .await?;
-        if let Some((group_id, delay)) = self.verification_delay
-            && group_id == route.group().get()
-        {
-            tokio::time::sleep(delay).await;
-        }
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::Publish { batch }),
-        )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Publish {
-                request: request.clone(),
-            }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
-        match response.data {
-            ApplyResult::Published(receipt) => Ok(receipt),
-            ApplyResult::Rejected(error) => Err(error),
-            other => Err(DomainError::Storage {
-                reason: format!("unexpected publish apply result {other}"),
-            }),
-        }
+        group.publisher.try_admit(batch)?.wait().await
     }
 
     pub async fn fetch(
@@ -1018,6 +1004,82 @@ impl ClusterManager {
             .ok_or(DomainError::StaleRoute)?;
         linearize(&active, group).await?;
         group.reader.receipt(partition, request)
+    }
+
+    pub async fn checkpoint(
+        &self,
+        key: CheckpointKey,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<CommittedCheckpoint, DomainError> {
+        let active = self.application_cluster().await?;
+        let route = resolve_data_route(
+            &active,
+            key.cluster(),
+            key.partition(),
+            route_group_id,
+            route_revision,
+        )
+        .await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        linearize(&active, group).await?;
+        group.reader.checkpoint(&key)
+    }
+
+    pub async fn compare_and_set_checkpoint(
+        &self,
+        mutation: CheckpointMutation,
+        route_group_id: Option<GroupId>,
+        route_revision: Option<u64>,
+    ) -> Result<CheckpointCasResult, DomainError> {
+        let request = mutation.request().clone();
+        let active = self.application_cluster().await?;
+        let route = resolve_data_route(
+            &active,
+            mutation.key().cluster(),
+            mutation.key().partition(),
+            route_group_id,
+            route_revision,
+        )
+        .await?;
+        let group = active
+            .data
+            .get(&route.group().get())
+            .ok_or(DomainError::StaleRoute)?;
+        require_operational_leader(
+            &active,
+            group.group_id,
+            &group.raft,
+            &group.reader,
+            RequestOutcome::DefiniteNoCommit,
+            Some(AmbiguousRequest::Mutation {
+                request: request.clone(),
+            }),
+        )
+        .await?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            group
+                .raft
+                .client_write(GroupCommand::CompareAndSetCheckpoint { mutation }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: Some(AmbiguousRequest::Mutation { request }),
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        match response.data {
+            ApplyResult::Checkpoint(result) => Ok(result),
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected checkpoint apply result {other}"),
+            }),
+        }
     }
 
     pub async fn create_bookmark(
@@ -1756,6 +1818,7 @@ impl ClusterManager {
         )
         .await
         .map_err(raft_fatal)?;
+        let publish_leader_hints = Arc::new(StdRwLock::new(leader_hints([&self.local])));
         let mut data = BTreeMap::new();
         for (slot, group_id) in manifest
             .group_pool
@@ -1781,12 +1844,30 @@ impl ClusterManager {
             )
             .await
             .map_err(raft_fatal)?;
+            let publisher = PublishScheduler::spawn(
+                raft.clone(),
+                self.publish_scheduler,
+                PublishVerificationDelays {
+                    before_submit: self
+                        .verification_delays
+                        .0
+                        .filter(|(delayed_group, _)| *delayed_group == group_id.get())
+                        .map(|(_, delay)| delay),
+                    after_commit: self
+                        .verification_delays
+                        .1
+                        .filter(|(delayed_group, _)| *delayed_group == group_id.get())
+                        .map(|(_, delay)| delay),
+                },
+                publish_leader_hints.clone(),
+            );
             data.insert(
                 group_id.get(),
                 DataGroup {
                     group_id,
                     raft,
                     reader,
+                    publisher,
                     slot: slot as u16,
                     budget,
                 },
@@ -1806,7 +1887,8 @@ impl ClusterManager {
             peer_topology: None,
             topology_manifest_dirty: AtomicBool::new(false),
             administration_task: Mutex::new(None),
-            administration_delay: self.verification_delay.map(|(_, delay)| delay),
+            administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
+            publish_leader_hints,
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1835,6 +1917,7 @@ impl ClusterManager {
         )
         .await
         .map_err(raft_fatal)?;
+        let publish_leader_hints = Arc::new(StdRwLock::new(leader_hints([&self.local])));
         let mut data = BTreeMap::new();
         for (slot, group_id) in manifest
             .group_pool
@@ -1860,12 +1943,30 @@ impl ClusterManager {
             )
             .await
             .map_err(raft_fatal)?;
+            let publisher = PublishScheduler::spawn(
+                raft.clone(),
+                self.publish_scheduler,
+                PublishVerificationDelays {
+                    before_submit: self
+                        .verification_delays
+                        .0
+                        .filter(|(delayed_group, _)| *delayed_group == group_id.get())
+                        .map(|(_, delay)| delay),
+                    after_commit: self
+                        .verification_delays
+                        .1
+                        .filter(|(delayed_group, _)| *delayed_group == group_id.get())
+                        .map(|(_, delay)| delay),
+                },
+                publish_leader_hints.clone(),
+            );
             data.insert(
                 group_id.get(),
                 DataGroup {
                     group_id,
                     raft,
                     reader,
+                    publisher,
                     slot: slot as u16,
                     budget,
                 },
@@ -1922,7 +2023,8 @@ impl ClusterManager {
             peer_topology: None,
             topology_manifest_dirty: AtomicBool::new(false),
             administration_task: Mutex::new(None),
-            administration_delay: self.verification_delay.map(|(_, delay)| delay),
+            administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
+            publish_leader_hints,
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -2002,6 +2104,7 @@ impl ClusterManager {
             .values()
             .cloned()
             .collect::<Vec<_>>();
+        let publish_leader_hints = Arc::new(StdRwLock::new(leader_hints(members.iter())));
         self.peer_routes
             .validate_topology(self.local.node_id(), &members)?;
         let peer_topology = peer::PeerTopology::new(members);
@@ -2059,12 +2162,30 @@ impl ClusterManager {
             )
             .await
             .map_err(raft_fatal)?;
+            let publisher = PublishScheduler::spawn(
+                raft.clone(),
+                self.publish_scheduler,
+                PublishVerificationDelays {
+                    before_submit: self
+                        .verification_delays
+                        .0
+                        .filter(|(delayed_group, _)| *delayed_group == group_id.get())
+                        .map(|(_, delay)| delay),
+                    after_commit: self
+                        .verification_delays
+                        .1
+                        .filter(|(delayed_group, _)| *delayed_group == group_id.get())
+                        .map(|(_, delay)| delay),
+                },
+                publish_leader_hints.clone(),
+            );
             data.insert(
                 group_id.get(),
                 DataGroup {
                     group_id,
                     raft,
                     reader,
+                    publisher,
                     slot: slot as u16,
                     budget,
                 },
@@ -2079,10 +2200,25 @@ impl ClusterManager {
             peer_topology: Some(peer_topology),
             topology_manifest_dirty: AtomicBool::new(false),
             administration_task: Mutex::new(None),
-            administration_delay: self.verification_delay.map(|(_, delay)| delay),
+            administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
+            publish_leader_hints,
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
+}
+
+fn leader_hints<'a>(
+    nodes: impl IntoIterator<Item = &'a NodeDescriptor>,
+) -> BTreeMap<u64, LeaderHint> {
+    nodes
+        .into_iter()
+        .map(|node| {
+            (
+                node.node_id().get(),
+                LeaderHint::new(node.node_id(), node.public_uri()),
+            )
+        })
+        .collect()
 }
 
 fn topology_from_formation(formation: &FormationSpec) -> Result<ClusterTopology, DomainError> {
@@ -2138,6 +2274,12 @@ async fn sync_active_topology(
     if let Some(peers) = &active.peer_topology {
         peers.replace(topology.authorized_nodes().values().cloned())?;
     }
+    *active
+        .publish_leader_hints
+        .write()
+        .map_err(|_| DomainError::Storage {
+            reason: "publish leader-hint lock is poisoned".to_owned(),
+        })? = leader_hints(topology.authorized_nodes().values());
     manifest.topology = topology.clone();
     active
         .topology_manifest_dirty
@@ -3899,7 +4041,8 @@ mod tests {
             8,
             PeerRoutes::default(),
             GroupPoolConfig::default(),
-            None,
+            PublishSchedulerConfig::default(),
+            (None, None),
         )
         .await
         .unwrap();
@@ -3926,7 +4069,8 @@ mod tests {
             8,
             PeerRoutes::default(),
             GroupPoolConfig::default(),
-            None,
+            PublishSchedulerConfig::default(),
+            (None, None),
         )
         .await
         .unwrap();
@@ -3947,7 +4091,8 @@ mod tests {
             8,
             PeerRoutes::default(),
             GroupPoolConfig::default(),
-            None,
+            PublishSchedulerConfig::default(),
+            (None, None),
         )
         .await
         .err()
@@ -3990,7 +4135,8 @@ mod tests {
             8,
             PeerRoutes::default(),
             GroupPoolConfig::default(),
-            None,
+            PublishSchedulerConfig::default(),
+            (None, None),
         )
         .await
         .unwrap();

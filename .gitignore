@@ -27,3 +27,8 @@ __pycache__/
 !/artifacts/LS06/final-ls06/
 !/artifacts/LS06/final-ls02b/
 !/artifacts/LS06/membership-multigroup-3/
+/artifacts/LS02a/ls07-batching-regression-1/
+/artifacts/LS07/*
+!/artifacts/LS07/checkpoint.json
+!/artifacts/LS07/final-4/
+!/artifacts/LS07/perf-7/

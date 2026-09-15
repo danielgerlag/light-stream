@@ -8,16 +8,17 @@ use light_stream_core::{
 use light_stream_proto::{
     admit_replay_lease_from_wire, advance_retention_from_wire, bookmark_page_to_wire,
     bookmark_to_wire, bootstrap_from_wire, bootstrap_to_wire, capabilities_to_wire,
+    checkpoint_cas_to_wire, checkpoint_to_wire, compare_and_set_checkpoint_from_wire,
     create_bookmark_from_wire, create_stream_bookmark_from_wire, create_stream_from_wire,
     delete_bookmark_from_wire, delete_stream_bookmark_from_wire, domain_error_to_wire,
-    fetch_from_wire, fetch_protected_from_wire, fetch_to_wire, get_replay_lease_from_wire,
-    health_to_wire, list_bookmarks_from_wire, list_stream_bookmarks_from_wire,
-    publish_batch_and_route_from_wire, publish_probe_from_wire, publish_receipt_to_wire,
-    receipt_from_wire, release_replay_lease_from_wire, renew_replay_lease_from_wire,
-    replay_lease_to_wire, resolve_bookmark_from_wire, resolve_stream_bookmark_from_wire,
-    retention_result_to_wire, retention_status_from_wire, retention_status_to_wire, route_to_wire,
-    stream_bookmark_page_to_wire, stream_bookmark_to_wire, stream_selector_from_wire,
-    stream_to_wire, unsupported_publish_to_wire,
+    fetch_from_wire, fetch_protected_from_wire, fetch_to_wire, get_checkpoint_from_wire,
+    get_replay_lease_from_wire, health_to_wire, list_bookmarks_from_wire,
+    list_stream_bookmarks_from_wire, publish_batch_and_route_from_wire, publish_probe_from_wire,
+    publish_receipt_to_wire, receipt_from_wire, release_replay_lease_from_wire,
+    renew_replay_lease_from_wire, replay_lease_to_wire, resolve_bookmark_from_wire,
+    resolve_stream_bookmark_from_wire, retention_result_to_wire, retention_status_from_wire,
+    retention_status_to_wire, route_to_wire, stream_bookmark_page_to_wire, stream_bookmark_to_wire,
+    stream_selector_from_wire, stream_to_wire, unsupported_publish_to_wire,
     v1::{self, light_stream_server::LightStream},
 };
 use tonic::{Request, Response, Status};
@@ -57,6 +58,7 @@ impl PublicApi {
             Capability::Bookmarks,
             Capability::Retention,
             Capability::ProtectedReplay,
+            Capability::ConsumerCheckpoints,
         ]
         .into_iter()
         .map(|capability| CapabilityReport::new(capability, CapabilitySupport::Available))
@@ -589,6 +591,45 @@ impl LightStream for PublicApi {
             },
         };
         Ok(Response::new(response))
+    }
+
+    async fn get_checkpoint(
+        &self,
+        request: Request<v1::GetCheckpointRequest>,
+    ) -> Result<Response<v1::GetCheckpointResponse>, Status> {
+        let (key, group, revision) = get_checkpoint_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self.cluster.checkpoint(key, group, revision).await {
+            Ok(checkpoint) => {
+                v1::get_checkpoint_response::Result::Checkpoint(checkpoint_to_wire(&checkpoint))
+            }
+            Err(error) => v1::get_checkpoint_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::GetCheckpointResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn compare_and_set_checkpoint(
+        &self,
+        request: Request<v1::CompareAndSetCheckpointRequest>,
+    ) -> Result<Response<v1::CompareAndSetCheckpointResponse>, Status> {
+        let (mutation, group, revision) =
+            compare_and_set_checkpoint_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .compare_and_set_checkpoint(mutation, group, revision)
+            .await
+        {
+            Ok(result) => checkpoint_cas_to_wire(&result),
+            Err(error) => {
+                v1::compare_and_set_checkpoint_response::Result::Error(domain_error_to_wire(&error))
+            }
+        };
+        Ok(Response::new(v1::CompareAndSetCheckpointResponse {
+            result: Some(result),
+        }))
     }
 
     async fn diagnostics(

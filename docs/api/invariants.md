@@ -1,6 +1,6 @@
 # Light Stream API invariants
 
-Status: implemented through LS02b.
+Status: implemented through LS07.
 
 ## Identities
 
@@ -17,6 +17,9 @@ Status: implemented through LS02b.
 - The bookmark points after the appended batch.
 - A stream-level cursor vector contains independently committed positions. It is not an atomic or causally consistent cut.
 - Mutable consumer progress is separate from immutable bookmarks.
+- A consumer checkpoint is keyed by cluster, partition, and `ConsumerId`.
+- Checkpoint creation expects no current value. Checkpoint updates compare an exact revision.
+- A checkpoint can outlive retained records. It does not pin payloads or move the retention floor.
 
 ## Retry receipts
 
@@ -33,6 +36,8 @@ Status: implemented through LS02b.
 - Clients read only committed and applied records.
 - A failed validation or authorization request has no committed side effect.
 - A timeout or lost response is ambiguous until the receipt or committed data resolves it.
+- Publish overload is rejected before admission and always means `definite_no_commit`.
+- Cancellation after a publish RPC starts remains ambiguous until receipt resolution.
 - Current reads require quorum-confirmed leadership.
 
 ## Bootstrap

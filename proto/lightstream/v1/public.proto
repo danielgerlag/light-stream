@@ -455,6 +455,67 @@ message ReplayLeaseResponse {
   }
 }
 
+message CheckpointKey {
+  string cluster_id = 1;
+  string stream_id = 2;
+  uint32 partition_id = 3;
+  string consumer_id = 4;
+}
+
+message CheckpointExpectation {
+  oneof value {
+    bool missing = 1;
+    uint64 revision = 2;
+  }
+}
+
+message ConsumerCheckpoint {
+  CheckpointKey key = 1;
+  uint64 next_offset = 2;
+  uint64 revision = 3;
+}
+
+message GetCheckpointRequest {
+  CheckpointKey key = 1;
+  uint64 route_group_id = 2;
+  uint64 route_revision = 3;
+}
+
+message GetCheckpointResponse {
+  oneof result {
+    ConsumerCheckpoint checkpoint = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message CompareAndSetCheckpointRequest {
+  MutationRequestId request_id = 1;
+  CheckpointKey key = 2;
+  CheckpointExpectation expected = 3;
+  uint64 candidate_next_offset = 4;
+  uint64 route_group_id = 5;
+  uint64 route_revision = 6;
+}
+
+message CheckpointAdvanced {
+  MutationRequestId request_id = 1;
+  ConsumerCheckpoint previous = 2;
+  ConsumerCheckpoint checkpoint = 3;
+}
+
+message CheckpointConflict {
+  MutationRequestId request_id = 1;
+  ConsumerCheckpoint current = 2;
+}
+
+message CompareAndSetCheckpointResponse {
+  oneof result {
+    CheckpointAdvanced advanced = 1;
+    CheckpointConflict conflict = 2;
+    ErrorResult error = 3;
+  }
+}
+
 message DiagnosticsRequest {}
 
 message SnapshotGroupRequest {
@@ -628,6 +689,8 @@ service LightStream {
   rpc ReleaseReplayLease(ReleaseReplayLeaseRequest) returns (ReplayLeaseResponse);
   rpc GetReplayLease(GetReplayLeaseRequest) returns (ReplayLeaseResponse);
   rpc FetchProtected(FetchProtectedRequest) returns (FetchResponse);
+  rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointResponse);
+  rpc CompareAndSetCheckpoint(CompareAndSetCheckpointRequest) returns (CompareAndSetCheckpointResponse);
   rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
   rpc SnapshotGroup(SnapshotGroupRequest) returns (SnapshotGroupResponse);
   rpc ReplaceVoter(ReplaceVoterRequest) returns (AdministrationResponse);

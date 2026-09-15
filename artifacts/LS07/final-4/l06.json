@@ -1,0 +1,21 @@
+{
+  "configured_coalesce_microseconds": 100000,
+  "end_to_end_seconds": 0.13545083299999305,
+  "receipt": {
+    "bookmark": null,
+    "range": {
+      "count": 1,
+      "first": 33,
+      "partition": {
+        "partition": 0,
+        "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+      }
+    },
+    "request": {
+      "principal": "ls07-sparse",
+      "sequence": 1,
+      "session": "1e4cd043-417b-4a7e-6686-b5311b3bf4cc"
+    }
+  },
+  "verdict": "PASS"
+}

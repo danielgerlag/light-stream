@@ -1,0 +1,20 @@
+{
+  "resolved_receipt": {
+    "bookmark": null,
+    "range": {
+      "count": 1,
+      "first": 32,
+      "partition": {
+        "partition": 0,
+        "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+      }
+    },
+    "request": {
+      "principal": "ls07-resolver",
+      "sequence": 1,
+      "session": "373605e6-f5d1-254d-d9e1-a80511c5680b"
+    }
+  },
+  "response_dropped": true,
+  "verdict": "PASS"
+}

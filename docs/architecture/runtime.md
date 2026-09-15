@@ -1,6 +1,6 @@
 # Production runtime architecture
 
-Status: implementation contract for LS01 to LS06. LS05 is implemented.
+Status: implemented through LS07.
 
 The arena result is preserved in `artifacts/LS02b/design/synthesis.md`.
 The independent judge scored the selected design 28/30 and preferred its auditable payload ownership and exact Openraft 0.10 API mapping.
@@ -85,6 +85,7 @@ Current reads require Openraft's linearizable read barrier.
 5. LS04 adds partition-local bookmarks and independent stream-level cursor vectors.
 6. LS05 adds retention, replay leases, reclamation, and bounded reads.
 7. LS06 adds snapshots, suffix and snapshot catch-up, learners, membership changes, and leader transfer.
+8. LS07 adds bounded group commit, explicit publish admission, client cancellation and receipt resolution, and mutable consumer checkpoints.
 
 Every stage leaves runnable release binaries and evidence from the independent oracle.
 
@@ -185,6 +186,22 @@ Every node runs an awaited administration reconciler unless its manifest is `ret
 Administration request IDs are idempotent. Reuse with another body fails. Only one operation is active. Abort restores the prior topology and keeps the slot occupied until every group removes a learner that raced with cancellation. The public client follows control-leader hints and rotates seeds within one deadline.
 
 Node manifest version 4 persists the topology. Version 3 manifests and bootstrap log entries migrate without rewriting the manifest before storage recovery succeeds. Committed control topology is authoritative when the manifest write lags or fails.
+
+## LS07 batching and consumer progress
+
+Each data group owns one bounded publish scheduler. Admission reserves request count, record count, and resident bytes without waiting. A full queue returns `publish_overloaded` with `definite_no_commit`.
+
+The scheduler combines complete `PublishBatch` requests into one `GroupCommand::PublishMany`. It never combines producer identities. The state machine returns one ordered outcome per request and assigns offsets only to new successful requests.
+
+The scheduler keeps one Raft write in flight. The oldest admitted request fixes the coalescing deadline. New arrivals do not reset it. The default delay is 200 microseconds. Server flags set queue and physical-batch limits and use microseconds for the timer.
+
+Publish receipts store versioned success or rejection outcomes. The complete-body fingerprint covers records and the optional bookmark. A lost deterministic rejection cannot become a later success after state changes.
+
+Mutable consumer checkpoints live in the partition's data group. The key contains the cluster, partition, and `ConsumerId`. Creation expects a missing value. Updates compare an exact `CheckpointRevision`. Success and conflict results use `MutationRequestId` receipts, so an exact retry returns the original ordered result.
+
+Checkpoint updates cannot exceed the committed tail or move behind the current checkpoint. They do not inspect the retention floor, change bookmarks, or pin payloads. A retained checkpoint can later point below the retention floor. Fetch then returns `cursor_expired`.
+
+The client uses one absolute deadline for publish and checkpoint route resolution, retries, and RPCs. Publish accepts a cancellation token and can resolve an ambiguous transport result through the durable receipt. `SIGINT` prints a machine-readable certainty result before `light-streamctl` exits with code 130.
 
 ## Rejected combinations
 

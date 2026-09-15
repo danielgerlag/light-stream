@@ -9,7 +9,7 @@ pub use snapshot::{SnapshotArtifact, SnapshotDigest};
 use snapshot::{SnapshotCatalog, SnapshotRecord, StoredArtifactDescriptor, decode_snapshot_v3};
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fmt::{self, Debug},
     fs, io,
     marker::PhantomData,
@@ -26,14 +26,16 @@ use futures_util::{Stream, StreamExt};
 use light_stream_core::{
     AdministrationIntent, AdministrationOperation, AdministrationRequestId, BookmarkId,
     BookmarkName, BookmarkPage, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapResult,
-    BootstrapSpec, ByteCount, CatalogRequestId, ClusterId, ClusterTopology, CommittedBookmark,
-    CommittedCursor, CommittedRecord, CommittedRecordRange, CommittedStreamBookmark,
-    CreateStreamSpec, DomainError, FetchPage, GroupId, LeaseDeadline, LeaseRelease, LeaseRenewal,
-    MutationRequestId, NodeId, OperationalProof, PartitionId, PartitionKey, PartitionPlacement,
-    PartitionRoute, ProducerRequestId, PublishBatch, PublishReceipt, RecordOffset, ReplayLease,
-    ReplayLeaseId, ReplayLeaseRequest, RetentionRequest, RetentionResult, RetentionStatus,
-    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
-    StreamLifecycle, StreamName,
+    BootstrapSpec, ByteCount, CatalogRequestId, CheckpointCasResult, CheckpointExpectation,
+    CheckpointKey, CheckpointMutation, CheckpointRevision, ClusterId, ClusterTopology,
+    CommittedBookmark, CommittedCheckpoint, CommittedCursor, CommittedRecord, CommittedRecordRange,
+    CommittedStreamBookmark, CreateStreamSpec, DomainError, FetchPage, GroupId, LeaseDeadline,
+    LeaseRelease, LeaseRenewal, MutationRequestId, NodeId, OperationalProof, PartitionId,
+    PartitionKey, PartitionPlacement, PartitionRoute, ProducerRequestId, PublishBatch,
+    PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
+    ReplicatedPublishBatch, RetentionRequest, RetentionResult, RetentionStatus, StreamBookmarkPage,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
+    StreamName,
 };
 use openraft::{
     BasicNode, EntryPayload,
@@ -114,6 +116,7 @@ const RECEIPT_PREFIX: &[u8] = b"receipt/";
 const SESSION_PREFIX: &[u8] = b"session/";
 const MUTATION_RECEIPT_PREFIX: &[u8] = b"mutation-receipt/";
 const MUTATION_SESSION_PREFIX: &[u8] = b"mutation-session/";
+const CHECKPOINT_PREFIX: &[u8] = b"checkpoint/";
 const BOOKMARK_ID_PREFIX: &[u8] = b"bookmark/id/";
 const BOOKMARK_NAME_PREFIX: &[u8] = b"bookmark/name/";
 const BOOKMARK_ORDER_PREFIX: &[u8] = b"bookmark/order/";
@@ -161,7 +164,7 @@ openraft::declare_raft_types!(
         Entry = GroupEntry,
 );
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GroupKind {
     Control,
@@ -227,6 +230,12 @@ pub enum GroupCommand {
     },
     Publish {
         batch: PublishBatch,
+    },
+    PublishMany {
+        batch: ReplicatedPublishBatch,
+    },
+    CompareAndSetCheckpoint {
+        mutation: CheckpointMutation,
     },
     CreateBookmark {
         id: BookmarkId,
@@ -301,6 +310,10 @@ impl fmt::Display for GroupCommand {
             Self::BeginDeleteStream { .. } => formatter.write_str("begin-delete-stream"),
             Self::FinishDeleteStream { .. } => formatter.write_str("finish-delete-stream"),
             Self::Publish { .. } => formatter.write_str("publish"),
+            Self::PublishMany { .. } => formatter.write_str("publish-many"),
+            Self::CompareAndSetCheckpoint { .. } => {
+                formatter.write_str("compare-and-set-checkpoint")
+            }
             Self::CreateBookmark { .. } => formatter.write_str("create-bookmark"),
             Self::DeleteBookmark { .. } => formatter.write_str("delete-bookmark"),
             Self::CreateStreamBookmark { .. } => formatter.write_str("create-stream-bookmark"),
@@ -329,6 +342,8 @@ pub enum ApplyResult {
     Bootstrapped(BootstrapResult),
     Stream(StreamDescriptor),
     Published(PublishReceipt),
+    PublishedMany(PublishManyResult),
+    Checkpoint(CheckpointCasResult),
     Bookmark(CommittedBookmark),
     StreamBookmark(CommittedStreamBookmark),
     Retention(RetentionResult),
@@ -346,6 +361,10 @@ impl fmt::Display for ApplyResult {
             Self::Bootstrapped(_) => formatter.write_str("bootstrapped"),
             Self::Stream(value) => write!(formatter, "stream {}", value.stream()),
             Self::Published(_) => formatter.write_str("published"),
+            Self::PublishedMany(value) => {
+                write!(formatter, "published {} requests", value.outcomes().len())
+            }
+            Self::Checkpoint(value) => write!(formatter, "checkpoint {:?}", value),
             Self::Bookmark(value) => write!(formatter, "bookmark {}", value.id()),
             Self::StreamBookmark(value) => write!(formatter, "stream bookmark {}", value.id()),
             Self::Retention(value) => {
@@ -368,6 +387,49 @@ impl fmt::Display for ApplyResult {
             Self::Rejected(error) => write!(formatter, "rejected: {error}"),
             Self::Noop => formatter.write_str("noop"),
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublishItemOutcome {
+    request: ProducerRequestId,
+    result: Result<PublishReceipt, DomainError>,
+}
+
+impl PublishItemOutcome {
+    pub fn new(request: ProducerRequestId, result: Result<PublishReceipt, DomainError>) -> Self {
+        Self { request, result }
+    }
+
+    pub fn request(&self) -> &ProducerRequestId {
+        &self.request
+    }
+
+    pub fn result(&self) -> &Result<PublishReceipt, DomainError> {
+        &self.result
+    }
+
+    pub fn into_result(self) -> Result<PublishReceipt, DomainError> {
+        self.result
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PublishManyResult {
+    outcomes: Vec<PublishItemOutcome>,
+}
+
+impl PublishManyResult {
+    pub fn new(outcomes: Vec<PublishItemOutcome>) -> Self {
+        Self { outcomes }
+    }
+
+    pub fn outcomes(&self) -> &[PublishItemOutcome] {
+        &self.outcomes
+    }
+
+    pub fn into_outcomes(self) -> Vec<PublishItemOutcome> {
+        self.outcomes
     }
 }
 
@@ -579,6 +641,12 @@ enum ThinCommand {
         payload_keys: Vec<Vec<u8>>,
         bookmark: Option<BookmarkName>,
     },
+    PublishMany {
+        requests: Vec<ThinPublish>,
+    },
+    CompareAndSetCheckpoint {
+        mutation: CheckpointMutation,
+    },
     CreateBookmark {
         id: BookmarkId,
         partition: PartitionKey,
@@ -641,6 +709,16 @@ enum ThinCommand {
     },
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ThinPublish {
+    cluster: ClusterId,
+    partition: PartitionKey,
+    request: ProducerRequestId,
+    fingerprint: String,
+    payload_keys: Vec<Vec<u8>>,
+    bookmark: Option<BookmarkName>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct PayloadOwners {
     raft_log: bool,
@@ -682,6 +760,62 @@ struct StoredRecord {
 struct StoredReceipt {
     fingerprint: String,
     receipt: PublishReceipt,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum StoredPublishResult {
+    Published(PublishReceipt),
+    Rejected(StoredPublishRejection),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredPublishRejection {
+    BookmarkNameConflict,
+    InvalidRange(String),
+}
+
+impl StoredPublishResult {
+    fn as_result(&self) -> Result<PublishReceipt, DomainError> {
+        match self {
+            Self::Published(receipt) => Ok(receipt.clone()),
+            Self::Rejected(StoredPublishRejection::BookmarkNameConflict) => {
+                Err(DomainError::BookmarkNameConflict)
+            }
+            Self::Rejected(StoredPublishRejection::InvalidRange(reason)) => {
+                Err(DomainError::InvalidRange {
+                    reason: reason.clone(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct VersionedStoredPublishOutcome {
+    fingerprint: String,
+    result: StoredPublishResult,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(untagged)]
+enum StoredPublishOutcome {
+    Legacy(StoredReceipt),
+    Versioned(VersionedStoredPublishOutcome),
+}
+
+struct PublishApplyTxn<'a> {
+    db: &'a GroupDb,
+    log_id: GroupLogId,
+    write: &'a mut WriteBatch,
+    active_bank: StateBank,
+    next_offsets: HashMap<PartitionKey, u64>,
+    retentions: HashMap<PartitionKey, PartitionRetentionState>,
+    sessions: BTreeMap<Vec<u8>, ProducerSessionState>,
+    outcomes: BTreeMap<Vec<u8>, VersionedStoredPublishOutcome>,
+    bookmark_names: BTreeMap<Vec<u8>, Option<BookmarkId>>,
+    bookmark_ids: BTreeMap<Vec<u8>, Option<CommittedBookmark>>,
+    bookmark_publications: HashMap<PartitionKey, u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1567,7 +1701,7 @@ fn partition_from_retention_key(key: &[u8]) -> io::Result<PartitionKey> {
     Ok(PartitionKey::new(stream, PartitionId::new(partition)))
 }
 
-fn fingerprint(batch: &PublishBatch) -> io::Result<String> {
+fn legacy_fingerprint(batch: &PublishBatch) -> io::Result<String> {
     #[derive(Serialize)]
     struct Fingerprint<'a> {
         cluster: ClusterId,
@@ -1583,6 +1717,39 @@ fn fingerprint(batch: &PublishBatch) -> io::Result<String> {
     })
     .map_err(io_error)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn fingerprint(batch: &PublishBatch) -> io::Result<String> {
+    fn update_bytes(digest: &mut Sha256, value: &[u8]) -> io::Result<()> {
+        digest.update(u64::try_from(value.len()).map_err(io_error)?.to_be_bytes());
+        digest.update(value);
+        Ok(())
+    }
+
+    let mut digest = Sha256::new();
+    digest.update(b"light-stream-publish-v2");
+    digest.update(batch.cluster().as_uuid().as_bytes());
+    digest.update(batch.partition().stream().as_uuid().as_bytes());
+    digest.update(batch.partition().partition().get().to_be_bytes());
+    update_bytes(&mut digest, batch.request().principal().as_str().as_bytes())?;
+    digest.update(batch.request().session().as_uuid().as_bytes());
+    digest.update(batch.request().sequence().get().to_be_bytes());
+    digest.update(
+        u64::try_from(batch.records().len())
+            .map_err(io_error)?
+            .to_be_bytes(),
+    );
+    for record in batch.records() {
+        update_bytes(&mut digest, record)?;
+    }
+    match batch.bookmark() {
+        Some(bookmark) => {
+            digest.update([1]);
+            update_bytes(&mut digest, bookmark.as_str().as_bytes())?;
+        }
+        None => digest.update([0]),
+    }
+    Ok(format!("v2:{:x}", digest.finalize()))
 }
 
 fn retention_fingerprint(request: &RetentionRequest) -> io::Result<String> {
@@ -1693,6 +1860,18 @@ fn mutation_session_key(request: &MutationRequestId) -> Vec<u8> {
     [MUTATION_SESSION_PREFIX, digest.finalize().as_slice()].concat()
 }
 
+fn checkpoint_key(key: &CheckpointKey) -> io::Result<Vec<u8>> {
+    let consumer = key.consumer().as_str().as_bytes();
+    let consumer_len = u32::try_from(consumer.len()).map_err(io_error)?;
+    let mut stored = Vec::with_capacity(CHECKPOINT_PREFIX.len() + 16 + 4 + 4 + consumer.len());
+    stored.extend_from_slice(CHECKPOINT_PREFIX);
+    stored.extend_from_slice(key.partition().stream().as_uuid().as_bytes());
+    stored.extend_from_slice(&key.partition().partition().get().to_be_bytes());
+    stored.extend_from_slice(&consumer_len.to_be_bytes());
+    stored.extend_from_slice(consumer);
+    Ok(stored)
+}
+
 fn replay_lease_id_key(id: ReplayLeaseId) -> Vec<u8> {
     [LEASE_ID_PREFIX, id.as_uuid().as_bytes()].concat()
 }
@@ -1788,11 +1967,22 @@ fn stream_bookmark_publication_key(stream: StreamId) -> Vec<u8> {
 }
 
 fn bookmark_id(log_id: GroupLogId) -> BookmarkId {
+    publish_bookmark_id(log_id, None)
+}
+
+fn publish_bookmark_id(log_id: GroupLogId, request_ordinal: Option<usize>) -> BookmarkId {
     let mut digest = Sha256::new();
     digest.update(log_id.leader_id.term.to_be_bytes());
     digest.update(log_id.leader_id.node_id.to_be_bytes());
     digest.update(log_id.index.to_be_bytes());
     digest.update(b"bookmark");
+    if let Some(request_ordinal) = request_ordinal {
+        digest.update(
+            u64::try_from(request_ordinal)
+                .expect("publish request ordinal fits in u64")
+                .to_be_bytes(),
+        );
+    }
     let bytes: [u8; 16] = digest.finalize()[..16]
         .try_into()
         .expect("SHA-256 prefix has a fixed length");
@@ -1904,7 +2094,7 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                 Vec::new(),
             )),
             GroupCommand::Publish { batch } => {
-                let digest = fingerprint(&batch)?;
+                let digest = legacy_fingerprint(&batch)?;
                 let mut payloads = Vec::with_capacity(batch.records().len());
                 let mut keys = Vec::with_capacity(batch.records().len());
                 for (slot, record) in batch.records().iter().enumerate() {
@@ -1927,6 +2117,44 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                     payloads,
                 ))
             }
+            GroupCommand::PublishMany { batch } => {
+                let mut payloads = Vec::with_capacity(batch.record_count());
+                let mut requests = Vec::with_capacity(batch.requests().len());
+                let mut slot = 0usize;
+                for publish in batch.requests() {
+                    let mut payload_keys = Vec::with_capacity(publish.records().len());
+                    for record in publish.records() {
+                        let key = payload_id(log_id, slot);
+                        slot = slot
+                            .checked_add(1)
+                            .ok_or_else(|| io_error("publish payload slot overflow"))?;
+                        payloads.push((key.clone(), record.clone()));
+                        payload_keys.push(key);
+                    }
+                    requests.push(ThinPublish {
+                        cluster: publish.cluster(),
+                        partition: publish.partition(),
+                        request: publish.request().clone(),
+                        fingerprint: fingerprint(publish)?,
+                        payload_keys,
+                        bookmark: publish.bookmark().cloned(),
+                    });
+                }
+                Ok((
+                    ThinEntry {
+                        log_id,
+                        payload: ThinPayload::Normal(ThinCommand::PublishMany { requests }),
+                    },
+                    payloads,
+                ))
+            }
+            GroupCommand::CompareAndSetCheckpoint { mutation } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::CompareAndSetCheckpoint { mutation }),
+                },
+                Vec::new(),
+            )),
             GroupCommand::CreateBookmark {
                 id,
                 partition,
@@ -2171,6 +2399,51 @@ macro_rules! impl_log_storage {
                                     }
                                     GroupCommand::Publish { batch }
                                 }
+                                ThinCommand::PublishMany { requests } => {
+                                    let payload_cf = self.db.cf(CF_PAYLOAD)?;
+                                    let mut publishes = Vec::with_capacity(requests.len());
+                                    for request in requests {
+                                        let mut records =
+                                            Vec::with_capacity(request.payload_keys.len());
+                                        for payload_key in request.payload_keys {
+                                            let bytes = snapshot
+                                                .get_cf(
+                                                    &payload_cf,
+                                                    payload_bytes_key(&payload_key),
+                                                )
+                                                .map_err(io_error)?
+                                                .ok_or_else(|| {
+                                                    io_error(
+                                                        "log entry references a missing payload",
+                                                    )
+                                                })?;
+                                            records.push(decode_payload_value(&bytes)?);
+                                        }
+                                        let mut batch = PublishBatch::new(
+                                            request.cluster,
+                                            request.partition,
+                                            request.request,
+                                            records,
+                                        )
+                                        .map_err(io_error)?;
+                                        if let Some(bookmark) = request.bookmark {
+                                            batch = batch.with_bookmark(bookmark);
+                                        }
+                                        if fingerprint(&batch)? != request.fingerprint {
+                                            return Err(io_error(
+                                                "publish log fingerprint does not match payload",
+                                            ));
+                                        }
+                                        publishes.push(batch);
+                                    }
+                                    GroupCommand::PublishMany {
+                                        batch: ReplicatedPublishBatch::new(publishes)
+                                            .map_err(io_error)?,
+                                    }
+                                }
+                                ThinCommand::CompareAndSetCheckpoint { mutation } => {
+                                    GroupCommand::CompareAndSetCheckpoint { mutation }
+                                }
                                 ThinCommand::CreateBookmark {
                                     id,
                                     partition,
@@ -2409,19 +2682,25 @@ impl GroupDb {
                 break;
             }
             let thin: ThinEntry = decode(&value)?;
-            if let ThinPayload::Normal(ThinCommand::Publish { payload_keys, .. }) = thin.payload {
-                for payload_key in payload_keys {
-                    let owners_key = payload_owners_key(&payload_key);
-                    let mut owners = self
-                        .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
-                        .ok_or_else(|| io_error("missing payload ownership record"))?;
-                    owners.raft_log = false;
-                    if owners.reachable() {
-                        write.put_cf(&payload_cf, owners_key, encode(&owners)?);
-                    } else {
-                        write.delete_cf(&payload_cf, payload_bytes_key(&payload_key));
-                        write.delete_cf(&payload_cf, owners_key);
-                    }
+            let payload_keys = match thin.payload {
+                ThinPayload::Normal(ThinCommand::Publish { payload_keys, .. }) => payload_keys,
+                ThinPayload::Normal(ThinCommand::PublishMany { requests }) => requests
+                    .into_iter()
+                    .flat_map(|request| request.payload_keys)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for payload_key in payload_keys {
+                let owners_key = payload_owners_key(&payload_key);
+                let mut owners = self
+                    .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
+                    .ok_or_else(|| io_error("missing payload ownership record"))?;
+                owners.raft_log = false;
+                if owners.reachable() {
+                    write.put_cf(&payload_cf, owners_key, encode(&owners)?);
+                } else {
+                    write.delete_cf(&payload_cf, payload_bytes_key(&payload_key));
+                    write.delete_cf(&payload_cf, owners_key);
                 }
             }
             write.delete_cf(&log_cf, key);
@@ -2533,6 +2812,377 @@ macro_rules! impl_state_machine {
 impl_state_machine!(ControlRaftConfig);
 impl_state_machine!(DataRaftConfig);
 
+impl<'a> PublishApplyTxn<'a> {
+    fn new(db: &'a GroupDb, log_id: GroupLogId, write: &'a mut WriteBatch) -> io::Result<Self> {
+        Ok(Self {
+            db,
+            log_id,
+            write,
+            active_bank: db.active_state_bank()?,
+            next_offsets: HashMap::new(),
+            retentions: HashMap::new(),
+            sessions: BTreeMap::new(),
+            outcomes: BTreeMap::new(),
+            bookmark_names: BTreeMap::new(),
+            bookmark_ids: BTreeMap::new(),
+            bookmark_publications: HashMap::new(),
+        })
+    }
+
+    fn prior_outcome(
+        &self,
+        batch: &PublishBatch,
+        key: &[u8],
+        fingerprint: &str,
+    ) -> io::Result<Option<Result<PublishReceipt, DomainError>>> {
+        if let Some(stored) = self.outcomes.get(key) {
+            return Ok(Some(if stored.fingerprint == fingerprint {
+                stored.result.as_result()
+            } else {
+                Err(DomainError::ReceiptConflict)
+            }));
+        }
+        let Some(stored) = self.db.get::<StoredPublishOutcome>(CF_STATE, key)? else {
+            return Ok(None);
+        };
+        match stored {
+            StoredPublishOutcome::Versioned(stored) => {
+                Ok(Some(if stored.fingerprint == fingerprint {
+                    stored.result.as_result()
+                } else {
+                    Err(DomainError::ReceiptConflict)
+                }))
+            }
+            StoredPublishOutcome::Legacy(stored) => {
+                let same_bookmark =
+                    stored.receipt.bookmark().map(CommittedBookmark::name) == batch.bookmark();
+                Ok(Some(
+                    if stored.fingerprint == legacy_fingerprint(batch)? && same_bookmark {
+                        Ok(stored.receipt)
+                    } else {
+                        Err(DomainError::ReceiptConflict)
+                    },
+                ))
+            }
+        }
+    }
+
+    fn session(&mut self, key: &[u8]) -> io::Result<ProducerSessionState> {
+        if let Some(session) = self.sessions.get(key) {
+            return Ok(session.clone());
+        }
+        let session = self
+            .db
+            .get::<ProducerSessionState>(CF_STATE, key)?
+            .unwrap_or_default();
+        self.sessions.insert(key.to_vec(), session.clone());
+        Ok(session)
+    }
+
+    fn store_outcome(
+        &mut self,
+        key: Vec<u8>,
+        fingerprint: String,
+        result: StoredPublishResult,
+    ) -> io::Result<()> {
+        let stored = VersionedStoredPublishOutcome {
+            fingerprint,
+            result,
+        };
+        self.write.put_cf(
+            &self.db.cf(CF_STATE)?,
+            &key,
+            encode(&StoredPublishOutcome::Versioned(stored.clone()))?,
+        );
+        self.outcomes.insert(key, stored);
+        Ok(())
+    }
+
+    fn advance_session(
+        &mut self,
+        batch: &PublishBatch,
+        session_key: Vec<u8>,
+        mut session: ProducerSessionState,
+    ) -> io::Result<()> {
+        let sequence = batch.request().sequence().get();
+        session.highest_sequence = Some(sequence);
+        session.retained_sequences.push_back(sequence);
+        if session.retained_sequences.len() > self.db.receipt_window
+            && let Some(expired) = session.retained_sequences.pop_front()
+        {
+            let expired_request = ProducerRequestId::new(
+                batch.request().principal().clone(),
+                batch.request().session(),
+                light_stream_core::RequestSequence::new(expired),
+            );
+            let expired_key = receipt_key(batch.partition(), &expired_request)?;
+            self.outcomes.remove(&expired_key);
+            self.write.delete_cf(&self.db.cf(CF_STATE)?, expired_key);
+        }
+        self.write
+            .put_cf(&self.db.cf(CF_STATE)?, &session_key, encode(&session)?);
+        self.sessions.insert(session_key, session);
+        Ok(())
+    }
+
+    fn bookmark_name_is_used(
+        &mut self,
+        partition: PartitionKey,
+        name: &BookmarkName,
+    ) -> io::Result<bool> {
+        let key = bookmark_name_key(partition, name);
+        if let Some(existing) = self.bookmark_names.get(&key) {
+            return Ok(existing.is_some());
+        }
+        let existing = self.db.get::<BookmarkId>(CF_STATE, &key)?;
+        self.bookmark_names.insert(key, existing);
+        Ok(existing.is_some())
+    }
+
+    fn create_publish_bookmark(
+        &mut self,
+        request_ordinal: usize,
+        partition: PartitionKey,
+        name: BookmarkName,
+        offset: RecordOffset,
+    ) -> io::Result<Result<CommittedBookmark, DomainError>> {
+        let id = publish_bookmark_id(self.log_id, Some(request_ordinal));
+        let id_key = bookmark_id_key(id);
+        let existing = if let Some(existing) = self.bookmark_ids.get(&id_key) {
+            existing.clone()
+        } else {
+            let existing = self.db.get::<CommittedBookmark>(CF_STATE, &id_key)?;
+            self.bookmark_ids.insert(id_key.clone(), existing.clone());
+            existing
+        };
+        if existing.is_some() {
+            return Ok(Err(DomainError::BookmarkNameConflict));
+        }
+        let publication =
+            if let Some(publication) = self.bookmark_publications.get(&partition).copied() {
+                publication
+            } else {
+                let publication = self
+                    .db
+                    .get::<u64>(CF_STATE, &bookmark_publication_key(partition))?
+                    .unwrap_or_default();
+                self.bookmark_publications.insert(partition, publication);
+                publication
+            }
+            .checked_add(1)
+            .ok_or_else(|| io_error("bookmark publication sequence overflow"))?;
+        self.bookmark_publications.insert(partition, publication);
+        let publication = BookmarkPublicationSequence::new(publication);
+        let bookmark = CommittedBookmark::published(
+            id,
+            name.clone(),
+            CommittedCursor::new(self.db.identity.cluster_id, partition, offset),
+            publication,
+        );
+        let name_key = bookmark_name_key(partition, &name);
+        let state = self.db.cf(CF_STATE)?;
+        self.write.put_cf(&state, &id_key, encode(&bookmark)?);
+        self.write.put_cf(&state, &name_key, encode(&id)?);
+        self.write.put_cf(
+            &state,
+            bookmark_order_key(partition, publication),
+            encode(&bookmark)?,
+        );
+        self.write.put_cf(
+            &state,
+            bookmark_publication_key(partition),
+            encode(&publication.get())?,
+        );
+        self.bookmark_names.insert(name_key, Some(id));
+        self.bookmark_ids.insert(id_key, Some(bookmark.clone()));
+        Ok(Ok(bookmark))
+    }
+
+    fn apply_one(
+        &mut self,
+        request_ordinal: usize,
+        first_payload_slot: usize,
+        batch: PublishBatch,
+    ) -> io::Result<PublishItemOutcome> {
+        let request = batch.request().clone();
+        if batch.cluster() != self.db.identity.cluster_id {
+            return Ok(PublishItemOutcome::new(
+                request,
+                Err(DomainError::IdentityMismatch {
+                    reason: "publish cluster does not match the data group".to_owned(),
+                }),
+            ));
+        }
+
+        let fingerprint = fingerprint(&batch)?;
+        let stored_receipt_key = receipt_key(batch.partition(), batch.request())?;
+        if let Some(result) = self.prior_outcome(&batch, &stored_receipt_key, &fingerprint)? {
+            return Ok(PublishItemOutcome::new(request, result));
+        }
+
+        let producer_session_key = session_key(batch.partition(), batch.request());
+        let session = self.session(&producer_session_key)?;
+        let sequence = batch.request().sequence().get();
+        if session
+            .highest_sequence
+            .is_some_and(|highest| sequence <= highest)
+        {
+            return Ok(PublishItemOutcome::new(
+                request,
+                Err(DomainError::ReceiptExpired),
+            ));
+        }
+
+        if let Some(name) = batch.bookmark()
+            && self.bookmark_name_is_used(batch.partition(), name)?
+        {
+            let error = DomainError::BookmarkNameConflict;
+            self.store_outcome(
+                stored_receipt_key,
+                fingerprint,
+                StoredPublishResult::Rejected(StoredPublishRejection::BookmarkNameConflict),
+            )?;
+            self.advance_session(&batch, producer_session_key, session)?;
+            return Ok(PublishItemOutcome::new(request, Err(error)));
+        }
+
+        let first = if let Some(first) = self.next_offsets.get(&batch.partition()).copied() {
+            first
+        } else {
+            let first = self
+                .db
+                .get::<u64>(CF_STATE, &next_offset_key(batch.partition()))?
+                .unwrap_or_default();
+            self.next_offsets.insert(batch.partition(), first);
+            first
+        };
+        let count = u64::try_from(batch.records().len()).map_err(io_error)?;
+        let range =
+            match CommittedRecordRange::new(batch.partition(), RecordOffset::new(first), count) {
+                Ok(range) => range,
+                Err(DomainError::InvalidRange { reason }) => {
+                    self.store_outcome(
+                        stored_receipt_key,
+                        fingerprint,
+                        StoredPublishResult::Rejected(StoredPublishRejection::InvalidRange(
+                            reason.clone(),
+                        )),
+                    )?;
+                    self.advance_session(&batch, producer_session_key, session)?;
+                    return Ok(PublishItemOutcome::new(
+                        request,
+                        Err(DomainError::InvalidRange { reason }),
+                    ));
+                }
+                Err(error) => return Err(io_error(error)),
+            };
+        let mut retention =
+            if let Some(retention) = self.retentions.get(&batch.partition()).cloned() {
+                retention
+            } else {
+                let retention = self
+                    .db
+                    .get::<PartitionRetentionState>(CF_STATE, &retention_key(batch.partition()))?
+                    .unwrap_or_default();
+                self.retentions.insert(batch.partition(), retention);
+                retention
+            };
+        let added_payload_bytes = batch.records().iter().try_fold(0u64, |total, record| {
+            total
+                .checked_add(u64::try_from(record.len()).map_err(io_error)?)
+                .ok_or_else(|| io_error("publish payload byte count overflow"))
+        })?;
+        if retention
+            .next_byte_position
+            .checked_add(added_payload_bytes)
+            .is_none()
+        {
+            let reason = "partition byte position overflow".to_owned();
+            self.store_outcome(
+                stored_receipt_key,
+                fingerprint,
+                StoredPublishResult::Rejected(StoredPublishRejection::InvalidRange(reason.clone())),
+            )?;
+            self.advance_session(&batch, producer_session_key, session)?;
+            return Ok(PublishItemOutcome::new(
+                request,
+                Err(DomainError::InvalidRange { reason }),
+            ));
+        }
+        let bookmark = match batch.bookmark().cloned() {
+            Some(name) => match self.create_publish_bookmark(
+                request_ordinal,
+                batch.partition(),
+                name,
+                range.next(),
+            )? {
+                Ok(bookmark) => Some(bookmark),
+                Err(error) => {
+                    self.store_outcome(
+                        stored_receipt_key,
+                        fingerprint,
+                        StoredPublishResult::Rejected(StoredPublishRejection::BookmarkNameConflict),
+                    )?;
+                    self.advance_session(&batch, producer_session_key, session)?;
+                    return Ok(PublishItemOutcome::new(request, Err(error)));
+                }
+            },
+            None => None,
+        };
+        let payload_cf = self.db.cf(CF_PAYLOAD)?;
+        let state_cf = self.db.cf(CF_STATE)?;
+        for (request_slot, record) in batch.records().iter().enumerate() {
+            let flat_slot = first_payload_slot
+                .checked_add(request_slot)
+                .ok_or_else(|| io_error("publish payload slot overflow"))?;
+            let payload_key = payload_id(self.log_id, flat_slot);
+            let owners_key = payload_owners_key(&payload_key);
+            let mut owners = self
+                .db
+                .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
+                .ok_or_else(|| io_error("applied entry payload is missing ownership"))?;
+            owners.set_applied_in(self.active_bank, true);
+            self.write.put_cf(&payload_cf, owners_key, encode(&owners)?);
+            let offset = first + u64::try_from(request_slot).map_err(io_error)?;
+            let payload_bytes = u64::try_from(record.len()).map_err(io_error)?;
+            retention.next_byte_position = retention
+                .next_byte_position
+                .checked_add(payload_bytes)
+                .ok_or_else(|| io_error("partition byte position overflow"))?;
+            self.write.put_cf(
+                &state_cf,
+                record_key(batch.partition(), offset),
+                encode(&StoredRecord {
+                    payload_key,
+                    payload_bytes,
+                    cumulative_end_bytes: retention.next_byte_position,
+                })?,
+            );
+        }
+        self.write.put_cf(
+            &state_cf,
+            next_offset_key(batch.partition()),
+            encode(&(first + count))?,
+        );
+        self.write.put_cf(
+            &state_cf,
+            retention_key(batch.partition()),
+            encode(&retention)?,
+        );
+        self.next_offsets.insert(batch.partition(), first + count);
+        self.retentions.insert(batch.partition(), retention);
+
+        let receipt = PublishReceipt::new(request.clone(), range, bookmark);
+        self.store_outcome(
+            stored_receipt_key,
+            fingerprint,
+            StoredPublishResult::Published(receipt.clone()),
+        )?;
+        self.advance_session(&batch, producer_session_key, session)?;
+        Ok(PublishItemOutcome::new(request, Ok(receipt)))
+    }
+}
+
 impl GroupDb {
     fn apply_entry(&self, entry: GroupEntry) -> io::Result<ApplyResult> {
         let _guard = self.write_lane.enter()?;
@@ -2598,6 +3248,10 @@ impl GroupDb {
                 self.apply_finish_delete(stream_id, write)
             }
             GroupCommand::Publish { batch } => self.apply_publish(log_id, batch, write),
+            GroupCommand::PublishMany { batch } => self.apply_publish_many(log_id, batch, write),
+            GroupCommand::CompareAndSetCheckpoint { mutation } => {
+                self.apply_checkpoint_mutation(mutation, write)
+            }
             GroupCommand::CreateBookmark {
                 id,
                 partition,
@@ -4133,6 +4787,126 @@ impl GroupDb {
         )))
     }
 
+    fn apply_checkpoint_mutation(
+        &self,
+        mutation: CheckpointMutation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Data {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "checkpoint mutation reached the control group".to_owned(),
+            }));
+        }
+        let Some(spec) = self.get::<BootstrapSpec>(CF_STATE, KEY_BOOTSTRAP)? else {
+            return Ok(ApplyResult::Rejected(DomainError::NotBootstrapped));
+        };
+        let fingerprint = mutation_fingerprint(&mutation)?;
+        if let Some(result) = self.prior_mutation_result(mutation.request(), &fingerprint)? {
+            return Ok(result);
+        }
+        if mutation.key().cluster() != self.identity.cluster_id
+            || mutation.key().cluster() != spec.cluster()
+        {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "checkpoint cluster does not match the data group".to_owned(),
+            }));
+        }
+        let key = checkpoint_key(mutation.key())?;
+        let current = self.get::<CommittedCheckpoint>(CF_STATE, &key)?;
+        let expectation_matches = match (mutation.expected(), current.as_ref()) {
+            (CheckpointExpectation::Missing, None) => true,
+            (CheckpointExpectation::Revision(expected), Some(current)) => {
+                expected == current.revision()
+            }
+            _ => false,
+        };
+        if !expectation_matches {
+            let result = ApplyResult::Checkpoint(CheckpointCasResult::Conflict {
+                request: mutation.request().clone(),
+                current,
+            });
+            self.store_mutation_result(mutation.request(), fingerprint, &result, write)?;
+            return Ok(result);
+        }
+
+        let tail = RecordOffset::new(
+            self.get::<u64>(CF_STATE, &next_offset_key(mutation.key().partition()))?
+                .unwrap_or_default(),
+        );
+        let candidate = mutation.candidate().next_offset();
+        if candidate > tail {
+            let result =
+                ApplyResult::Rejected(DomainError::CheckpointAheadOfTail { candidate, tail });
+            self.store_mutation_result(mutation.request(), fingerprint, &result, write)?;
+            return Ok(result);
+        }
+        if let Some(current) = current.as_ref()
+            && candidate < current.cursor().next_offset()
+        {
+            let result = ApplyResult::Rejected(DomainError::CheckpointRegression {
+                current: current.cursor().next_offset(),
+                candidate,
+            });
+            self.store_mutation_result(mutation.request(), fingerprint, &result, write)?;
+            return Ok(result);
+        }
+
+        let revision = match current.as_ref() {
+            Some(current) => current.revision().checked_next().map_err(io_error)?,
+            None => CheckpointRevision::initial(),
+        };
+        let checkpoint =
+            CommittedCheckpoint::new(mutation.key().clone(), mutation.candidate(), revision);
+        let result = ApplyResult::Checkpoint(CheckpointCasResult::Advanced {
+            request: mutation.request().clone(),
+            previous: current,
+            checkpoint: checkpoint.clone(),
+        });
+        write.put_cf(&self.cf(CF_STATE)?, key, encode(&checkpoint)?);
+        self.store_mutation_result(mutation.request(), fingerprint, &result, write)?;
+        Ok(result)
+    }
+
+    fn apply_publish_many(
+        &self,
+        log_id: GroupLogId,
+        batch: ReplicatedPublishBatch,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Data {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "publish reached the control group".to_owned(),
+            }));
+        }
+        let Some(spec) = self.get::<BootstrapSpec>(CF_STATE, KEY_BOOTSTRAP)? else {
+            return Ok(ApplyResult::Rejected(DomainError::NotBootstrapped));
+        };
+        let mut transaction = PublishApplyTxn::new(self, log_id, write)?;
+        let mut outcomes = Vec::with_capacity(batch.requests().len());
+        let mut first_payload_slot = 0usize;
+        for publish in batch.into_requests() {
+            let record_count = publish.records().len();
+            if publish.cluster() != spec.cluster() {
+                outcomes.push(PublishItemOutcome::new(
+                    publish.request().clone(),
+                    Err(DomainError::IdentityMismatch {
+                        reason: "publish cluster does not match the data group".to_owned(),
+                    }),
+                ));
+            } else {
+                outcomes.push(transaction.apply_one(
+                    outcomes.len(),
+                    first_payload_slot,
+                    publish,
+                )?);
+            }
+            first_payload_slot = first_payload_slot
+                .checked_add(record_count)
+                .ok_or_else(|| io_error("publish payload slot overflow"))?;
+        }
+        Ok(ApplyResult::PublishedMany(PublishManyResult::new(outcomes)))
+    }
+
     fn apply_publish(
         &self,
         log_id: GroupLogId,
@@ -4153,7 +4927,7 @@ impl GroupDb {
             }));
         }
 
-        let fingerprint = fingerprint(&batch)?;
+        let fingerprint = legacy_fingerprint(&batch)?;
         let stored_receipt_key = receipt_key(batch.partition(), batch.request())?;
         if let Some(existing) = self.get::<StoredReceipt>(CF_STATE, &stored_receipt_key)? {
             return if existing.fingerprint == fingerprint {
@@ -4589,8 +5363,9 @@ impl CommittedStateReader {
         partition: PartitionKey,
         request: &ProducerRequestId,
     ) -> Result<PublishReceipt, DomainError> {
-        self.db
-            .get::<StoredReceipt>(
+        let stored = self
+            .db
+            .get::<StoredPublishOutcome>(
                 CF_STATE,
                 &receipt_key(partition, request).map_err(|error| DomainError::Storage {
                     reason: error.to_string(),
@@ -4599,8 +5374,23 @@ impl CommittedStateReader {
             .map_err(|error| DomainError::Storage {
                 reason: error.to_string(),
             })?
-            .map(|stored| stored.receipt)
-            .ok_or(DomainError::ReceiptNotFound)
+            .ok_or(DomainError::ReceiptNotFound)?;
+        match stored {
+            StoredPublishOutcome::Legacy(stored) => Ok(stored.receipt),
+            StoredPublishOutcome::Versioned(stored) => stored.result.as_result(),
+        }
+    }
+
+    pub fn checkpoint(&self, key: &CheckpointKey) -> Result<CommittedCheckpoint, DomainError> {
+        if key.cluster() != self.db.identity.cluster_id {
+            return Err(DomainError::IdentityMismatch {
+                reason: "checkpoint cluster does not match the data group".to_owned(),
+            });
+        }
+        self.db
+            .get::<CommittedCheckpoint>(CF_STATE, &checkpoint_key(key).map_err(storage_domain)?)
+            .map_err(storage_domain)?
+            .ok_or(DomainError::CheckpointNotFound)
     }
 
     pub fn fetch(
@@ -5407,6 +6197,645 @@ mod tests {
             .fetch(cluster, partition, RecordOffset::new(0), 10)
             .unwrap();
         assert_eq!(page.records()[0].payload(), b"retained");
+    }
+
+    #[tokio::test]
+    async fn publish_many_preserves_request_receipt_and_bookmark_boundaries() {
+        let directory = ProjectTestDir::new("publish-many");
+        let (cluster, stream) = ids();
+        let handles = create_data_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(DATA_GROUP_ID).unwrap(),
+                GroupKind::Data,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let principal = light_stream_core::PrincipalId::parse("test").unwrap();
+        let session = light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4());
+        let first_request = ProducerRequestId::new(
+            principal.clone(),
+            session,
+            light_stream_core::RequestSequence::new(1),
+        );
+        let second_request = ProducerRequestId::new(
+            principal,
+            session,
+            light_stream_core::RequestSequence::new(2),
+        );
+        let first = PublishBatch::new(
+            cluster,
+            partition,
+            first_request.clone(),
+            vec![b"zero".to_vec(), b"one".to_vec()],
+        )
+        .unwrap()
+        .with_bookmark(BookmarkName::parse("after-first").unwrap());
+        let second = PublishBatch::new(
+            cluster,
+            partition,
+            second_request.clone(),
+            vec![b"two".to_vec()],
+        )
+        .unwrap()
+        .with_bookmark(BookmarkName::parse("after-second").unwrap());
+        let entries = vec![
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::PublishMany {
+                    batch: ReplicatedPublishBatch::new(vec![first.clone(), first, second]).unwrap(),
+                }),
+            },
+        ];
+
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter(
+                entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+
+        let page = handles
+            .reader
+            .fetch(cluster, partition, RecordOffset::new(0), 10)
+            .unwrap();
+        assert_eq!(
+            page.records()
+                .iter()
+                .map(|record| record.payload())
+                .collect::<Vec<_>>(),
+            vec![b"zero".as_slice(), b"one".as_slice(), b"two".as_slice()]
+        );
+        let first_receipt = handles.reader.receipt(partition, &first_request).unwrap();
+        let second_receipt = handles.reader.receipt(partition, &second_request).unwrap();
+        assert_eq!(first_receipt.range().first(), RecordOffset::new(0));
+        assert_eq!(first_receipt.range().next(), RecordOffset::new(2));
+        assert_eq!(second_receipt.range().first(), RecordOffset::new(2));
+        assert_eq!(second_receipt.range().next(), RecordOffset::new(3));
+        assert_eq!(
+            handles
+                .reader
+                .resolve_bookmark(partition, &BookmarkName::parse("after-first").unwrap())
+                .unwrap()
+                .cursor()
+                .next_offset(),
+            RecordOffset::new(2)
+        );
+        assert_eq!(
+            handles
+                .reader
+                .resolve_bookmark(partition, &BookmarkName::parse("after-second").unwrap())
+                .unwrap()
+                .cursor()
+                .next_offset(),
+            RecordOffset::new(3)
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_cas_preserves_conflicts_without_changing_bookmarks() {
+        let directory = ProjectTestDir::new("checkpoint-cas");
+        let (cluster, stream) = ids();
+        let handles = create_data_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(DATA_GROUP_ID).unwrap(),
+                GroupKind::Data,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let bootstrap = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                1,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            }),
+        };
+        let publish = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                2,
+            ),
+            payload: EntryPayload::Normal(GroupCommand::PublishMany {
+                batch: ReplicatedPublishBatch::new(vec![
+                    PublishBatch::new(
+                        cluster,
+                        partition,
+                        ProducerRequestId::new(
+                            light_stream_core::PrincipalId::parse("producer").unwrap(),
+                            light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+                            light_stream_core::RequestSequence::new(1),
+                        ),
+                        vec![b"zero".to_vec(), b"one".to_vec(), b"two".to_vec()],
+                    )
+                    .unwrap()
+                    .with_bookmark(BookmarkName::parse("shared").unwrap()),
+                ])
+                .unwrap(),
+            }),
+        };
+        log.append([bootstrap.clone(), publish.clone()], IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter([
+                Ok((bootstrap, None)),
+                Ok((publish, None)),
+            ]))
+            .await
+            .unwrap();
+        let bookmarks_before = handles
+            .reader
+            .list_bookmarks(&BookmarkPageRequest::new(partition, 10, None, None).unwrap())
+            .unwrap();
+        let checkpoint_key = CheckpointKey::new(
+            cluster,
+            partition,
+            light_stream_core::ConsumerId::parse("billing").unwrap(),
+        );
+        let mutation_session = light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4());
+        let mutation = |sequence, expected, offset| {
+            CheckpointMutation::new(
+                MutationRequestId::new(
+                    light_stream_core::PrincipalId::parse("consumer").unwrap(),
+                    mutation_session,
+                    light_stream_core::RequestSequence::new(sequence),
+                ),
+                checkpoint_key.clone(),
+                expected,
+                CommittedCursor::new(cluster, partition, RecordOffset::new(offset)),
+            )
+            .unwrap()
+        };
+        let first = state
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CompareAndSetCheckpoint {
+                    mutation: mutation(1, CheckpointExpectation::Missing, 1),
+                }),
+            })
+            .unwrap();
+        assert!(matches!(
+            first,
+            ApplyResult::Checkpoint(CheckpointCasResult::Advanced { .. })
+        ));
+        let second = state
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    4,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CompareAndSetCheckpoint {
+                    mutation: mutation(
+                        2,
+                        CheckpointExpectation::Revision(CheckpointRevision::initial()),
+                        2,
+                    ),
+                }),
+            })
+            .unwrap();
+        assert!(matches!(
+            second,
+            ApplyResult::Checkpoint(CheckpointCasResult::Advanced { .. })
+        ));
+        let losing_mutation = mutation(
+            3,
+            CheckpointExpectation::Revision(CheckpointRevision::initial()),
+            3,
+        );
+        let conflict = state
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    5,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CompareAndSetCheckpoint {
+                    mutation: losing_mutation.clone(),
+                }),
+            })
+            .unwrap();
+        assert!(matches!(
+            &conflict,
+            ApplyResult::Checkpoint(CheckpointCasResult::Conflict {
+                current: Some(current),
+                ..
+            }) if current.cursor().next_offset() == RecordOffset::new(2)
+        ));
+        let retry = state
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    6,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CompareAndSetCheckpoint {
+                    mutation: losing_mutation,
+                }),
+            })
+            .unwrap();
+        assert_eq!(retry, conflict);
+        assert_eq!(
+            handles
+                .reader
+                .checkpoint(&checkpoint_key)
+                .unwrap()
+                .cursor()
+                .next_offset(),
+            RecordOffset::new(2)
+        );
+        assert_eq!(
+            handles
+                .reader
+                .list_bookmarks(&BookmarkPageRequest::new(partition, 10, None, None).unwrap())
+                .unwrap(),
+            bookmarks_before
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_many_replays_a_durable_bookmark_rejection() {
+        let directory = ProjectTestDir::new("publish-many-rejection");
+        let (cluster, stream) = ids();
+        let handles = create_data_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(DATA_GROUP_ID).unwrap(),
+                GroupKind::Data,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let bookmark_id = BookmarkId::from_uuid(Uuid::new_v4());
+        let request = ProducerRequestId::new(
+            light_stream_core::PrincipalId::parse("producer").unwrap(),
+            light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+            light_stream_core::RequestSequence::new(1),
+        );
+        let rejected = PublishBatch::new(
+            cluster,
+            partition,
+            request.clone(),
+            vec![b"rejected".to_vec()],
+        )
+        .unwrap()
+        .with_bookmark(BookmarkName::parse("occupied").unwrap());
+        let entries = vec![
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CreateBookmark {
+                    id: bookmark_id,
+                    partition,
+                    name: BookmarkName::parse("occupied").unwrap(),
+                    offset: RecordOffset::new(0),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::PublishMany {
+                    batch: ReplicatedPublishBatch::new(vec![rejected.clone()]).unwrap(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    4,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::DeleteBookmark {
+                    partition,
+                    id: bookmark_id,
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    5,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::PublishMany {
+                    batch: ReplicatedPublishBatch::new(vec![rejected]).unwrap(),
+                }),
+            },
+        ];
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter(
+                entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            handles.reader.receipt(partition, &request).unwrap_err(),
+            DomainError::BookmarkNameConflict
+        );
+        assert!(
+            handles
+                .reader
+                .fetch(cluster, partition, RecordOffset::new(0), 10)
+                .unwrap()
+                .records()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_bookmark_id_collision_rejects_without_poisoning_the_group() {
+        let directory = ProjectTestDir::new("publish-bookmark-id-collision");
+        let (cluster, stream) = ids();
+        let handles = create_data_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(DATA_GROUP_ID).unwrap(),
+                GroupKind::Data,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let publish_log_id = GroupLogId::new(
+            GroupLeaderId {
+                term: 1,
+                node_id: 1,
+            },
+            3,
+        );
+        let colliding_id = publish_bookmark_id(publish_log_id, Some(0));
+        let request = ProducerRequestId::new(
+            light_stream_core::PrincipalId::parse("producer").unwrap(),
+            light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+            light_stream_core::RequestSequence::new(1),
+        );
+        let publish = PublishBatch::new(
+            cluster,
+            partition,
+            request.clone(),
+            vec![b"rejected".to_vec()],
+        )
+        .unwrap()
+        .with_bookmark(BookmarkName::parse("publish-name").unwrap());
+        let entries = vec![
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CreateBookmark {
+                    id: colliding_id,
+                    partition,
+                    name: BookmarkName::parse("client-name").unwrap(),
+                    offset: RecordOffset::new(0),
+                }),
+            },
+            GroupEntry {
+                log_id: publish_log_id,
+                payload: EntryPayload::Normal(GroupCommand::PublishMany {
+                    batch: ReplicatedPublishBatch::new(vec![publish]).unwrap(),
+                }),
+            },
+        ];
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter(
+                entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            handles.reader.receipt(partition, &request).unwrap_err(),
+            DomainError::BookmarkNameConflict
+        );
+        assert!(
+            handles
+                .reader
+                .fetch(cluster, partition, RecordOffset::new(0), 10)
+                .unwrap()
+                .records()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_publish_retry_returns_its_original_receipt() {
+        let directory = ProjectTestDir::new("legacy-publish-retry");
+        let (cluster, stream) = ids();
+        let handles = create_data_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(DATA_GROUP_ID).unwrap(),
+                GroupKind::Data,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        let mut state = handles.state_machine;
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let request = ProducerRequestId::new(
+            light_stream_core::PrincipalId::parse("legacy").unwrap(),
+            light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+            light_stream_core::RequestSequence::new(1),
+        );
+        let publish = PublishBatch::new(
+            cluster,
+            partition,
+            request.clone(),
+            vec![b"legacy".to_vec()],
+        )
+        .unwrap()
+        .with_bookmark(BookmarkName::parse("legacy-bookmark").unwrap());
+        let entries = vec![
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::Publish {
+                    batch: publish.clone(),
+                }),
+            },
+            GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::Publish { batch: publish }),
+            },
+        ];
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        state
+            .apply(futures_util::stream::iter(
+                entries.into_iter().map(|entry| Ok((entry, None))),
+            ))
+            .await
+            .unwrap();
+
+        let receipt = handles.reader.receipt(partition, &request).unwrap();
+        assert_eq!(receipt.range().first(), RecordOffset::new(0));
+        assert_eq!(receipt.range().next(), RecordOffset::new(1));
+        assert_eq!(
+            handles
+                .reader
+                .fetch(cluster, partition, RecordOffset::new(0), 10)
+                .unwrap()
+                .records()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

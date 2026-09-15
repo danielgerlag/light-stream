@@ -1,6 +1,6 @@
 # `light-streamctl` reference
 
-Status: implemented through LS05.
+Status: implemented through LS07.
 
 `light-streamctl` writes one JSON object to standard output for each command. Diagnostics go to standard error. Every command requires `--endpoint`.
 
@@ -16,6 +16,7 @@ Use `--seed` more than once to add fallback public endpoints. `--deadline-ms` se
 | `3` | The LS01 `publish-probe` call returned `unsupported_operation`. |
 | `4` | The server rejected an identity, bootstrap, receipt, stream, bookmark, retention, or replay request. |
 | `5` | The cluster is forming, lacks a quorum, is not bootstrapped, is not leader, or durable storage failed. |
+| `130` | The user cancelled the command. The JSON result states the commit outcome. |
 
 ## `health`
 
@@ -75,6 +76,10 @@ Add `--bookmark NAME` to create an immutable bookmark after the committed batch.
 
 Use `--route-group-id` and `--route-revision` together to supply a cached route. A stale route is refreshed through the catalog before the same producer identity is retried.
 
+Add `--resolve-receipt` to spend the remaining deadline on receipt lookup after an ambiguous transport result. The resolver never changes the producer request body or identity.
+
+If admission is full, the command returns `publish_overloaded` with `definite_no_commit`. The error identifies the request, record, or resident-byte limit.
+
 ## `stream`
 
 Create a stream with a caller-supplied idempotency request ID:
@@ -121,6 +126,27 @@ light-streamctl \
 ```
 
 The command performs a linearizable read and returns the durable publish result.
+
+## `checkpoint`
+
+Create a partition-scoped consumer checkpoint:
+
+```sh
+light-streamctl --endpoint http://127.0.0.1:7101 checkpoint advance \
+  --cluster-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6501 \
+  --stream-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6502 \
+  --partition 0 \
+  --consumer billing-v3 \
+  --expect-missing \
+  --offset 42 \
+  --principal billing-worker \
+  --mutation-session 018f3f7e-5b3b-7c11-98f7-b65ac15f6509 \
+  --sequence 1
+```
+
+For an update, replace `--expect-missing` with `--expected-revision REVISION`. A stale revision returns a typed conflict result with the ordered current value. The conflict is a successful compare-and-set result, so the process exits with code 0.
+
+Use `checkpoint get` to read the current value. Use `checkpoint fetch` to read from its cursor. The fetch command returns `cursor_expired` if retention passed the stored cursor. It never moves the checkpoint.
 
 ## `bookmark`
 

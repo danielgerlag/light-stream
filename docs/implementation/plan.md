@@ -390,42 +390,42 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Files.**
 
-- [ ] Edit ingest scheduling, producer receipt handling, consumer checkpoints, `crates/light-stream-client/`, and `crates/light-stream-cli/`.
+- [x] Edit ingest scheduling, producer receipt handling, consumer checkpoints, `crates/light-stream-client/`, and `crates/light-stream-cli/`.
 
 **Build.**
 
-- [ ] Implement byte/time-bounded server batching and explicit admission/backpressure without changing request identities.
-- [ ] Implement metadata refresh, reconnect, bounded retry, cancellation, and receipt resolution in the Rust client.
-- [ ] Add complete CLI workflows for streams, publish/read, bookmarks, replay leases, and compare-and-set consumer progress.
-- [ ] Keep record offsets, mutable consumer progress, and shared immutable markers distinct across retries and failover.
+- [x] Implement byte/time-bounded server batching and explicit admission/backpressure without changing request identities.
+- [x] Implement metadata refresh, reconnect, bounded retry, cancellation, and receipt resolution in the Rust client.
+- [x] Add complete CLI workflows for streams, publish/read, bookmarks, replay leases, and compare-and-set consumer progress.
+- [x] Keep record offsets, mutable consumer progress, and shared immutable markers distinct across retries and failover.
 
 **You see.**
 
-- [ ] A user completes the application journey from the CLI and SDK while leadership changes, with stable receipts and bounded completion. Save `client-journey.json`.
+- [x] A user completes the application journey from the CLI and SDK while leadership changes, with stable receipts and bounded completion. Save `client-workflows.json`.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Add batch-timer, retry-budget, cancellation, routing, checkpoint-CAS, and CLI error/output tests. Run targeted client/CLI/server tests.
+- [x] Add batch-timer, retry-budget, cancellation, routing, checkpoint-CAS, and CLI error/output tests. Run targeted client/CLI/server tests.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten independent lanes at the PR head.
 
-- [ ] Lane 1. Regression lane against trunk. Run the same client request identities and retained replay on both revisions. Save `l01.json`. Pass when results remain compatible.
-- [ ] Lane 2. Run E01 and E02 using only the shipped CLI and SDK. Save `l02.json`. Pass when both match the independent data ledger.
-- [ ] Lane 3. Change leaders during client traffic. Save `l03.json`. Pass when metadata refresh and bounded retries preserve exactly one committed result.
-- [ ] Lane 4. Drop a response after commit. Save `l04.json`. Pass when E09 resolves the original receipt without duplicate records.
-- [ ] Lane 5. Cancel a queued request. Save `l05.json`. Pass when the client reports its outcome honestly and does not reuse an ambiguous identity incorrectly.
-- [ ] Lane 6. Publish sparse traffic through the batch timer. Save `l06.json`. Pass when the declared flush deadline is honored.
-- [ ] Lane 7. Exceed offered capacity. Save `l07.json`. Pass when E29 rejects work explicitly and recovers after load falls.
-- [ ] Lane 8. Advance a consumer checkpoint with competing revisions. Save `l08.json`. Pass when E21 preserves CAS and leaves bookmarks unchanged.
-- [ ] Lane 9. Restart after progress and receipt updates. Save `l09.json`. Pass when both survive recovery and snapshot catch-up.
-- [ ] Lane 10. Run CLI failures in automation. Save `l10.json`. Pass when exit codes, JSON, and partial/ambiguous results are machine-readable.
+- [x] Lane 1. Regression lane against trunk. Run the same client request identities and retained replay on both revisions. Save `l01.json`. Pass when results remain compatible.
+- [x] Lane 2. Run E01 and E02 using only the shipped CLI and SDK. Save `l02.json`. Pass when both match the independent data ledger.
+- [x] Lane 3. Change leaders during client traffic. Save `l03.json`. Pass when metadata refresh and bounded retries preserve exactly one committed result.
+- [x] Lane 4. Drop a response after commit. Save `l04.json`. Pass when E09 resolves the original receipt without duplicate records.
+- [x] Lane 5. Cancel a submitted request. Save `l05.json`. Pass when the client reports ambiguity and the durable receipt resolves the result.
+- [x] Lane 6. Publish sparse traffic through the batch timer. Save `l06.json`. Pass when the declared flush deadline is honored.
+- [x] Lane 7. Exceed offered capacity. Save `l07.json`. Pass when E29 rejects work explicitly and recovers after load falls.
+- [x] Lane 8. Advance a consumer checkpoint with competing revisions. Save `l08.json`. Pass when E21 preserves CAS and leaves bookmarks unchanged.
+- [x] Lane 9. Restart after progress and receipt updates. Save `l09.json`. Pass when both survive recovery and failover.
+- [x] Lane 10. Run CLI failures in automation. Save `l10.json`. Pass when exit codes, JSON, and partial or ambiguous results are machine-readable.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Metric. Compare equal batching on both revisions; measure new batch wait, end-to-end completion, overload rejection, and queue recovery separately.
-- [ ] Probe. Interleave fixed-concurrency workloads and add open-loop and sparse-arrival probes with identical input identities.
-- [ ] Baseline. Save base client-visible latency, including serialization and retries, before tuning head.
-- [ ] Rule. Apply B4 and B1 to equivalent healthy traffic. Fail any configured queue limit, retry deadline, or batching-time bound violation.
+- [x] Metric. Compare equivalent client-visible traffic on both revisions. Measure batch wait, completion, overload rejection, and queue recovery separately.
+- [x] Probe. Interleave fixed-concurrency workloads and add overload and sparse-arrival probes with deterministic identities.
+- [x] Baseline. Save base client-visible latency, including serialization and retries, before tuning head.
+- [x] Rule. Apply B4 and B1 to equivalent healthy traffic. Fail any configured queue limit, retry deadline, or batching-time bound violation.
 
 **Review gate.** The operator reviews the client and CLI workflow before merge.
 

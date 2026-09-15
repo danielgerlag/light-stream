@@ -1,0 +1,29 @@
+{
+  "checkpoint": "batching-client-checkpoints",
+  "verdict": "PASS",
+  "functional": {
+    "evidence": "artifacts/LS07/final-4",
+    "logical_publish_requests": 32,
+    "physical_raft_entries": 2,
+    "dropped_response_resolved": true,
+    "submitted_cancellation_ambiguous": true,
+    "submitted_cancellation_receipt_found": true,
+    "overload_outcome": "definite_no_commit",
+    "overload_recovered": true,
+    "checkpoint_revision": 2,
+    "checkpoint_survived_restart": true,
+    "checkpoint_survived_three_voter_failover": true,
+    "success_data_removed": true
+  },
+  "performance": {
+    "evidence": "artifacts/LS07/perf-7",
+    "publish_throughput_ratio": 0.9466920892777432,
+    "publish_p99_ratio": 0.8270745825348443,
+    "fetch_p99_ratio": 0.8019230372631384,
+    "minimum_throughput_ratio": 0.9,
+    "maximum_p99_ratio": 1.2
+  },
+  "pending": [
+    "independent-host verification"
+  ]
+}

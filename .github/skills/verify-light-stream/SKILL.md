@@ -114,6 +114,16 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS06/membership-multigroup-3
 ```
 
+For LS07 batching, client workflows, and consumer checkpoints, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS07 \
+  --profile local \
+  --security local-insecure \
+  --artifacts artifacts/LS07/final-4
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -135,5 +145,9 @@ For LS06, inspect `ls06/snapshot-recovery.json`. Confirm that a stopped follower
 For B7, inspect `ls06/b7-plan.json`, `ls06/b7-calibration.json`, and `ls06/b7-recovery.json`. Confirm at least 1 GiB retained, the locked post-load RSS budget, the 64 MiB interrupted offset, the resumed 1,026-chunk transfer, all 1,025 records verified from the stopped repaired node, and successful scratch cleanup. Keep independent-host verification `BLOCKED`.
 
 For membership administration, inspect `ls06/membership-recovery.json`. Confirm that the coordinator dies after the durable intent, voter 4 joins through learner catch-up, every group converges to `{1,2,4}`, voter 3 restarts as `retired`, data leadership moves to the requested voter, an unreachable replacement aborts at topology revision 5, group 3 serves traffic during replacement, and the final membership survives a full restart.
+
+For LS07, inspect `l01.json` through `l10.json`, `ls07/client-workflows.json`, and `ls07/checkpoint-failover.json`. Confirm that 32 logical publishes use fewer physical Raft entries, a dropped response resolves through the original receipt, submitted cancellation remains ambiguous and later resolves, sparse traffic meets its timer bound, overload reports `definite_no_commit` and recovers, checkpoint CAS returns one winner and one stable conflict without changing bookmarks, and the checkpoint survives restart and three-voter leader failover.
+
+For B4, inspect `artifacts/LS07/perf-7/result.json`. Confirm publish throughput is at least 90% of the LS06 baseline and publish and fetch p99 ratios are at most 1.20.
 
 Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report secured mode as `UNSUPPORTED_LS08`. Report independent-host verification as `BLOCKED`.

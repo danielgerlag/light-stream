@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run release verification for LS01 through LS06 and retain evidence."""
+"""Run release verification for LS01 through LS07 and retain evidence."""
 
 import argparse
 import base64
@@ -188,6 +188,136 @@ class CommandRunner:
             raise VerificationError(
                 f"{name} exited {result.returncode}; see {stderr_path}"
             )
+
+    def run_parallel(self, commands, name, expected_codes=(0,), timeout=300):
+        reserved = []
+        for index, command in enumerate(commands):
+            self.counter += 1
+            stdout_path = (
+                self.artifacts
+                / "command-output"
+                / f"{self.counter:03d}-{name}-{index:03d}.stdout.log"
+            )
+            stderr_path = (
+                self.artifacts
+                / "command-output"
+                / f"{self.counter:03d}-{name}-{index:03d}.stderr.log"
+            )
+            stdout_path.parent.mkdir(parents=True, exist_ok=True)
+            reserved.append((command, stdout_path, stderr_path))
+        started = time.monotonic()
+        processes = []
+        try:
+            for command, stdout_path, stderr_path in reserved:
+                processes.append(
+                    (
+                        command,
+                        stdout_path,
+                        stderr_path,
+                        subprocess.Popen(
+                            [str(item) for item in command],
+                            cwd=ROOT,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                        ),
+                    )
+                )
+            results = []
+            for command, stdout_path, stderr_path, process in processes:
+                remaining = max(0.1, timeout - (time.monotonic() - started))
+                stdout, stderr = process.communicate(timeout=remaining)
+                stdout_path.write_text(stdout)
+                stderr_path.write_text(stderr)
+                append_jsonl(
+                    self.commands_path,
+                    {
+                        "command": [str(item) for item in command],
+                        "duration_seconds": time.monotonic() - started,
+                        "expected_codes": list(expected_codes),
+                        "name": name,
+                        "returncode": process.returncode,
+                        "stderr": str(stderr_path.relative_to(self.artifacts)),
+                        "stdout": str(stdout_path.relative_to(self.artifacts)),
+                    },
+                )
+                if process.returncode not in expected_codes:
+                    raise VerificationError(
+                        f"{name} exited {process.returncode}; see {stdout_path} and {stderr_path}"
+                    )
+                results.append(
+                    subprocess.CompletedProcess(
+                        [str(item) for item in command],
+                        process.returncode,
+                        stdout,
+                        stderr,
+                    )
+                )
+            return results
+        finally:
+            for _, _, _, process in processes:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+
+    def run_interrupted(self, command, name, delay_seconds, timeout=30):
+        self.counter += 1
+        stdout_path = (
+            self.artifacts / "command-output" / f"{self.counter:03d}-{name}.stdout.log"
+        )
+        stderr_path = (
+            self.artifacts / "command-output" / f"{self.counter:03d}-{name}.stderr.log"
+        )
+        stdout_path.parent.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        process = subprocess.Popen(
+            [str(item) for item in command],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            time.sleep(delay_seconds)
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=timeout)
+            stdout_path.write_text(stdout)
+            stderr_path.write_text(stderr)
+            append_jsonl(
+                self.commands_path,
+                {
+                    "command": [str(item) for item in command],
+                    "duration_seconds": time.monotonic() - started,
+                    "expected_codes": [130],
+                    "fault": "sigint",
+                    "name": name,
+                    "returncode": process.returncode,
+                    "stderr": str(stderr_path.relative_to(self.artifacts)),
+                    "stdout": str(stdout_path.relative_to(self.artifacts)),
+                },
+            )
+            if process.returncode != 130:
+                raise VerificationError(
+                    f"{name} exited {process.returncode}; see {stdout_path} and {stderr_path}"
+                )
+            return subprocess.CompletedProcess(
+                [str(item) for item in command],
+                process.returncode,
+                stdout,
+                stderr,
+            )
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
         return result
 
 
@@ -211,6 +341,15 @@ class OwnedServer:
         rocksdb_write_buffer_bytes=None,
         verification_delay_group_id=None,
         verification_delay_ms=0,
+        verification_response_delay_group_id=None,
+        verification_response_delay_ms=0,
+        publish_queue_requests=None,
+        publish_queue_records=None,
+        publish_queue_bytes=None,
+        publish_batch_requests=None,
+        publish_batch_records=None,
+        publish_batch_bytes=None,
+        publish_coalesce_us=None,
         ready_timeout_seconds=5,
     ):
         self.data_dir = data_dir
@@ -255,6 +394,17 @@ class OwnedServer:
             self.command.extend(
                 ["--rocksdb-write-buffer-bytes", str(rocksdb_write_buffer_bytes)]
             )
+        for flag, value in (
+            ("--publish-queue-requests", publish_queue_requests),
+            ("--publish-queue-records", publish_queue_records),
+            ("--publish-queue-bytes", publish_queue_bytes),
+            ("--publish-batch-requests", publish_batch_requests),
+            ("--publish-batch-records", publish_batch_records),
+            ("--publish-batch-bytes", publish_batch_bytes),
+            ("--publish-coalesce-us", publish_coalesce_us),
+        ):
+            if value is not None:
+                self.command.extend([flag, str(value)])
         if verification_delay_group_id is not None:
             self.command.extend(
                 [
@@ -263,6 +413,16 @@ class OwnedServer:
                     str(verification_delay_group_id),
                     "--verification-delay-ms",
                     str(verification_delay_ms),
+                ]
+            )
+        if verification_response_delay_group_id is not None:
+            self.command.extend(
+                [
+                    "--verification-enable-fault-hooks",
+                    "--verification-response-delay-group-id",
+                    str(verification_response_delay_group_id),
+                    "--verification-response-delay-ms",
+                    str(verification_response_delay_ms),
                 ]
             )
         self.closed = False
@@ -1193,8 +1353,6 @@ def run_poc_control(artifacts, runner):
             "production_feature_on_base": "UNSUPPORTED",
         },
     )
-
-
 def deterministic_uuid(rng):
     return str(uuid.UUID(int=rng.getrandbits(128)))
 
@@ -2071,7 +2229,9 @@ def wait_for_follower_catch_up(
     raise VerificationError(f"{label} follower did not catch up: {last}")
 
 
-def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
+def run_ls02b_scenario(
+    artifacts, runner, binaries, revision, profile, seed, verify_checkpoints=False
+):
     rng = random.Random(seed)
     cluster = deterministic_uuid(rng)
     stream = deterministic_uuid(rng)
@@ -2106,6 +2266,8 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
     faults = []
     elections = []
     membership_observations = []
+    checkpoint_before_failover = None
+    checkpoint_after_failover = None
 
     def start_node(node_id, suffix):
         config = node_configs[node_id]
@@ -2513,6 +2675,38 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
         if payloads_from_page(fetch) != records[:2]:
             raise VerificationError("LS02b pre-failover fetch differs from the byte ledger")
         reads.append({"stage": "before_failover", "record_count": 2})
+        if verify_checkpoints:
+            checkpoint_before_failover = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[leader]["endpoint"],
+                        seeds=running_endpoints(exclude=leader),
+                    )
+                    + [
+                        "checkpoint",
+                        "advance",
+                        "--cluster-id",
+                        cluster,
+                        "--stream-id",
+                        stream,
+                        "--consumer",
+                        "ls07-ha",
+                        "--expect-missing",
+                        "--offset",
+                        "1",
+                        "--principal",
+                        "ls07-ha-consumer",
+                        "--mutation-session",
+                        deterministic_uuid(rng),
+                        "--sequence",
+                        "1",
+                    ],
+                    "ls07-ha-checkpoint-before-failover",
+                    timeout=15,
+                ),
+                "LS07 HA checkpoint before failover",
+            )
 
         stop_node(leader, abrupt=True)
         faults.append({"fault": "kill_data_leader", "node_id": leader})
@@ -2537,6 +2731,54 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
             "ls02b-application-after-data-failover",
             nodes[new_leader]["endpoint"],
         )
+        if verify_checkpoints:
+            checkpoint_after_failover = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[new_leader]["endpoint"],
+                        seeds=running_endpoints(exclude=new_leader),
+                    )
+                    + [
+                        "checkpoint",
+                        "get",
+                        "--cluster-id",
+                        cluster,
+                        "--stream-id",
+                        stream,
+                        "--consumer",
+                        "ls07-ha",
+                    ],
+                    "ls07-ha-checkpoint-after-failover",
+                    timeout=15,
+                ),
+                "LS07 HA checkpoint after failover",
+            )
+            if (
+                checkpoint_after_failover["checkpoint"]["cursor"]["next_offset"]
+                != 1
+            ):
+                raise VerificationError("LS07 checkpoint changed during leader failover")
+            write_json(
+                artifacts / "ls07" / "checkpoint-failover.json",
+                {
+                    "old_leader": leader,
+                    "new_leader": new_leader,
+                    "before": checkpoint_before_failover,
+                    "after": checkpoint_after_failover,
+                    "verdict": "PASS",
+                },
+            )
+            write_json(
+                artifacts / "l03.json",
+                {
+                    "old_leader": leader,
+                    "new_leader": new_leader,
+                    "checkpoint": checkpoint_after_failover["checkpoint"],
+                    "metadata_refresh": "PASS",
+                    "verdict": "PASS",
+                },
+            )
 
         payload = records[2]
         payload_path = write_payload(3, payload)
@@ -6761,7 +7003,625 @@ def run_ls06_membership_scenario(
                 pass
 
 
+def run_ls07_scenario(artifacts, runner, binaries, revision, seed):
+    rng = random.Random(seed)
+    cluster = deterministic_uuid(rng)
+    stream = deterministic_uuid(rng)
+    mutation_session = deterministic_uuid(rng)
+    data_dir = artifacts / "scratch" / "success" / "ls07"
+    server = OwnedServer(
+        binaries["light-streamd"],
+        data_dir,
+        artifacts / "node-logs",
+        "ls07-batching",
+        publish_coalesce_us=100_000,
+    )
+    endpoint = f"http://{server.ready['public_address']}"
+    try:
+        bootstrap = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "cluster",
+                    "bootstrap",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--stream-name",
+                    "bootstrap",
+                ],
+                "ls07-bootstrap",
+                timeout=30,
+            ),
+            "LS07 bootstrap",
+        )
+        before = parse_json_output(
+            runner.run(
+                [binaries["light-streamctl"], "--endpoint", endpoint, "diagnostics"],
+                "ls07-diagnostics-before",
+                timeout=10,
+            ),
+            "LS07 diagnostics before batching",
+        )
+        data_before = next(
+            group
+            for group in before["diagnostics"]["groups"]
+            if group["group"] == "data"
+        )
+
+        payload = artifacts / "samples" / "ls07-record.bin"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(bytes(rng.randrange(0, 256) for _ in range(1024)))
+        commands = []
+        for index in range(32):
+            command = publish_command(
+                binaries["light-streamctl"],
+                endpoint,
+                cluster,
+                stream,
+                "ls07-producer",
+                deterministic_uuid(rng),
+                1,
+                payload,
+                deadline_ms=15000,
+            )
+            if index == 0:
+                command.extend(["--bookmark", "batch-bookmark"])
+            commands.append(command)
+        publish_results = [
+            parse_json_output(result, f"LS07 concurrent publish {index}")
+            for index, result in enumerate(
+                runner.run_parallel(commands, "ls07-concurrent-publish", timeout=30)
+            )
+        ]
+        offsets = sorted(
+            result["receipt"]["range"]["first"] for result in publish_results
+        )
+        if offsets != list(range(32)):
+            raise VerificationError("LS07 concurrent publish ledger is not contiguous")
+
+        after = parse_json_output(
+            runner.run(
+                [binaries["light-streamctl"], "--endpoint", endpoint, "diagnostics"],
+                "ls07-diagnostics-after",
+                timeout=10,
+            ),
+            "LS07 diagnostics after batching",
+        )
+        data_after = next(
+            group
+            for group in after["diagnostics"]["groups"]
+            if group["group"] == "data"
+        )
+        physical_entries = data_after["last_log_index"] - data_before["last_log_index"]
+        if physical_entries >= len(publish_results):
+            raise VerificationError("LS07 did not combine concurrent publish requests")
+        write_json(
+            artifacts / "l01.json",
+            {
+                "logical_requests": len(publish_results),
+                "physical_entries": physical_entries,
+                "offsets": offsets,
+                "verdict": "PASS",
+            },
+        )
+        route = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "stream",
+                    "route",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--partition",
+                    "0",
+                ],
+                "ls07-route",
+                timeout=10,
+            ),
+            "LS07 route",
+        )["route"]["route"]
+        lost_session = deterministic_uuid(rng)
+        proxy = OneShotResponseDropProxy(
+            free_port(),
+            int(server.ready["public_address"].rsplit(":", 1)[1]),
+        )
+        resolved = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    proxy.endpoint,
+                    cluster,
+                    stream,
+                    "ls07-resolver",
+                    lost_session,
+                    1,
+                    payload,
+                    seeds=(endpoint,),
+                    no_retry=True,
+                    deadline_ms=10000,
+                    route_group_id=route["group"],
+                    route_revision=route["route_revision"],
+                )
+                + ["--resolve-receipt"],
+                "ls07-resolve-dropped-response",
+                timeout=15,
+            ),
+            "LS07 resolved dropped response",
+        )
+        proxy.wait()
+        if resolved["receipt"]["range"]["first"] != 32:
+            raise VerificationError("LS07 receipt resolution returned the wrong record")
+        write_json(
+            artifacts / "l04.json",
+            {
+                "response_dropped": True,
+                "resolved_receipt": resolved["receipt"],
+                "verdict": "PASS",
+            },
+        )
+        sparse_session = deterministic_uuid(rng)
+        sparse_started = time.monotonic()
+        sparse = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    cluster,
+                    stream,
+                    "ls07-sparse",
+                    sparse_session,
+                    1,
+                    payload,
+                    deadline_ms=5000,
+                ),
+                "ls07-sparse-publish",
+                timeout=10,
+            ),
+            "LS07 sparse publish",
+        )
+        sparse_seconds = time.monotonic() - sparse_started
+        if sparse_seconds > 0.5:
+            raise VerificationError(
+                f"LS07 sparse publish exceeded its flush bound: {sparse_seconds}"
+            )
+        write_json(
+            artifacts / "l06.json",
+            {
+                "configured_coalesce_microseconds": 100_000,
+                "end_to_end_seconds": sparse_seconds,
+                "receipt": sparse["receipt"],
+                "verdict": "PASS",
+            },
+        )
+
+        bookmarks_before = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "bookmark",
+                    "list",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                ],
+                "ls07-bookmarks-before-checkpoint",
+                timeout=10,
+            ),
+            "LS07 bookmarks before checkpoint",
+        )
+        create_checkpoint = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "checkpoint",
+                    "advance",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--consumer",
+                    "billing",
+                    "--expect-missing",
+                    "--offset",
+                    "10",
+                    "--principal",
+                    "ls07-consumer",
+                    "--mutation-session",
+                    mutation_session,
+                    "--sequence",
+                    "1",
+                ],
+                "ls07-checkpoint-create",
+                timeout=10,
+            ),
+            "LS07 checkpoint create",
+        )
+        advance_checkpoint = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "checkpoint",
+                    "advance",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--consumer",
+                    "billing",
+                    "--expected-revision",
+                    "1",
+                    "--offset",
+                    "20",
+                    "--principal",
+                    "ls07-consumer",
+                    "--mutation-session",
+                    mutation_session,
+                    "--sequence",
+                    "2",
+                ],
+                "ls07-checkpoint-advance",
+                timeout=10,
+            ),
+            "LS07 checkpoint advance",
+        )
+        conflict = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "checkpoint",
+                    "advance",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--consumer",
+                    "billing",
+                    "--expected-revision",
+                    "1",
+                    "--offset",
+                    "25",
+                    "--principal",
+                    "ls07-consumer",
+                    "--mutation-session",
+                    mutation_session,
+                    "--sequence",
+                    "3",
+                ],
+                "ls07-checkpoint-conflict",
+                timeout=10,
+            ),
+            "LS07 checkpoint conflict",
+        )
+        if conflict["result"]["kind"] != "conflict":
+            raise VerificationError("LS07 stale checkpoint revision did not conflict")
+        bookmarks_after = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "bookmark",
+                    "list",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                ],
+                "ls07-bookmarks-after-checkpoint",
+                timeout=10,
+            ),
+            "LS07 bookmarks after checkpoint",
+        )
+        if bookmarks_before["page"] != bookmarks_after["page"]:
+            raise VerificationError("LS07 checkpoint mutation changed bookmark state")
+        write_json(
+            artifacts / "l08.json",
+            {
+                "create": create_checkpoint["result"],
+                "advance": advance_checkpoint["result"],
+                "conflict": conflict["result"],
+                "bookmarks_unchanged": True,
+                "verdict": "PASS",
+            },
+        )
+
+        server.stop()
+        server = OwnedServer(
+            binaries["light-streamd"],
+            data_dir,
+            artifacts / "node-logs",
+            "ls07-cancellation-restart",
+            verification_response_delay_group_id=2,
+            verification_response_delay_ms=1000,
+        )
+        endpoint = f"http://{server.ready['public_address']}"
+        checkpoint_after_restart = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "checkpoint",
+                    "get",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--consumer",
+                    "billing",
+                ],
+                "ls07-checkpoint-after-restart",
+                timeout=15,
+            ),
+            "LS07 checkpoint after restart",
+        )
+        if checkpoint_after_restart["checkpoint"]["cursor"]["next_offset"] != 20:
+            raise VerificationError("LS07 checkpoint changed across restart")
+
+        cancelled_session = deterministic_uuid(rng)
+        cancelled_command = publish_command(
+            binaries["light-streamctl"],
+            endpoint,
+            cluster,
+            stream,
+            "ls07-cancelled",
+            cancelled_session,
+            1,
+            payload,
+            no_retry=True,
+            deadline_ms=10000,
+            route_group_id=route["group"],
+            route_revision=route["route_revision"],
+        )
+        cancelled = parse_json_output(
+            runner.run_interrupted(
+                cancelled_command,
+                "ls07-cancel-after-send",
+                delay_seconds=0.2,
+                timeout=15,
+            ),
+            "LS07 cancelled publish",
+        )
+        if (
+            cancelled.get("error", {}).get("code") != "cancelled"
+            or cancelled["error"].get("outcome") != "ambiguous_commit"
+        ):
+            raise VerificationError("LS07 cancellation did not preserve commit certainty")
+        time.sleep(1.2)
+        cancelled_receipt = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "--no-retry",
+                    "receipt",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--principal",
+                    "ls07-cancelled",
+                    "--session",
+                    cancelled_session,
+                    "--sequence",
+                    "1",
+                    "--route-group-id",
+                    str(route["group"]),
+                    "--route-revision",
+                    str(route["route_revision"]),
+                ],
+                "ls07-cancelled-receipt",
+                timeout=10,
+            ),
+            "LS07 cancelled receipt",
+        )
+        if (
+            cancelled_receipt.get("receipt", {})
+            .get("request", {})
+            .get("session")
+            != cancelled_session
+        ):
+            raise VerificationError("LS07 submitted cancellation lost its durable receipt")
+        write_json(
+            artifacts / "l05.json",
+            {
+                "client_result": cancelled,
+                "receipt_after_response_delay": cancelled_receipt,
+                "submitted_request_committed": True,
+                "verdict": "PASS",
+            },
+        )
+
+        server.stop()
+        server = OwnedServer(
+            binaries["light-streamd"],
+            data_dir,
+            artifacts / "node-logs",
+            "ls07-overload-restart",
+            verification_delay_group_id=2,
+            verification_delay_ms=1000,
+            publish_queue_requests=1,
+            publish_queue_records=128,
+            publish_queue_bytes=9 * 1024 * 1024,
+            publish_batch_requests=1,
+            publish_batch_records=128,
+            publish_batch_bytes=8 * 1024 * 1024,
+            publish_coalesce_us=1_000,
+        )
+        endpoint = f"http://{server.ready['public_address']}"
+        overload_commands = [
+            publish_command(
+                binaries["light-streamctl"],
+                endpoint,
+                cluster,
+                stream,
+                "ls07-overload",
+                deterministic_uuid(rng),
+                1,
+                payload,
+                deadline_ms=10000,
+            )
+            for _ in range(2)
+        ]
+        overload_results = runner.run_parallel(
+            overload_commands,
+            "ls07-overload",
+            expected_codes=(0, 4),
+            timeout=20,
+        )
+        overload_values = [
+            parse_json_output(result, f"LS07 overload result {index}")
+            for index, result in enumerate(overload_results)
+        ]
+        codes = sorted(
+            value.get("error", {}).get("code", "success") for value in overload_values
+        )
+        if codes != ["publish_overloaded", "success"]:
+            raise VerificationError(f"LS07 overload outcomes were {codes}")
+        overload = next(value for value in overload_values if value.get("ok") is False)
+        if overload["error"].get("outcome") != "definite_no_commit":
+            raise VerificationError("LS07 overload did not report definite no commit")
+        recovery = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    cluster,
+                    stream,
+                    "ls07-overload",
+                    deterministic_uuid(rng),
+                    1,
+                    payload,
+                    deadline_ms=10000,
+                ),
+                "ls07-overload-recovery",
+                timeout=15,
+            ),
+            "LS07 overload recovery",
+        )
+        write_json(
+            artifacts / "l07.json",
+            {
+                "outcomes": overload_values,
+                "recovery": recovery,
+                "verdict": "PASS",
+            },
+        )
+        fetch_checkpoint = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "checkpoint",
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--consumer",
+                    "billing",
+                    "--limit",
+                    "4",
+                ],
+                "ls07-checkpoint-fetch",
+                timeout=15,
+            ),
+            "LS07 checkpoint fetch",
+        )
+        write_json(
+            artifacts / "l09.json",
+            {
+                "checkpoint": checkpoint_after_restart["checkpoint"],
+                "fetch": fetch_checkpoint["page"],
+                "verdict": "PASS",
+            },
+        )
+        write_json(
+            artifacts / "l02.json",
+            {
+                "cli_publish_count": len(publish_results) + 2,
+                "checkpoint": checkpoint_after_restart["checkpoint"],
+                "fetch": fetch_checkpoint["page"],
+                "ledger_offsets": offsets,
+                "verdict": "PASS",
+            },
+        )
+        write_json(
+            artifacts / "l10.json",
+            {
+                "checkpoint_conflict": conflict,
+                "overload": overload,
+                "cancellation": cancelled,
+                "all_outputs_parseable": True,
+                "verdict": "PASS",
+            },
+        )
+        result = {
+            "bootstrap": bootstrap,
+            "batching": {
+                "logical_requests": len(publish_results),
+                "physical_entries": physical_entries,
+            },
+            "checkpoint_revision": checkpoint_after_restart["checkpoint"]["revision"],
+            "overload_recovered": True,
+            "secured_mode": "UNSUPPORTED_LS08",
+            "independent_hosts": "BLOCKED",
+            "revision": revision,
+            "verdict": "PASS",
+        }
+        write_json(artifacts / "ls07" / "client-workflows.json", result)
+    finally:
+        server.stop()
+
+
 def run_selected(args, artifacts, runner, binaries, revision, profile):
+    if args.phase == "LS07" or args.suite == "ls07-e2e":
+        runner.run(
+            [
+                "cargo",
+                "test",
+                "-p",
+                "light-stream-core",
+                "-p",
+                "light-stream-storage",
+                "-p",
+                "light-stream-server",
+                "-p",
+                "light-stream-client",
+            ],
+            "ls07-targeted-tests",
+            timeout=900,
+        )
+        run_ls07_scenario(artifacts, runner, binaries, revision, args.seed)
+        run_ls02b_scenario(
+            artifacts,
+            runner,
+            binaries,
+            revision,
+            profile,
+            args.seed + 1,
+            verify_checkpoints=True,
+        )
+        return
     if args.phase == "LS06" or args.suite == "ls06-e2e":
         runner.run(
             [
@@ -6923,6 +7783,7 @@ def parse_args():
         "LS04",
         "LS05",
         "LS06",
+        "LS07",
     ):
         parser.error(f"unknown phase {args.phase!r}")
     if args.suite is not None and args.suite not in (
@@ -6933,6 +7794,7 @@ def parse_args():
         "ls04-e2e",
         "ls05-e2e",
         "ls06-e2e",
+        "ls07-e2e",
     ):
         parser.error(f"unknown suite {args.suite!r}")
     if args.scenario not in KNOWN_SCENARIOS:

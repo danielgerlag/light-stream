@@ -1,0 +1,42 @@
+{
+  "client_result": {
+    "command": "request",
+    "error": {
+      "code": "cancelled",
+      "message": "request was interrupted by Cancelled with outcome AmbiguousCommit",
+      "outcome": "ambiguous_commit",
+      "request": {
+        "kind": "publish",
+        "request": {
+          "principal": "ls07-cancelled",
+          "sequence": 1,
+          "session": "5544083f-8fda-e710-28d2-408acbeedd82"
+        }
+      }
+    },
+    "ok": false
+  },
+  "receipt_after_response_delay": {
+    "command": "receipt",
+    "endpoint": "http://127.0.0.1:50619",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 34,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "ls07-cancelled",
+        "sequence": 1,
+        "session": "5544083f-8fda-e710-28d2-408acbeedd82"
+      }
+    }
+  },
+  "submitted_request_committed": true,
+  "verdict": "PASS"
+}

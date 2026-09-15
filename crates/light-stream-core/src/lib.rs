@@ -2,6 +2,7 @@ mod bookmark;
 mod bootstrap;
 mod capability;
 mod catalog;
+mod checkpoint;
 mod consensus;
 mod cursor;
 mod error;
@@ -25,6 +26,10 @@ pub use catalog::{
     DEFAULT_MAX_STREAMS, MAX_DATA_GROUPS, MIN_DATA_GROUPS, PartitionPlacement, PartitionRoute,
     StreamDescriptor, StreamLifecycle,
 };
+pub use checkpoint::{
+    CheckpointCasResult, CheckpointExpectation, CheckpointKey, CheckpointMutation,
+    CheckpointRevision, CommittedCheckpoint,
+};
 pub use consensus::{ConsensusGroup, LeaderHint, RequestOutcome};
 pub use cursor::{
     CommittedCursor, CommittedRecord, CommittedRecordRange, FetchPage, PartitionKey, RecordOffset,
@@ -36,8 +41,10 @@ pub use identity::{
     PrincipalId, ProducerSessionId, ReplayLeaseId, RequestSequence, StreamId, StreamName,
 };
 pub use publish::{
-    MAX_PUBLISH_BYTES, MAX_RECORD_BYTES, MAX_RECORDS_PER_PUBLISH, ProducerRequestId, PublishBatch,
-    PublishProbe, PublishReceipt,
+    MAX_PUBLISH_BYTES, MAX_RECORD_BYTES, MAX_RECORDS_PER_PUBLISH,
+    MAX_RECORDS_PER_REPLICATED_PUBLISH, MAX_REPLICATED_PUBLISH_BYTES,
+    MAX_REQUESTS_PER_REPLICATED_PUBLISH, ProducerRequestId, PublishBatch, PublishProbe,
+    PublishReceipt, ReplicatedPublishBatch,
 };
 pub use recovery::{
     AdministrationIntent, AdministrationLifecycle, AdministrationOperation, ClusterTopology,
