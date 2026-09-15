@@ -15,17 +15,17 @@ use light_stream_core::{
     BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology, ClusterId,
     CommittedBookmark, CommittedStreamBookmark, ConsensusGroup, CreateBookmarkSpec,
     CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint, LeaseRelease, LeaseRenewal,
-    NodeDescriptor, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId,
-    ProtectedFetchRequest, PublishBatch, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId,
-    ReplayLeaseRequest, RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus,
-    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
-    StreamLifecycle, StreamName,
+    NodeDescriptor, NodeId, OperationalProof, PartitionId, PartitionKey, PartitionRoute,
+    ProducerRequestId, ProtectedFetchRequest, PublishBatch, PublishReceipt, RecordOffset,
+    ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome, RetentionRequest,
+    RetentionResult, RetentionStatus, StreamBookmarkPage, StreamBookmarkPageRequest,
+    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName,
 };
 use light_stream_storage::{
     ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
     DATA_GROUP_ID, DataRaftConfig, GroupCommand, GroupIdentity, GroupKind, GroupStorageBudget,
-    NoRemoteNetworkFactory, RocksStateMachine, create_control_store, create_data_store,
-    open_control_store, open_data_store,
+    NoRemoteNetworkFactory, RocksStateMachine, SnapshotArtifact, create_control_store,
+    create_data_store, open_control_store, open_data_store,
 };
 use openraft::{
     BasicNode, Config, Raft, ReadPolicy, ServerState, SnapshotPolicy,
@@ -49,7 +49,10 @@ pub(crate) type DataRaft = Raft<DataRaftConfig, RocksStateMachine<DataRaftConfig
 
 const ROOT_MANIFEST: &str = "cluster.json";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
+const READ_INDEX_FAST_PATH_TIMEOUT: Duration = Duration::from_millis(100);
 const FORMATION_TIMEOUT: Duration = Duration::from_secs(15);
+const SNAPSHOT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const LEASE_CLOCK_SKEW: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug)]
@@ -101,10 +104,12 @@ struct ActiveCluster {
     control: ControlRaft,
     data: BTreeMap<u64, DataGroup>,
     control_reader: CommittedStateReader,
+    operational: RwLock<BTreeMap<u64, OperationalProof>>,
     maintenance_shutdown: AtomicBool,
 }
 
 struct DataGroup {
+    group_id: GroupId,
     raft: DataRaft,
     reader: CommittedStateReader,
     slot: u16,
@@ -167,6 +172,13 @@ pub(crate) struct NodeDiagnostic {
     pub unsupported_claims: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct SnapshotGroupResult {
+    pub group_id: u64,
+    pub snapshot_index: u64,
+    pub purged_index: Option<u64>,
+}
+
 pub struct ClusterManager {
     data_dir: PathBuf,
     local: NodeDescriptor,
@@ -223,6 +235,7 @@ impl ClusterManager {
             };
             let active = Arc::new(active);
             spawn_retention_maintenance(active.clone());
+            spawn_operational_probes(active.clone());
             *manager.active.write().await = Some(active);
         }
         Ok(manager)
@@ -288,6 +301,7 @@ impl ClusterManager {
         let active = self.create_v1(manifest).await?;
         let active = Arc::new(active);
         spawn_retention_maintenance(active.clone());
+        spawn_operational_probes(active.clone());
         *self.active.write().await = Some(active);
         bootstrap_result(spec)
     }
@@ -335,6 +349,7 @@ impl ClusterManager {
             write_manifest(&self.data_dir, &manifest)?;
             let active = Arc::new(self.create_v2(manifest, true).await?);
             spawn_retention_maintenance(active.clone());
+            spawn_operational_probes(active.clone());
             *self.active.write().await = Some(active.clone());
             active
         };
@@ -480,6 +495,7 @@ impl ClusterManager {
                 .map_err(internal_status)?,
         );
         spawn_retention_maintenance(active.clone());
+        spawn_operational_probes(active.clone());
         *self.active.write().await = Some(active);
         Ok(())
     }
@@ -543,6 +559,16 @@ impl ClusterManager {
             .get(&envelope.group_id)
             .map(|value| value.raft.clone())
             .ok_or_else(|| tonic::Status::invalid_argument("unknown data Raft group"))
+    }
+
+    pub(crate) fn snapshot_incoming_directory(&self, group_id: u64) -> PathBuf {
+        group_path(&self.data_dir, group_id).join("snapshots/incoming")
+    }
+
+    pub(crate) fn snapshot_verification_delay(&self, group_id: u64) -> Option<Duration> {
+        self.verification_delay
+            .filter(|(configured_group, _)| *configured_group == group_id)
+            .map(|(_, delay)| delay)
     }
 
     async fn peer_cluster(
@@ -744,6 +770,17 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
+        require_operational_leader(
+            &active,
+            group.group_id,
+            &group.raft,
+            &group.reader,
+            RequestOutcome::DefiniteNoCommit,
+            Some(AmbiguousRequest::Publish {
+                request: request.clone(),
+            }),
+        )
+        .await?;
         if let Some((group_id, delay)) = self.verification_delay
             && group_id == route.group().get()
         {
@@ -787,7 +824,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        linearize(&active, &group.raft).await?;
+        linearize(&active, group).await?;
         group.reader.fetch(cluster, partition, offset, limit)
     }
 
@@ -806,7 +843,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        linearize(&active, &group.raft).await?;
+        linearize(&active, group).await?;
         group.reader.receipt(partition, request)
     }
 
@@ -907,7 +944,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        linearize(&active, &group.raft).await?;
+        linearize(&active, group).await?;
         group.reader.resolve_bookmark(partition, name)
     }
 
@@ -931,7 +968,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        linearize(&active, &group.raft).await?;
+        linearize(&active, group).await?;
         group.reader.list_bookmarks(request)
     }
 
@@ -1210,7 +1247,7 @@ impl ClusterManager {
                 .data
                 .get(&route.group().get())
                 .ok_or(DomainError::StaleRoute)?;
-            linearize(&active, &group.raft).await?;
+            linearize(&active, group).await?;
             let tail = group.reader.partition_tail(cursor.partition())?;
             if cursor.next_offset() > tail {
                 return Err(DomainError::InvalidRange {
@@ -1364,6 +1401,46 @@ impl ClusterManager {
         }
     }
 
+    pub async fn snapshot_group(
+        &self,
+        cluster: ClusterId,
+        group_id: u64,
+        purge: bool,
+    ) -> Result<SnapshotGroupResult, DomainError> {
+        let active = self.application_cluster().await?;
+        validate_cluster(&active, cluster).await?;
+        match group_id {
+            CONTROL_GROUP_ID => {
+                active
+                    .control
+                    .ensure_linearizable(ReadPolicy::ReadIndex)
+                    .await
+                    .map_err(|error| map_read_error(error, &active, ConsensusGroup::Control))?;
+                snapshot_raft_group(&active.control, &active.control_reader, group_id, purge).await
+            }
+            group_id if group_id >= DATA_GROUP_ID => {
+                let group =
+                    active
+                        .data
+                        .get(&group_id)
+                        .ok_or_else(|| DomainError::InvalidIdentity {
+                            kind: "Raft group".to_owned(),
+                            reason: format!("unknown data group {group_id}"),
+                        })?;
+                group
+                    .raft
+                    .ensure_linearizable(ReadPolicy::ReadIndex)
+                    .await
+                    .map_err(|error| map_read_error(error, &active, ConsensusGroup::Data))?;
+                snapshot_raft_group(&group.raft, &group.reader, group_id, purge).await
+            }
+            _ => Err(DomainError::InvalidIdentity {
+                kind: "Raft group".to_owned(),
+                reason: format!("unknown group {group_id}"),
+            }),
+        }
+    }
+
     pub async fn shutdown(&self) -> Result<(), DomainError> {
         if let Some(active) = self.active.read().await.as_ref() {
             active.shutdown().await?;
@@ -1452,6 +1529,7 @@ impl ClusterManager {
             data.insert(
                 group_id.get(),
                 DataGroup {
+                    group_id,
                     raft,
                     reader,
                     slot: slot as u16,
@@ -1469,6 +1547,7 @@ impl ClusterManager {
             control,
             data,
             control_reader,
+            operational: RwLock::new(BTreeMap::new()),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1525,6 +1604,7 @@ impl ClusterManager {
             data.insert(
                 group_id.get(),
                 DataGroup {
+                    group_id,
                     raft,
                     reader,
                     slot: slot as u16,
@@ -1574,6 +1654,7 @@ impl ClusterManager {
             control,
             data,
             control_reader,
+            operational: RwLock::new(BTreeMap::new()),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1700,6 +1781,7 @@ impl ClusterManager {
             data.insert(
                 group_id.get(),
                 DataGroup {
+                    group_id,
                     raft,
                     reader,
                     slot: slot as u16,
@@ -1712,6 +1794,7 @@ impl ClusterManager {
             control,
             data,
             control_reader,
+            operational: RwLock::new(BTreeMap::new()),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1742,8 +1825,14 @@ async fn initialize_seed_if_pristine<C>(
     peer_uri: &str,
 ) -> Result<(), DomainError>
 where
-    C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    C: openraft::RaftTypeConfig<
+            D = GroupCommand,
+            R = ApplyResult,
+            NodeId = u64,
+            Node = BasicNode,
+            Term = u64,
+        >,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     let metrics = raft.metrics().borrow_watched().clone();
     if metrics.last_log_index.is_none()
@@ -1766,8 +1855,14 @@ async fn elect_seed<C>(
     node_id: u64,
 ) -> Result<(), DomainError>
 where
-    C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    C: openraft::RaftTypeConfig<
+            D = GroupCommand,
+            R = ApplyResult,
+            NodeId = u64,
+            Node = BasicNode,
+            Term = u64,
+        >,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     raft.trigger().elect(false).await.map_err(raft_fatal)?;
     raft.wait(Some(FORMATION_TIMEOUT))
@@ -1786,7 +1881,7 @@ async fn recover_standalone<C>(
 ) -> Result<(), DomainError>
 where
     C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     raft.wait_for_recovery(Some(FORMATION_TIMEOUT))
         .await
@@ -1807,7 +1902,7 @@ async fn ensure_bootstrap_command<C>(
 ) -> Result<(), DomainError>
 where
     C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     match reader.bootstrap_spec()? {
         Some(stored) if &stored == expected => return Ok(()),
@@ -1834,7 +1929,7 @@ async fn add_learners<C>(
 ) -> Result<(), DomainError>
 where
     C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     for member in &formation.members {
         if member.node_id() == formation.seed_node_id {
@@ -1865,7 +1960,7 @@ async fn wait_exact_replication<C>(
 ) -> Result<(), DomainError>
 where
     C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     let deadline = Instant::now() + FORMATION_TIMEOUT;
     loop {
@@ -1899,7 +1994,7 @@ async fn converge_membership<C>(
 ) -> Result<(), DomainError>
 where
     C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     if !membership_is_exact(&raft.metrics().borrow_watched(), &formation.voter_ids()) {
         raft.change_membership(formation.voter_ids(), false)
@@ -1982,16 +2077,25 @@ async fn resolve_data_route(
     supplied_group: Option<GroupId>,
     supplied_revision: Option<u64>,
 ) -> Result<PartitionRoute, DomainError> {
-    linearize_control(active).await?;
     validate_cluster(active, cluster).await?;
+    let local_route = active
+        .control_reader
+        .route(partition.stream(), partition.partition())?;
+    match (supplied_group, supplied_revision) {
+        (Some(group), Some(revision))
+            if group == local_route.group() && revision == local_route.route_revision() =>
+        {
+            return Ok(local_route);
+        }
+        (Some(_), Some(_)) | (Some(_), None) | (None, Some(_)) => {
+            return Err(DomainError::StaleRoute);
+        }
+        (None, None) => {}
+    }
+    linearize_control(active).await?;
     let route = active
         .control_reader
         .route(partition.stream(), partition.partition())?;
-    if supplied_group.is_some_and(|value| value != route.group())
-        || supplied_revision.is_some_and(|value| value != route.route_revision())
-    {
-        return Err(DomainError::StaleRoute);
-    }
     Ok(route)
 }
 
@@ -2008,24 +2112,39 @@ async fn validate_cluster(
 }
 
 async fn linearize_control(active: &Arc<ActiveCluster>) -> Result<(), DomainError> {
-    tokio::time::timeout(
-        OPERATION_TIMEOUT,
-        active.control.ensure_linearizable(ReadPolicy::ReadIndex),
+    let group = GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero");
+    require_operational_leader(
+        active,
+        group,
+        &active.control,
+        &active.control_reader,
+        RequestOutcome::NotApplicable,
+        None,
+    )
+    .await?;
+    prove_linearizable(
+        active,
+        group,
+        ConsensusGroup::Control,
+        &active.control,
+        &active.control_reader,
     )
     .await
-    .map_err(|_| DomainError::QuorumUnavailable {
-        group: ConsensusGroup::Control,
-        outcome: RequestOutcome::NotApplicable,
-        request: None,
-    })?
-    .map(|_| ())
-    .map_err(|error| map_read_error(error, active, ConsensusGroup::Control))
 }
 
 async fn control_write(
     active: &Arc<ActiveCluster>,
     command: GroupCommand,
 ) -> Result<StreamDescriptor, DomainError> {
+    require_operational_leader(
+        active,
+        GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
+        &active.control,
+        &active.control_reader,
+        RequestOutcome::DefiniteNoCommit,
+        None,
+    )
+    .await?;
     let response = tokio::time::timeout(OPERATION_TIMEOUT, active.control.client_write(command))
         .await
         .map_err(|_| DomainError::QuorumUnavailable {
@@ -2043,19 +2162,192 @@ async fn control_write(
     }
 }
 
-async fn linearize(active: &Arc<ActiveCluster>, raft: &DataRaft) -> Result<(), DomainError> {
-    let result = tokio::time::timeout(
-        OPERATION_TIMEOUT,
+async fn linearize(active: &Arc<ActiveCluster>, group: &DataGroup) -> Result<(), DomainError> {
+    require_operational_leader(
+        active,
+        group.group_id,
+        &group.raft,
+        &group.reader,
+        RequestOutcome::NotApplicable,
+        None,
+    )
+    .await?;
+    linearize_data_raw(active, group).await
+}
+
+async fn linearize_data_raw(
+    active: &Arc<ActiveCluster>,
+    group: &DataGroup,
+) -> Result<(), DomainError> {
+    prove_linearizable(
+        active,
+        group.group_id,
+        ConsensusGroup::Data,
+        &group.raft,
+        &group.reader,
+    )
+    .await
+}
+
+async fn prove_linearizable<C>(
+    active: &Arc<ActiveCluster>,
+    group: GroupId,
+    group_kind: ConsensusGroup,
+    raft: &Raft<C, RocksStateMachine<C>>,
+    reader: &CommittedStateReader,
+) -> Result<(), DomainError>
+where
+    C: openraft::RaftTypeConfig<
+            D = GroupCommand,
+            R = ApplyResult,
+            NodeId = u64,
+            Node = BasicNode,
+            Term = u64,
+        >,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    match tokio::time::timeout(
+        READ_INDEX_FAST_PATH_TIMEOUT,
         raft.ensure_linearizable(ReadPolicy::ReadIndex),
     )
     .await
-    .map_err(|_| DomainError::QuorumUnavailable {
-        group: ConsensusGroup::Data,
-        outcome: RequestOutcome::NotApplicable,
-        request: None,
-    })?;
-    result.map_err(|error| map_read_error(error, active, ConsensusGroup::Data))?;
+    {
+        Ok(Ok(_)) => return Ok(()),
+        Ok(Err(error)) if raft.metrics().borrow_watched().state != ServerState::Leader => {
+            return Err(map_read_error(error, active, group_kind));
+        }
+        Ok(Err(error)) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "read_index_fallback",
+                    "group_id": group,
+                    "detail": error.to_string(),
+                })
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "read_index_fallback",
+                    "group_id": group,
+                    "detail": error.to_string(),
+                })
+            );
+        }
+    }
+    let response = match tokio::time::timeout(
+        OPERATION_TIMEOUT,
+        raft.client_write(GroupCommand::OperationalProbe { group }),
+    )
+    .await
+    {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "linearization_barrier_failed",
+                    "group_id": group,
+                    "detail": error.to_string(),
+                })
+            );
+            return Err(map_write_error(error, active, group_kind));
+        }
+        Err(error) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "linearization_barrier_failed",
+                    "group_id": group,
+                    "detail": error.to_string(),
+                })
+            );
+            return Err(DomainError::QuorumUnavailable {
+                group: group_kind,
+                outcome: RequestOutcome::NotApplicable,
+                request: None,
+            });
+        }
+    };
+    let ApplyResult::OperationalProof(proof) = response.data else {
+        return Err(DomainError::Storage {
+            reason: "linearization barrier returned an unexpected result".to_owned(),
+        });
+    };
+    let metrics = raft.metrics().borrow_watched().clone();
+    let leader = NodeId::new(metrics.id)?;
+    let applied = metrics.last_applied.map_or(0, |value| value.index);
+    if metrics.state != ServerState::Leader
+        || !proof.matches(leader, metrics.current_term, applied)
+        || reader.operational_proof().ok().flatten() != Some(proof)
+    {
+        return Err(DomainError::QuorumUnavailable {
+            group: group_kind,
+            outcome: RequestOutcome::NotApplicable,
+            request: None,
+        });
+    }
+    active.operational.write().await.insert(group.get(), proof);
     Ok(())
+}
+
+async fn require_operational_leader<C>(
+    active: &Arc<ActiveCluster>,
+    group: GroupId,
+    raft: &Raft<C, RocksStateMachine<C>>,
+    reader: &CommittedStateReader,
+    outcome: RequestOutcome,
+    request: Option<AmbiguousRequest>,
+) -> Result<(), DomainError>
+where
+    C: openraft::RaftTypeConfig<
+            D = GroupCommand,
+            R = ApplyResult,
+            NodeId = u64,
+            Node = BasicNode,
+            Term = u64,
+        >,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    let metrics = raft.metrics().borrow_watched().clone();
+    if metrics.state != ServerState::Leader {
+        return Ok(());
+    }
+    let leader = NodeId::new(metrics.id)?;
+    let applied = metrics.last_applied.map_or(0, |value| value.index);
+    if active
+        .operational
+        .read()
+        .await
+        .get(&group.get())
+        .is_some_and(|proof| proof.matches(leader, metrics.current_term, applied))
+    {
+        return Ok(());
+    }
+    if let Ok(Some(proof)) = reader.operational_proof()
+        && proof.matches(leader, metrics.current_term, applied)
+    {
+        active.operational.write().await.insert(group.get(), proof);
+        return Ok(());
+    }
+    let group_kind = if group.get() == CONTROL_GROUP_ID {
+        ConsensusGroup::Control
+    } else {
+        ConsensusGroup::Data
+    };
+    if prove_linearizable(active, group, group_kind, raft, reader)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+    Err(DomainError::QuorumUnavailable {
+        group: group_kind,
+        outcome,
+        request,
+    })
 }
 
 async fn maintain_group_retention(
@@ -2069,7 +2361,7 @@ async fn maintain_group_retention(
             .reader
             .retention_maintenance_needed(partition, observation.lower_bound())?
         {
-            linearize(active, &group.raft).await?;
+            linearize_data_raw(active, group).await?;
             return group.reader.retention_status(partition);
         }
         let status = group.reader.retention_status(partition)?;
@@ -2188,6 +2480,119 @@ fn spawn_retention_maintenance(active: Arc<ActiveCluster>) {
     });
 }
 
+fn spawn_operational_probes(active: Arc<ActiveCluster>) {
+    spawn_operational_probe(
+        active.clone(),
+        GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
+        active.control.clone(),
+        active.control_reader.clone(),
+    );
+    for group in active.data.values() {
+        spawn_operational_probe(
+            active.clone(),
+            group.group_id,
+            group.raft.clone(),
+            group.reader.clone(),
+        );
+    }
+}
+
+fn spawn_operational_probe<C>(
+    active: Arc<ActiveCluster>,
+    group: GroupId,
+    raft: Raft<C, RocksStateMachine<C>>,
+    reader: CommittedStateReader,
+) where
+    C: openraft::RaftTypeConfig<
+            D = GroupCommand,
+            R = ApplyResult,
+            NodeId = u64,
+            Node = BasicNode,
+            Term = u64,
+        > + 'static,
+    RocksStateMachine<C>:
+        openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact> + 'static,
+{
+    tokio::spawn(async move {
+        while !active.maintenance_shutdown.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if active.maintenance_shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            if !active.manifest.read().await.is_application_active() {
+                continue;
+            }
+            let metrics = raft.metrics().borrow_watched().clone();
+            if metrics.state != ServerState::Leader || metrics.last_quorum_acked.is_none() {
+                active.operational.write().await.remove(&group.get());
+                continue;
+            }
+            let leader = match NodeId::new(metrics.id) {
+                Ok(leader) => leader,
+                Err(_) => continue,
+            };
+            let applied = metrics.last_applied.map_or(0, |value| value.index);
+            if active
+                .operational
+                .read()
+                .await
+                .get(&group.get())
+                .is_some_and(|proof| proof.matches(leader, metrics.current_term, applied))
+            {
+                continue;
+            }
+            active.operational.write().await.remove(&group.get());
+            if let Ok(Some(proof)) = reader.operational_proof()
+                && proof.matches(leader, metrics.current_term, applied)
+                && matches!(
+                    tokio::time::timeout(
+                        OPERATION_TIMEOUT,
+                        raft.ensure_linearizable(ReadPolicy::ReadIndex),
+                    )
+                    .await,
+                    Ok(Ok(_))
+                )
+            {
+                active.operational.write().await.insert(group.get(), proof);
+                continue;
+            }
+            let response = tokio::time::timeout(
+                OPERATION_TIMEOUT,
+                raft.client_write(GroupCommand::OperationalProbe { group }),
+            )
+            .await;
+            let Ok(Ok(response)) = response else {
+                continue;
+            };
+            let ApplyResult::OperationalProof(proof) = response.data else {
+                continue;
+            };
+            if !matches!(
+                tokio::time::timeout(
+                    OPERATION_TIMEOUT,
+                    raft.ensure_linearizable(ReadPolicy::ReadIndex),
+                )
+                .await,
+                Ok(Ok(_))
+            ) {
+                continue;
+            }
+            let metrics = raft.metrics().borrow_watched().clone();
+            let applied = metrics.last_applied.map_or(0, |value| value.index);
+            let stored = match reader.operational_proof() {
+                Ok(Some(stored)) => stored,
+                _ => continue,
+            };
+            if stored == proof
+                && proof.matches(leader, metrics.current_term, applied)
+                && metrics.state == ServerState::Leader
+            {
+                active.operational.write().await.insert(group.get(), proof);
+            }
+        }
+    });
+}
+
 fn map_write_error<C>(
     error: RaftError<C, ClientWriteError<C>>,
     active: &Arc<ActiveCluster>,
@@ -2269,7 +2674,7 @@ fn group_diagnostic<C>(
 ) -> GroupDiagnostic
 where
     C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
-    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = Vec<u8>>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
 {
     let metrics = raft.metrics().borrow_watched().clone();
     let effective = metrics.membership_config.membership();
@@ -2303,6 +2708,81 @@ where
         slot: None,
         cache_budget_bytes: None,
         write_buffer_budget_bytes: None,
+    }
+}
+
+async fn snapshot_raft_group<C>(
+    raft: &Raft<C, RocksStateMachine<C>>,
+    reader: &CommittedStateReader,
+    group_id: u64,
+    purge: bool,
+) -> Result<SnapshotGroupResult, DomainError>
+where
+    C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    let covered_index = raft
+        .metrics()
+        .borrow_watched()
+        .last_applied
+        .as_ref()
+        .ok_or_else(|| DomainError::Storage {
+            reason: format!("Raft group {group_id} has no applied log to snapshot"),
+        })?
+        .index;
+    raft.trigger().snapshot().await.map_err(raft_fatal)?;
+    let deadline = Instant::now() + SNAPSHOT_OPERATION_TIMEOUT;
+    let snapshot_index = loop {
+        let metrics = raft.metrics().borrow_watched().clone();
+        if let Some(snapshot) = metrics.snapshot
+            && snapshot.index >= covered_index
+        {
+            break snapshot.index;
+        }
+        if Instant::now() >= deadline {
+            return Err(DomainError::Storage {
+                reason: format!(
+                    "timed out waiting for Raft group {group_id} snapshot through index {covered_index}"
+                ),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    if !purge {
+        return Ok(SnapshotGroupResult {
+            group_id,
+            snapshot_index,
+            purged_index: None,
+        });
+    }
+    reader
+        .snapshot_artifact_bytes()?
+        .ok_or_else(|| DomainError::Storage {
+            reason: format!("Raft group {group_id} completed without a snapshot artifact"),
+        })?;
+    raft.trigger()
+        .purge_log(snapshot_index)
+        .await
+        .map_err(raft_fatal)?;
+    loop {
+        let metrics = raft.metrics().borrow_watched().clone();
+        if let Some(purged) = metrics.purged
+            && purged.index >= snapshot_index
+        {
+            return Ok(SnapshotGroupResult {
+                group_id,
+                snapshot_index,
+                purged_index: Some(purged.index),
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err(DomainError::Storage {
+                reason: format!(
+                    "timed out waiting for Raft group {group_id} purge through index {snapshot_index}"
+                ),
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
@@ -2368,6 +2848,7 @@ fn raft_config(cluster_name: String, replicated: bool) -> Result<Arc<Config>, Do
             SnapshotPolicy::LogsSinceLast(64)
         },
         max_in_snapshot_log_to_keep: if replicated { u64::MAX } else { 0 },
+        install_snapshot_timeout: SNAPSHOT_TRANSFER_TIMEOUT.as_millis() as u64,
         ..Default::default()
     };
     config
@@ -2465,8 +2946,6 @@ fn validate_group_directories(data_dir: &Path, data_groups: &[GroupId]) -> Resul
 
 fn unsupported_claims() -> Vec<String> {
     vec![
-        "snapshot_after_purge:UNSUPPORTED_LS06".to_owned(),
-        "raft_owned_payload_reclaim:DEFERRED_LS06".to_owned(),
         "secured_mode:UNSUPPORTED_LS08".to_owned(),
         "independent_hosts:BLOCKED".to_owned(),
     ]

@@ -7,6 +7,7 @@ mod cursor;
 mod error;
 mod identity;
 mod publish;
+mod recovery;
 mod replay;
 mod security;
 
@@ -38,6 +39,7 @@ pub use publish::{
     MAX_PUBLISH_BYTES, MAX_RECORD_BYTES, MAX_RECORDS_PER_PUBLISH, ProducerRequestId, PublishBatch,
     PublishProbe, PublishReceipt,
 };
+pub use recovery::OperationalProof;
 pub use replay::{
     AmbiguousRequest, ByteCount, ByteLimit, LeaseDeadline, LeaseDuration, LeaseGeneration,
     LeaseRelease, LeaseRenewal, MutationRequestId, ProtectedFetchRequest, ReplayAvailability,

@@ -44,6 +44,14 @@
     "retention-replay": {
       "command": "python3 scripts/verify.py --phase LS05 --scenario retention-replay --profile local --security all --artifacts artifacts/LS05/skill-retention-replay-final-3",
       "evidence": ["retention-journey.json", "l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "cleanup.json", "unsupported.json"]
+    },
+    "snapshot-recovery": {
+      "command": "python3 scripts/verify.py --phase LS06 --profile local --security all --artifacts artifacts/LS06/skill-banked-install-final",
+      "evidence": ["ls06/snapshot-recovery.json", "diagnostics/raft.jsonl", "node-logs", "cleanup.json", "security.json"]
+    },
+    "b7-snapshot-recovery": {
+      "command": "python3 scripts/verify.py --phase LS06 --scenario b7-snapshot --profile local --security local-insecure --artifacts artifacts/LS06/b7-1g-4",
+      "evidence": ["ls06/b7-plan.json", "ls06/b7-calibration.json", "ls06/b7-recovery.json", "result.json", "cleanup.json"]
     }
   }
 }

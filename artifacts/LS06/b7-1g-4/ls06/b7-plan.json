@@ -1,0 +1,13 @@
+{
+  "build_deadline_seconds": 1800,
+  "free_bytes_before": 105527193600,
+  "independent_host": "BLOCKED",
+  "install_deadline_seconds": 1800,
+  "locked_rss_delta_bytes": 178274304,
+  "post_load_settle_seconds": 60.005174291,
+  "record_bytes": 1048576,
+  "record_count": 1024,
+  "required_free_bytes": 13958643712,
+  "target_retained_bytes": 1073741824,
+  "transfer_deadline_seconds": 1800
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run release verification for LS01 through LS05 and retain evidence."""
+"""Run release verification for LS01 through LS06 and retain evidence."""
 
 import argparse
 import base64
@@ -31,6 +31,7 @@ KNOWN_SCENARIOS = {
     "bounded-groups",
     "bookmarks",
     "retention-replay",
+    "b7-snapshot",
     "health-capabilities",
     "unsupported-publish",
     "process-isolation",
@@ -343,6 +344,84 @@ def free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
         return listener.getsockname()[1]
+
+
+def allocated_tree_bytes(path):
+    total = 0
+    if not path.exists():
+        return total
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_blocks * 512
+            except FileNotFoundError:
+                pass
+    return total
+
+
+class ProcessRssSampler:
+    def __init__(self, artifacts, nodes):
+        self.path = artifacts / "resources" / "rss.jsonl"
+        self.nodes = nodes
+        self.samples = []
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.started = False
+
+    def start(self):
+        self.started = True
+        self.thread.start()
+
+    def stop(self):
+        if not self.started:
+            return
+        self.stop_event.set()
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise VerificationError("RSS sampler did not stop")
+
+    def _run(self):
+        while not self.stop_event.is_set():
+            values = {}
+            for node_id, node in list(self.nodes.items()):
+                server = node.get("server")
+                if server is None or not server.is_running():
+                    continue
+                result = subprocess.run(
+                    ["ps", "-o", "rss=", "-p", str(server.process.pid)],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    values[str(node_id)] = int(result.stdout.strip()) * 1024
+            sample = {"captured_at": utc_now(), "rss_bytes": values}
+            self.samples.append(sample)
+            append_jsonl(self.path, sample)
+            self.stop_event.wait(0.25)
+
+    def peak_by_node(self):
+        node_ids = {
+            node_id
+            for sample in self.samples
+            for node_id in sample["rss_bytes"]
+        }
+        return {
+            node_id: max(
+                sample["rss_bytes"].get(node_id, 0) for sample in self.samples
+            )
+            for node_id in sorted(node_ids)
+        }
+
+    def peak_delta_by_node(self):
+        peaks = self.peak_by_node()
+        first = {}
+        for sample in self.samples:
+            for node_id, value in sample["rss_bytes"].items():
+                first.setdefault(node_id, value)
+        return {
+            node_id: peak - first.get(node_id, peak)
+            for node_id, peak in peaks.items()
+        }
 
 
 class OneShotResponseDropProxy:
@@ -1797,7 +1876,39 @@ def assert_typed_leader_hint(
 
 def assert_caught_up(leader_id, follower_id, leader, follower):
     if leader_id == follower_id:
-        raise VerificationError("catch-up target must differ from the current leader")
+        if follower["local_role"] != "leader":
+            raise VerificationError(
+                "catch-up target is named leader without the leader role"
+            )
+        target_log = follower["last_log_index"]
+        if target_log is None or any(
+            value != target_log
+            for value in (
+                follower["local_committed_index"],
+                follower["cluster_committed_index"],
+                follower["last_applied_index"],
+            )
+        ):
+            raise VerificationError(
+                "promoted catch-up target has divergent log, commit, or apply progress"
+            )
+        unmatched = [
+            item
+            for item in follower["replication"]
+            if item["matched_log_index"] != target_log
+        ]
+        if unmatched:
+            raise VerificationError(
+                "promoted catch-up target has incomplete peer replication progress"
+            )
+        return {
+            "leader_id": leader_id,
+            "target_node_id": follower_id,
+            "target_became_leader": True,
+            "leader": leader,
+            "follower": follower,
+            "target_replication": follower["replication"],
+        }
     if leader["local_role"] != "leader":
         raise VerificationError("catch-up source is not the diagnosed leader")
     if follower["local_role"] == "leader":
@@ -1894,8 +2005,9 @@ def wait_for_data_leader(
                     node,
                     f"{label}-node-{node_id}",
                 )
-                leader = data_group(diagnostics)["current_leader"]
-                if leader is not None:
+                group = data_group(diagnostics)
+                leader = group["current_leader"]
+                if leader is not None and group["local_role"] != "shutdown":
                     leaders.append(leader)
             if leaders and len(set(leaders)) == 1 and leaders[0] != previous:
                 return leaders[0]
@@ -2909,7 +3021,10 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
         data_refusal = (
             quorum_detail.get("group") == "data"
             and quorum_detail.get("outcome") == "ambiguous_commit"
-            and quorum_detail.get("request", {}).get("sequence") == 901
+            and quorum_detail.get("request", {})
+            .get("request", {})
+            .get("sequence")
+            == 901
         )
         control_route_refusal = (
             quorum_detail.get("group") == "control"
@@ -2954,12 +3069,19 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
             "quorum loss fetch",
         )
         fetch_detail = minority_fetch.get("error", {}).get("detail", {})
-        if (
-            minority_fetch.get("ok") is not False
-            or minority_fetch.get("error", {}).get("code") != "quorum_unavailable"
-            or fetch_detail.get("group") not in ("control", "data")
-            or fetch_detail.get("outcome") != "not_applicable"
-            or fetch_detail.get("request") is not None
+        fetch_code = minority_fetch.get("error", {}).get("code")
+        fetch_quorum_refusal = (
+            fetch_code == "quorum_unavailable"
+            and fetch_detail.get("group") in ("control", "data")
+            and fetch_detail.get("outcome") == "not_applicable"
+            and fetch_detail.get("request") is None
+        )
+        fetch_leadership_refusal = (
+            fetch_code == "not_leader"
+            and fetch_detail.get("group") in ("control", "data")
+        )
+        if minority_fetch.get("ok") is not False or not (
+            fetch_quorum_refusal or fetch_leadership_refusal
         ):
             raise VerificationError("minority fetch did not refuse a fresh read")
         minority_receipt = parse_json_output(
@@ -2984,12 +3106,19 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
             "quorum loss receipt",
         )
         receipt_detail = minority_receipt.get("error", {}).get("detail", {})
-        if (
-            minority_receipt.get("ok") is not False
-            or minority_receipt.get("error", {}).get("code") != "quorum_unavailable"
-            or receipt_detail.get("group") not in ("control", "data")
-            or receipt_detail.get("outcome") != "not_applicable"
-            or receipt_detail.get("request") is not None
+        receipt_code = minority_receipt.get("error", {}).get("code")
+        receipt_quorum_refusal = (
+            receipt_code == "quorum_unavailable"
+            and receipt_detail.get("group") in ("control", "data")
+            and receipt_detail.get("outcome") == "not_applicable"
+            and receipt_detail.get("request") is None
+        )
+        receipt_leadership_refusal = (
+            receipt_code == "not_leader"
+            and receipt_detail.get("group") in ("control", "data")
+        )
+        if minority_receipt.get("ok") is not False or not (
+            receipt_quorum_refusal or receipt_leadership_refusal
         ):
             raise VerificationError("minority receipt lookup did not refuse a fresh read")
         if not nodes[leader]["server"].is_running():
@@ -3060,6 +3189,10 @@ def run_ls02b_scenario(artifacts, runner, binaries, revision, profile, seed):
             nodes,
             profile["leader_loss_seconds"],
             "ls02b-lost-response-leader",
+        )
+        wait_bootstrap_partition_ready(
+            "ls02b-application-before-lost-response",
+            nodes[first_leader_id]["endpoint"],
         )
         response_proxy = OneShotResponseDropProxy(
             free_port(),
@@ -5650,7 +5783,523 @@ def cleanup_success_data(artifacts, succeeded):
     )
 
 
+def run_ls06_scenario(
+    artifacts, runner, binaries, revision, profile, seed, b7_snapshot=False
+):
+    rng = random.Random(seed)
+    cluster = deterministic_uuid(rng)
+    stream = deterministic_uuid(rng)
+    session = deterministic_uuid(rng)
+    used_ports = set()
+    configs = {}
+    nodes = {}
+    resource_sampler = None
+    resource_phases = []
+
+    def allocate_port():
+        value = free_port()
+        while value in used_ports:
+            value = free_port()
+        used_ports.add(value)
+        return value
+
+    for node_id in (1, 2, 3):
+        public_port = allocate_port()
+        peer_port = allocate_port()
+        configs[node_id] = {
+            "public_address": f"127.0.0.1:{public_port}",
+            "peer_address": f"127.0.0.1:{peer_port}",
+            "endpoint": f"http://127.0.0.1:{public_port}",
+            "peer_uri": f"http://127.0.0.1:{peer_port}",
+            "data_dir": artifacts / "scratch" / "success" / f"ls06-node-{node_id}",
+        }
+
+    def start_node(node_id, suffix, snapshot_delay_ms=0):
+        config = configs[node_id]
+        server = OwnedServer(
+            binaries["light-streamd"],
+            config["data_dir"],
+            artifacts / "node-logs",
+            f"ls06-node-{node_id}-{suffix}",
+            node_id=node_id,
+            public_address=config["public_address"],
+            peer_address=config["peer_address"],
+            advertise_public_uri=config["endpoint"],
+            advertise_peer_uri=config["peer_uri"],
+            peer_routes={
+                target: configs[target]["peer_uri"]
+                for target in (1, 2, 3)
+                if target != node_id
+            },
+            max_data_groups=1,
+            max_streams=1,
+            max_partitions_per_stream=1,
+            verification_delay_group_id=2 if snapshot_delay_ms else None,
+            verification_delay_ms=snapshot_delay_ms,
+        )
+        nodes[node_id] = {**config, "server": server}
+
+    def running_endpoints(exclude=None):
+        return [
+            nodes[node_id]["endpoint"]
+            for node_id in sorted(nodes)
+            if node_id != exclude and nodes[node_id]["server"].is_running()
+        ]
+
+    result = {
+        "revision": revision,
+        "cluster_id": cluster,
+        "stream_id": stream,
+        "scenario": "b7-snapshot" if b7_snapshot else "snapshot-recovery",
+    }
+    try:
+        for node_id in (1, 2, 3):
+            start_node(node_id, "initial")
+        write_json(
+            artifacts / "topology.json",
+            {
+                "revision": revision,
+                "nodes": {
+                    str(node_id): nodes[node_id]["server"].description()
+                    for node_id in sorted(nodes)
+                },
+            },
+        )
+        bootstrap = cli_endpoint_command(
+            binaries["light-streamctl"], nodes[1]["endpoint"], deadline_ms=30000
+        ) + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream,
+            "--stream-name",
+            "bootstrap",
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            bootstrap.extend(
+                [
+                    "--member",
+                    (
+                        f"{node_id},{nodes[node_id]['endpoint']},"
+                        f"{nodes[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        runner.run(bootstrap, "ls06-bootstrap", timeout=45)
+        result["membership"] = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls06-active",
+        )
+        leader = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["leader_loss_seconds"] + 10,
+            "ls06-leader",
+        )
+        follower = next(node_id for node_id in (1, 2, 3) if node_id != leader)
+        result["leader_node_id"] = leader
+        result["lagging_follower_node_id"] = follower
+        runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"],
+                nodes[leader]["endpoint"],
+                seeds=running_endpoints(exclude=leader),
+                deadline_ms=15000,
+            )
+            + [
+                "publish",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--principal",
+                f"verify-ls06-{seed}",
+                "--session",
+                session,
+                "--sequence",
+                "1",
+                "--payload",
+                "ready",
+            ],
+            "ls06-operational-readiness",
+            timeout=20,
+        )
+        nodes[follower]["server"].stop()
+        if b7_snapshot:
+            target_bytes = int(
+                os.environ.get("LIGHT_STREAM_B7_RETAINED_BYTES", 1024 * 1024 * 1024)
+            )
+            if target_bytes < 1024 * 1024 * 1024 and not os.environ.get(
+                "LIGHT_STREAM_B7_ALLOW_SMALL"
+            ):
+                raise VerificationError("B7 requires at least 1 GiB retained per group")
+            payload_count = (target_bytes + 1024 * 1024 - 1) // (1024 * 1024)
+            required_free = target_bytes * 8 + 5 * 1024 * 1024 * 1024
+            free_before = shutil.disk_usage(ROOT).free
+            if free_before < required_free:
+                raise VerificationError(
+                    f"B7 requires {required_free} free bytes, observed {free_before}"
+                )
+            result["b7_plan"] = {
+                "target_retained_bytes": target_bytes,
+                "record_bytes": 1024 * 1024,
+                "record_count": payload_count,
+                "required_free_bytes": required_free,
+                "free_bytes_before": free_before,
+                "build_deadline_seconds": 1800,
+                "transfer_deadline_seconds": 1800,
+                "install_deadline_seconds": 1800,
+                "independent_host": "BLOCKED",
+            }
+            write_json(artifacts / "ls06" / "b7-plan.json", result["b7_plan"])
+            resource_sampler = ProcessRssSampler(artifacts, nodes)
+        else:
+            payload_count = 4
+
+        reusable_payload = artifacts / "samples" / "ls06-snapshot-record.bin"
+        reusable_payload.parent.mkdir(parents=True, exist_ok=True)
+        expected_hashes = [hashlib.sha256(b"ready").hexdigest()]
+        publish_receipts = []
+        fixture_seed = hashlib.sha256(
+            f"light-stream-ls06-{seed}".encode()
+        ).digest()
+        for index in range(payload_count):
+            payload = hashlib.shake_256(
+                fixture_seed + index.to_bytes(8, "big")
+            ).digest(1024 * 1024)
+            reusable_payload.write_bytes(payload)
+            expected_hashes.append(hashlib.sha256(payload).hexdigest())
+            sequence = index + 2
+            publish = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[leader]["endpoint"],
+                        seeds=running_endpoints(exclude=leader),
+                        deadline_ms=30000,
+                    )
+                    + [
+                        "publish",
+                        "--cluster-id",
+                        cluster,
+                        "--stream-id",
+                        stream,
+                        "--principal",
+                        f"verify-ls06-{seed}",
+                        "--session",
+                        session,
+                        "--sequence",
+                        str(sequence),
+                        "--file",
+                        reusable_payload,
+                    ],
+                    f"ls06-publish-behind-follower-{sequence}",
+                    timeout=35,
+                ),
+                "LS06 publish behind follower",
+            )
+            if not b7_snapshot or index in (0, payload_count - 1):
+                publish_receipts.append(publish["receipt"])
+            if b7_snapshot and (index + 1) % 128 == 0:
+                resource_phases.append(
+                    {
+                        "phase": f"load-{index + 1}",
+                        "allocated_bytes": {
+                            str(node_id): allocated_tree_bytes(configs[node_id]["data_dir"])
+                            for node_id in sorted(configs)
+                        },
+                        "free_bytes": shutil.disk_usage(ROOT).free,
+                    }
+                )
+        if b7_snapshot:
+            settle_started = time.monotonic()
+            time.sleep(60)
+            result["b7_plan"]["post_load_settle_seconds"] = time.monotonic() - settle_started
+            resource_sampler.start()
+            time.sleep(1)
+            calibration = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[leader]["endpoint"],
+                        deadline_ms=1800000,
+                    )
+                    + [
+                        "maintenance",
+                        "snapshot",
+                        "--cluster-id",
+                        cluster,
+                        "--group-id",
+                        "2",
+                    ],
+                    "ls06-b7-calibration-snapshot",
+                    timeout=1810,
+                ),
+                "LS06 B7 calibration snapshot",
+            )["snapshot"]
+            peaks = resource_sampler.peak_by_node()
+            peak_deltas = resource_sampler.peak_delta_by_node()
+            baseline = {}
+            for sample in resource_sampler.samples:
+                for node_id, value in sample["rss_bytes"].items():
+                    baseline.setdefault(node_id, value)
+            peak_delta = max(peak_deltas.values(), default=0)
+            locked_rss_delta = peak_delta + max(
+                peak_delta // 4, 128 * 1024 * 1024
+            )
+            result["b7_calibration"] = {
+                "snapshot": calibration,
+                "baseline_rss_bytes": baseline,
+                "peak_rss_bytes": peaks,
+                "peak_rss_delta_by_node": peak_deltas,
+                "peak_rss_delta_bytes": peak_delta,
+                "locked_rss_delta_bytes": locked_rss_delta,
+            }
+            write_json(
+                artifacts / "ls06" / "b7-calibration.json",
+                result["b7_calibration"],
+            )
+            result["b7_plan"]["locked_rss_delta_bytes"] = locked_rss_delta
+            write_json(artifacts / "ls06" / "b7-plan.json", result["b7_plan"])
+        snapshot = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[leader]["endpoint"],
+                    deadline_ms=1800000 if b7_snapshot else 60000,
+                )
+                + [
+                    "maintenance",
+                    "snapshot",
+                    "--cluster-id",
+                    cluster,
+                    "--group-id",
+                    "2",
+                    "--purge",
+                ],
+                "ls06-snapshot-and-purge",
+                timeout=1810 if b7_snapshot else 65,
+            ),
+            "LS06 snapshot and purge",
+        )["snapshot"]
+        if snapshot["purged_index"] != snapshot["snapshot_index"]:
+            raise VerificationError("LS06 purge did not stop at the completed snapshot")
+
+        start_node(follower, "interrupted", snapshot_delay_ms=5 if b7_snapshot else 50)
+        incoming = (
+            configs[follower]["data_dir"] / "groups" / "2" / "snapshots" / "incoming"
+        )
+        interrupted_offset = None
+        interruption_deadline = time.monotonic() + (600 if b7_snapshot else 20)
+        interrupt_after = 64 * 1024 * 1024 if b7_snapshot else 1024 * 1024
+        while time.monotonic() < interruption_deadline:
+            for progress_path in incoming.glob("*.progress") if incoming.exists() else []:
+                try:
+                    offset = json.loads(progress_path.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if isinstance(offset, int) and offset >= interrupt_after:
+                    interrupted_offset = offset
+                    break
+            if interrupted_offset is not None:
+                break
+            time.sleep(0.001)
+        if interrupted_offset is None:
+            raise VerificationError("LS06 did not stage an acknowledged snapshot chunk")
+        nodes[follower]["server"].kill()
+        result["interrupted_durable_offset"] = interrupted_offset
+
+        start_node(follower, "restarted")
+        catch_up = wait_for_follower_catch_up(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            follower,
+            1800 if b7_snapshot else profile["write_readiness_seconds"] + 30,
+            "ls06-snapshot-catch-up",
+        )
+        fetch_deadline = time.monotonic() + profile["write_readiness_seconds"] + 10
+        fetch_attempt = 0
+        fetched = None
+        while time.monotonic() < fetch_deadline:
+            fetch_attempt += 1
+            value = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[follower]["endpoint"],
+                        seeds=running_endpoints(exclude=follower),
+                        deadline_ms=3000,
+                    )
+                    + [
+                        "fetch",
+                        "--cluster-id",
+                        cluster,
+                        "--stream-id",
+                        stream,
+                        "--offset",
+                        "0",
+                        "--limit",
+                        "8",
+                    ],
+                    f"ls06-fetch-after-snapshot-{fetch_attempt}",
+                    expected_codes=(0, 5),
+                    timeout=8,
+                ),
+                "LS06 fetch after snapshot",
+            )
+            if value.get("ok") is True:
+                fetched = value
+                break
+            time.sleep(0.05)
+        if fetched is None:
+            raise VerificationError("LS06 application reads did not recover after snapshot")
+        expected_online = [b"ready"]
+        if not b7_snapshot:
+            expected_online.extend(
+                hashlib.shake_256(
+                    fixture_seed + index.to_bytes(8, "big")
+                ).digest(1024 * 1024)
+                for index in range(payload_count)
+            )
+        if not b7_snapshot and payloads_from_page(fetched) != expected_online:
+            raise VerificationError("LS06 snapshot catch-up changed retained record bytes")
+        nodes[follower]["server"].stop()
+        offline = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-stream-testkit"],
+                    "inspect-data-group",
+                    "--path",
+                    configs[follower]["data_dir"] / "groups" / "2",
+                    "--cluster-id",
+                    cluster,
+                    "--group-id",
+                    "2",
+                    "--stream-id",
+                    stream,
+                    "--record-limit",
+                    str(payload_count + 1),
+                ],
+                "ls06-offline-follower-payloads",
+                timeout=30,
+            ),
+            "LS06 offline follower payloads",
+        )
+        observed_hashes = [record["sha256"] for record in offline["records"]]
+        if observed_hashes != expected_hashes:
+            raise VerificationError(
+                "LS06 recovered follower storage differs from the byte ledger"
+            )
+        incoming_files = (
+            sorted(path.name for path in incoming.iterdir()) if incoming.exists() else []
+        )
+        if incoming_files:
+            raise VerificationError("LS06 completed snapshot staging files remain")
+        receiver_log = (
+            artifacts / "node-logs" / f"ls06-node-{follower}-restarted.stderr.log"
+        )
+        installs = []
+        resumes = []
+        for line in receiver_log.read_text().splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if value.get("event") == "snapshot_install_completed":
+                installs.append(value)
+            if value.get("event") == "snapshot_transfer_began":
+                resumes.append(value)
+        if len(installs) != 1 or installs[0].get("chunk_count", 0) < 2:
+            raise VerificationError(
+                "LS06 receiver evidence does not prove a multi-chunk snapshot install"
+            )
+        if not any(
+            value.get("durable_offset", 0) >= interrupted_offset for value in resumes
+        ):
+            raise VerificationError(
+                "LS06 receiver did not resume from the acknowledged durable offset"
+            )
+        result.update(
+            {
+                "publish_receipts": publish_receipts,
+                "payload_bytes": payload_count * 1024 * 1024,
+                "payload_sha256": expected_hashes[1:],
+                "snapshot": snapshot,
+                "snapshot_install": installs[0],
+                "snapshot_resume": resumes,
+                "catch_up": catch_up,
+                "offline_follower_records": offline["records"],
+                "incoming_files_after_success": incoming_files,
+                "retained_records_verified": payload_count + 1,
+                "verdict": "PASS",
+            }
+        )
+        if b7_snapshot:
+            final_peaks = resource_sampler.peak_by_node()
+            final_deltas = resource_sampler.peak_delta_by_node()
+            resource_sampler.stop()
+            resource_sampler = None
+            if max(final_deltas.values(), default=0) > result["b7_plan"][
+                "locked_rss_delta_bytes"
+            ]:
+                raise VerificationError("B7 exceeded the locked RSS delta")
+            result["b7_resources"] = {
+                "peak_rss_bytes": final_peaks,
+                "peak_rss_delta_by_node": final_deltas,
+                "disk_phases": resource_phases,
+                "free_bytes_after": shutil.disk_usage(ROOT).free,
+            }
+            write_json(artifacts / "ls06" / "b7-recovery.json", result)
+        else:
+            write_json(artifacts / "ls06" / "snapshot-recovery.json", result)
+    finally:
+        if resource_sampler is not None:
+            resource_sampler.stop()
+        for node_id in sorted(nodes):
+            try:
+                nodes[node_id]["server"].stop()
+            except VerificationError:
+                pass
+
+
 def run_selected(args, artifacts, runner, binaries, revision, profile):
+    if args.phase == "LS06" or args.suite == "ls06-e2e":
+        runner.run(
+            [
+                "cargo",
+                "test",
+                "-p",
+                "light-stream-storage",
+                "-p",
+                "light-stream-server",
+                "-p",
+                "light-stream-client",
+            ],
+            "ls06-targeted-tests",
+            timeout=900,
+        )
+        run_ls06_scenario(
+            artifacts,
+            runner,
+            binaries,
+            revision,
+            profile,
+            args.seed,
+            b7_snapshot=args.scenario == "b7-snapshot",
+        )
+        return
     if args.phase == "LS05" or args.suite == "ls05-e2e":
         runner.run(
             [
@@ -5781,6 +6430,7 @@ def parse_args():
         "LS03",
         "LS04",
         "LS05",
+        "LS06",
     ):
         parser.error(f"unknown phase {args.phase!r}")
     if args.suite is not None and args.suite not in (
@@ -5790,6 +6440,7 @@ def parse_args():
         "ls03-e2e",
         "ls04-e2e",
         "ls05-e2e",
+        "ls06-e2e",
     ):
         parser.error(f"unknown suite {args.suite!r}")
     if args.scenario not in KNOWN_SCENARIOS:
@@ -5886,6 +6537,21 @@ class VerifierHelperTests(unittest.TestCase):
         self.assertEqual(2, assert_caught_up(1, 2, leader, follower)["target_node_id"])
         with self.assertRaises(VerificationError):
             assert_caught_up(1, 1, leader, follower)
+        promoted = {
+            "local_role": "leader",
+            "last_log_index": 12,
+            "local_committed_index": 12,
+            "cluster_committed_index": 12,
+            "last_applied_index": 12,
+            "replication": [
+                {"target_node_id": 1, "matched_log_index": 12},
+                {"target_node_id": 2, "matched_log_index": 12},
+                {"target_node_id": 3, "matched_log_index": 12},
+            ],
+        }
+        self.assertTrue(
+            assert_caught_up(2, 2, promoted, promoted)["target_became_leader"]
+        )
         leader["replication"][0]["matched_log_index"] = 11
         with self.assertRaises(VerificationError):
             assert_caught_up(1, 2, leader, follower)

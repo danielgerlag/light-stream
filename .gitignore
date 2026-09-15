@@ -13,5 +13,13 @@ __pycache__/
 /artifacts/**/source/**
 !/artifacts/**/source/
 !/artifacts/**/source/fingerprints.json
+/artifacts/**/commands.jsonl
+/artifacts/**/cleanup.json
+/artifacts/**/resources/
 /artifacts/**/worktree-backup/
 /evidence/**/source/
+/artifacts/LS06/*
+!/artifacts/LS06/checkpoint.json
+!/artifacts/LS06/b7-1g-4/
+!/artifacts/LS06/skill-banked-install-final/
+!/artifacts/LS06/ls02b-regression-banked-final/

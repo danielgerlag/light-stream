@@ -37,6 +37,10 @@ enum Command {
     Health,
     Capabilities,
     Diagnostics,
+    Maintenance {
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
     Cluster {
         #[command(subcommand)]
         command: ClusterCommand,
@@ -63,6 +67,18 @@ enum Command {
     PublishProbe {
         #[arg(long)]
         payload: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MaintenanceCommand {
+    Snapshot {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        group_id: u64,
+        #[arg(long)]
+        purge: bool,
     },
 }
 
@@ -408,6 +424,26 @@ async fn run(args: Args) -> Result<serde_json::Value, ClientError> {
                 "ok": true,
                 "endpoint": endpoint,
                 "diagnostics": diagnostics,
+            }))
+        }
+        Command::Maintenance {
+            command:
+                MaintenanceCommand::Snapshot {
+                    cluster_id,
+                    group_id,
+                    purge,
+                },
+        } => {
+            let client =
+                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let snapshot = client
+                .snapshot_group(cluster_id.parse::<ClusterId>()?, group_id, purge)
+                .await?;
+            Ok(json!({
+                "command": "maintenance-snapshot",
+                "ok": true,
+                "endpoint": endpoint,
+                "snapshot": snapshot,
             }))
         }
         Command::Cluster {

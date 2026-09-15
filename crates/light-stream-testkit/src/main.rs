@@ -3,10 +3,18 @@ use std::{path::PathBuf, time::Duration};
 use clap::{Parser, Subcommand};
 use light_stream_client::{Client, default_probe};
 use light_stream_core::{
-    ClusterId, PartitionId, PartitionKey, PrincipalId, ProducerRequestId, ProducerSessionId,
-    PublishBatch, RecordOffset, RequestSequence, StreamId,
+    ClusterId, GroupId, PartitionId, PartitionKey, PrincipalId, ProducerRequestId,
+    ProducerSessionId, PublishBatch, RecordOffset, RequestSequence, StreamId,
+};
+use light_stream_storage::{
+    DEFAULT_RECEIPT_WINDOW, GroupIdentity, GroupKind, GroupStorageBudget, open_data_store,
+};
+use openraft::{
+    EntryPayload,
+    storage::{RaftLogReader, RaftLogStorage, RaftStateMachine},
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, Parser)]
 #[command(name = "light-stream-testkit", version)]
@@ -76,6 +84,18 @@ enum Command {
         deadline_ms: u64,
         #[arg(long)]
         no_retry: bool,
+    },
+    InspectDataGroup {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        group_id: u64,
+        #[arg(long)]
+        stream_id: Option<String>,
+        #[arg(long, default_value_t = 0)]
+        record_limit: u32,
     },
     OracleCheck {
         #[arg(long)]
@@ -262,6 +282,104 @@ async fn run(args: Args) -> Result<serde_json::Value, String> {
                 "endpoint": endpoint,
                 "ok": true,
                 "page": page,
+            }))
+        }
+        Command::InspectDataGroup {
+            path,
+            cluster_id,
+            group_id,
+            stream_id,
+            record_limit,
+        } => {
+            let cluster = cluster_id
+                .parse::<ClusterId>()
+                .map_err(|error| error.to_string())?;
+            let identity = GroupIdentity::new(
+                cluster,
+                GroupId::new(group_id).map_err(|error| error.to_string())?,
+                GroupKind::Data,
+            );
+            let handles = open_data_store(
+                &path,
+                &identity,
+                DEFAULT_RECEIPT_WINDOW,
+                GroupStorageBudget::new(8 * 1024 * 1024, 4 * 1024 * 1024)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            let records = match stream_id {
+                Some(stream_id) => {
+                    let stream = stream_id
+                        .parse::<StreamId>()
+                        .map_err(|error| error.to_string())?;
+                    let partition = PartitionKey::new(stream, PartitionId::new(0));
+                    let mut offset = RecordOffset::new(0);
+                    let mut records = Vec::new();
+                    while records.len() < record_limit as usize {
+                        let remaining = record_limit as usize - records.len();
+                        let page = handles
+                            .reader
+                            .fetch(
+                                cluster,
+                                partition,
+                                offset,
+                                u32::try_from(remaining.min(1024))
+                                    .map_err(|error| error.to_string())?,
+                            )
+                            .map_err(|error| error.to_string())?;
+                        if page.records().is_empty() {
+                            break;
+                        }
+                        records.extend(page.records().iter().map(|record| {
+                            json!({
+                                "offset": record.offset().get(),
+                                "bytes": record.payload().len(),
+                                "sha256": format!("{:x}", Sha256::digest(record.payload())),
+                            })
+                        }));
+                        offset = page.next_offset();
+                    }
+                    records
+                }
+                None => Vec::new(),
+            };
+            let operational_proof = handles
+                .reader
+                .operational_proof()
+                .map_err(|error| error.to_string())?;
+            let mut log = handles.log_store;
+            let mut state = handles.state_machine;
+            let entries = log
+                .get_log_reader()
+                .await
+                .try_get_log_entries(0..u64::MAX)
+                .await
+                .map_err(|error| error.to_string())?;
+            let (applied, membership) = state
+                .applied_state()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(json!({
+                "command": "inspect-data-group",
+                "ok": true,
+                "identity": identity,
+                "applied": applied,
+                "membership": format!("{membership:?}"),
+                "operational_proof": operational_proof,
+                "records": records,
+                "entries": entries.into_iter().map(|entry| {
+                    let command = match entry.payload {
+                        EntryPayload::Blank => "blank".to_owned(),
+                        EntryPayload::Membership(_) => "membership".to_owned(),
+                        EntryPayload::Normal(command) => command.to_string(),
+                    };
+                    json!({
+                        "term": entry.log_id.leader_id.term,
+                        "leader": entry.log_id.leader_id.node_id,
+                        "index": entry.log_id.index,
+                        "command": command,
+                    })
+                }).collect::<Vec<_>>(),
             }))
         }
         Command::OracleCheck {

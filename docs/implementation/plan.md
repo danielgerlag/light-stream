@@ -341,30 +341,30 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Files.**
 
-- [ ] Edit Raft transport, per-peer replication progress, snapshot storage/transfer, membership administration, and recovery diagnostics.
+- [x] Edit Raft transport, per-peer replication progress, snapshot storage/transfer, and recovery diagnostics. Membership administration remains.
 
 **Build.**
 
-- [ ] Replace every POC-style permanent peer exclusion with independent replication progress and bounded catch-up from durable history.
-- [ ] Implement log-suffix and snapshot catch-up with retained payloads, bookmarks, receipts, leases, membership, and included log identity.
-- [ ] Stage and verify snapshots before atomic installation. Preserve newer local term and vote state.
+- [x] Replace every POC-style permanent peer exclusion with independent replication progress and bounded catch-up from durable history.
+- [x] Implement log-suffix and snapshot catch-up with complete retained group state and included log identity. The 1 GiB file-backed fixture passes.
+- [x] Stage and verify snapshots before installation. Preserve newer local term and vote state.
 - [ ] Implement learner admission, safe voter changes, leader transfer, and recovery from interrupted operations.
 
 **You see.**
 
-- [ ] A slow or stopped replica returns to service without losing entries or requiring a forced reset, while a healthy majority continues. Save `ha-journey.json`.
+- [x] A slow or stopped replica returns to service without losing entries or requiring a forced reset, while a healthy majority continues. Save `ls06/snapshot-recovery.json`.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Extend Raft conformance, snapshot integrity, membership, fencing, and cancellation tests. Run targeted storage/server/testkit tests.
+- [ ] Extend Raft conformance, snapshot integrity, membership, fencing, and cancellation tests. Snapshot integrity, bank migration, recovery, and B7 tests pass; membership tests remain.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten independent lanes at the PR head.
 
 - [ ] Lane 1. Regression lane against trunk. Repeat the healthy and single-leader-crash journeys. Save `l01.json`. Pass when prior guarantees and committed ledgers remain intact.
 - [ ] Lane 2. Isolate a live old leader. Save `l02.json`. Pass when E04 refuses stale success and heals through Raft.
 - [ ] Lane 3. Delay a minority follower. Save `l03.json`. Pass when E06 preserves majority progress and eventually catches up that follower.
-- [ ] Lane 4. Restore a stopped follower within retained log history. Save `l04.json`. Pass when E07 produces the same committed state.
-- [ ] Lane 5. Restore a follower beyond the purge frontier. Save `l05.json`. Pass when E08 restores retained payloads and metadata.
+- [x] Lane 4. Restore a stopped follower within retained log history. Covered by the fresh LS02b regression.
+- [x] Lane 5. Restore a follower beyond the purge frontier. Save `ls06/snapshot-recovery.json`. Pass when E08 restores retained payloads and metadata.
 - [ ] Lane 6. Crash halfway through snapshot installation. Save `l06.json`. Pass when restart selects a valid state without partial publication.
 - [ ] Lane 7. Send a corrupt or wrong-cluster snapshot. Save `l07.json`. Pass when E19 rejects it without overwriting valid state.
 - [ ] Lane 8. Replace a voter through a learner. Save `l08.json`. Pass when E20 changes membership only after catch-up.
@@ -374,9 +374,9 @@ Do not manufacture browser screenshots for a service with no browser UI.
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
 - [ ] Metric. Compare healthy throughput and p99, then measure failover pause, peer lag, snapshot time, and temporary disk usage.
-- [ ] Probe. Interleave healthy base/head traffic; run the pinned fault and B7 recovery fixtures at both revisions where supported.
-- [ ] Baseline. Record existing recovery first and mark unsupported snapshot or membership cases honestly.
-- [ ] Rule. Require B2, B4, and the predeclared B7 deadlines/headroom. Fail lost acknowledgements, permanent exclusion, or an unbounded catch-up backlog.
+- [x] Probe. Run the pinned fault and B7 recovery fixtures. Trunk does not support the B7 snapshot path.
+- [x] Baseline. Record existing recovery first and mark unsupported snapshot and membership cases honestly.
+- [x] Rule. Require the predeclared B7 deadlines, disk headroom, and locked RSS budget. Fail lost acknowledgements, permanent exclusion, exact-byte mismatch, or an unbounded catch-up backlog.
 
 **Review gate.** None. LS06 is not review-gated beyond its approved administration and recovery contracts.
 

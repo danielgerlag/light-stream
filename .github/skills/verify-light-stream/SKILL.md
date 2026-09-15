@@ -82,6 +82,27 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS05/skill-retention-replay-final-3
 ```
 
+For the LS06 snapshot recovery journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS06 \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS06/skill-banked-install-final
+```
+
+For the LS06 B7 recovery journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS06 \
+  --scenario b7-snapshot \
+  --profile local \
+  --security local-insecure \
+  --artifacts artifacts/LS06/b7-1g-4
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -97,5 +118,9 @@ For LS03, inspect `partition-journey.json` and `l02.json` through `l10.json`. Co
 For LS04, inspect `bookmark-journey.json` and `l01.json` through `l10.json`. Confirm atomic publish-plus-bookmark, exact resume, response-loss retry with one bookmark ID, backdated publication order, stable pagination, terminal deletion and name reuse, independent stream cursor vectors, a last-100 lookup below 100 ms over 10,000 records, and full-cluster restart. `l10.json` records partial-node failover as `DEFERRED_LS06`.
 
 For LS05, inspect `retention-journey.json` and `l01.json` through `l10.json`. Confirm that bookmark metadata survives payload expiry, ordinary fetch returns `cursor_expired`, protected replay returns the exact admitted range, renewal and release survive dropped responses, idle maintenance expires abandoned leases, reclaim work stays bounded, and full restart preserves floors and lease lifecycle. Treat `raft_only_bytes` as retained by the Raft log. Filesystem payload reclamation and partial-node recovery remain `DEFERRED_LS06`.
+
+For LS06, inspect `ls06/snapshot-recovery.json`. Confirm that a stopped follower falls behind a completed snapshot and purge, crashes after an acknowledged chunk, resumes from the durable offset, reaches the leader's committed and applied index, preserves exact record bytes, and removes completed staging files.
+
+For B7, inspect `ls06/b7-plan.json`, `ls06/b7-calibration.json`, and `ls06/b7-recovery.json`. Confirm at least 1 GiB retained, the locked post-load RSS budget, the 64 MiB interrupted offset, the resumed 1,026-chunk transfer, all 1,025 records verified from the stopped repaired node, and successful scratch cleanup. Keep independent-host verification `BLOCKED`.
 
 Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report secured mode as `UNSUPPORTED_LS08`. Report independent-host verification as `BLOCKED`.

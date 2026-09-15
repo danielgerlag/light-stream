@@ -160,6 +160,22 @@ Logical expiry does not imply physical payload deletion. Retained Raft entries s
 
 Legacy record values migrate to schema version 2 before the store opens. The migration adds payload length and cumulative partition bytes in bounded synchronous batches.
 
+## LS06 recovery checkpoint
+
+Each group requires a durable operational probe from the current leader term. Reads use `ReadIndex` when it completes promptly and otherwise commit another operational probe as the linearization barrier. Request handling can adopt an already committed proof synchronously, so recovery does not depend on the background probe task winning a scheduling race.
+
+Replicated groups keep automatic snapshots disabled. The maintenance API builds a complete snapshot, waits for its covered index, and purges only through that index. A follower behind the purge frontier receives the artifact through dedicated begin, chunk, and finish RPCs.
+
+The receiver persists an intent, partial artifact, and independently synced progress offset. Restart truncates any unacknowledged tail and resumes from the last acknowledged byte. The receiver validates the artifact digest, identity, vote relation, and local committed index before calling Openraft's assertion-bearing install path.
+
+Snapshot artifacts and payload values use checksummed binary framing instead of nested JSON byte arrays. In the local LS06 recovery fixture, 4 MiB of random payload produced a 4.2 MiB artifact rather than the previous 44.9 MiB artifact.
+
+Openraft, the snapshot sender, and receiver installation exchange an immutable `SnapshotArtifact` backed by an open file. Current snapshot bytes live in content-addressed files, and RocksDB stores a small descriptor. Existing inline snapshots migrate on open. The sender performs bounded positional reads, and receiver finish hashes the staged file without `read_to_end`.
+
+Snapshot construction streams ordered state and payload records into `LSNP0003`. Installation streams records into the inactive `ls_v2_state_a` or `ls_v2_state_b` column family with byte-bounded RocksDB batches. One synchronous metadata batch publishes the new bank and snapshot descriptor. Readers select one bank through the storage boundary. Legacy state migrates to bank A before normal startup.
+
+The local B7 run retained exactly 1 GiB, built a 1,075,598,548-byte artifact, interrupted transfer at 64 MiB, resumed and installed 1,026 chunks, and verified 1,025 records from the stopped repaired node. The repaired-node RSS delta was 138,264,576 bytes under a locked 178,274,304-byte budget. Independent-host capacity remains blocked. Learner replacement and durable leader-transfer administration remain pending.
+
 ## Rejected combinations
 
 Do not combine the 0.10 adapter with 0.9 method signatures or snapshot semantics.

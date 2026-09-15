@@ -663,4 +663,36 @@ impl LightStream for PublicApi {
             per_group_write_buffer_bytes: diagnostic.per_group_write_buffer_bytes as u64,
         }))
     }
+
+    async fn snapshot_group(
+        &self,
+        request: Request<v1::SnapshotGroupRequest>,
+    ) -> Result<Response<v1::SnapshotGroupResponse>, Status> {
+        let request = request.into_inner();
+        let result = match request.cluster_id.parse::<light_stream_core::ClusterId>() {
+            Ok(cluster) => {
+                self.cluster
+                    .snapshot_group(cluster, request.group_id, request.purge)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        Ok(Response::new(match result {
+            Ok(snapshot) => v1::SnapshotGroupResponse {
+                result: Some(v1::snapshot_group_response::Result::Success(
+                    v1::SnapshotGroupResult {
+                        group_id: snapshot.group_id,
+                        snapshot_index: snapshot.snapshot_index,
+                        purged: snapshot.purged_index.is_some(),
+                        purged_index: snapshot.purged_index.unwrap_or_default(),
+                    },
+                )),
+            },
+            Err(error) => v1::SnapshotGroupResponse {
+                result: Some(v1::snapshot_group_response::Result::Error(
+                    domain_error_to_wire(&error),
+                )),
+            },
+        }))
+    }
 }

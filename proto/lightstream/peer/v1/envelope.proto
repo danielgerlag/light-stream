@@ -20,10 +20,46 @@ message PeerResponse {
   PeerEnvelope envelope = 1;
 }
 
+message SnapshotIdentity {
+  uint32 protocol_version = 1;
+  string cluster_id = 2;
+  uint64 group_id = 3;
+  uint64 sender_node_id = 4;
+  uint64 target_node_id = 5;
+  string transfer_id = 6;
+}
+
+message SnapshotBeginRequest {
+  SnapshotIdentity identity = 1;
+  bytes vote_json = 2;
+  bytes meta_json = 3;
+  uint64 byte_len = 4;
+  bytes sha256 = 5;
+}
+
+message SnapshotChunkRequest {
+  SnapshotIdentity identity = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  uint32 crc32 = 4;
+}
+
+message SnapshotFinishRequest {
+  SnapshotIdentity identity = 1;
+}
+
+message SnapshotProgressResponse {
+  uint64 durable_offset = 1;
+  bytes response_json = 2;
+}
+
 service PeerService {
   rpc AppendEntries(PeerRequest) returns (PeerResponse);
   rpc Vote(PeerRequest) returns (PeerResponse);
   rpc PreVote(PeerRequest) returns (PeerResponse);
   rpc PrepareJoin(PeerRequest) returns (PeerResponse);
   rpc Activate(PeerRequest) returns (PeerResponse);
+  rpc BeginSnapshot(SnapshotBeginRequest) returns (SnapshotProgressResponse);
+  rpc PutSnapshotChunk(SnapshotChunkRequest) returns (SnapshotProgressResponse);
+  rpc FinishSnapshot(SnapshotFinishRequest) returns (SnapshotProgressResponse);
 }

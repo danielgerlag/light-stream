@@ -1,0 +1,107 @@
+{
+  "proxies": [
+    {
+      "counters": {
+        "accepted_connections": 311,
+        "client_to_upstream_bytes": 225407,
+        "delayed_chunks": 212,
+        "dropped_bytes": 0,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 26713
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:56303",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": false,
+      "upstream": "http://127.0.0.1:56300"
+    },
+    {
+      "counters": {
+        "accepted_connections": 289,
+        "client_to_upstream_bytes": 294256,
+        "delayed_chunks": 0,
+        "dropped_bytes": 109576,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 36472
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:56304",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 3,
+      "thread_alive": false,
+      "upstream": "http://127.0.0.1:56302"
+    },
+    {
+      "counters": {
+        "accepted_connections": 117,
+        "client_to_upstream_bytes": 110636,
+        "delayed_chunks": 152,
+        "dropped_bytes": 0,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 10674
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:56305",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": false,
+      "upstream": "http://127.0.0.1:56298"
+    },
+    {
+      "counters": {
+        "accepted_connections": 107,
+        "client_to_upstream_bytes": 94487,
+        "delayed_chunks": 156,
+        "dropped_bytes": 10640,
+        "mode_changes": 4,
+        "upstream_to_client_bytes": 13505
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:56306",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 3,
+      "thread_alive": false,
+      "upstream": "http://127.0.0.1:56302"
+    },
+    {
+      "counters": {
+        "accepted_connections": 147,
+        "client_to_upstream_bytes": 150694,
+        "delayed_chunks": 0,
+        "dropped_bytes": 18446,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 14722
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:56307",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 1,
+      "thread_alive": false,
+      "upstream": "http://127.0.0.1:56298"
+    },
+    {
+      "counters": {
+        "accepted_connections": 138,
+        "client_to_upstream_bytes": 103630,
+        "delayed_chunks": 0,
+        "dropped_bytes": 16459,
+        "mode_changes": 4,
+        "upstream_to_client_bytes": 13287
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:56308",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 2,
+      "thread_alive": false,
+      "upstream": "http://127.0.0.1:56300"
+    }
+  ],
+  "stop_errors": []
+}

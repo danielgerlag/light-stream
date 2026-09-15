@@ -1,19 +1,22 @@
 mod retention;
+mod snapshot;
 pub use retention::ClockObservation;
 use retention::{
     AdmissionState, LeaseBudget, PartitionRetentionState, RetentionLimits, SafeLeaseClock, admit,
     advance_floor, lease_is_effectively_active,
 };
+pub use snapshot::{SnapshotArtifact, SnapshotDigest};
+use snapshot::{SnapshotCatalog, SnapshotRecord, StoredArtifactDescriptor, decode_snapshot_v3};
 
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeSet, VecDeque},
     fmt::{self, Debug},
     fs, io,
     marker::PhantomData,
     ops::{Bound, RangeBounds},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -25,11 +28,11 @@ use light_stream_core::{
     BootstrapResult, BootstrapSpec, ByteCount, CatalogRequestId, ClusterId, CommittedBookmark,
     CommittedCursor, CommittedRecord, CommittedRecordRange, CommittedStreamBookmark,
     CreateStreamSpec, DomainError, FetchPage, GroupId, LeaseDeadline, LeaseRelease, LeaseRenewal,
-    MutationRequestId, PartitionId, PartitionKey, PartitionPlacement, PartitionRoute,
-    ProducerRequestId, PublishBatch, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId,
-    ReplayLeaseRequest, RetentionRequest, RetentionResult, RetentionStatus, StreamBookmarkPage,
-    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
-    StreamName,
+    MutationRequestId, NodeId, OperationalProof, PartitionId, PartitionKey, PartitionPlacement,
+    PartitionRoute, ProducerRequestId, PublishBatch, PublishReceipt, RecordOffset, ReplayLease,
+    ReplayLeaseId, ReplayLeaseRequest, RetentionRequest, RetentionResult, RetentionStatus,
+    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
+    StreamLifecycle, StreamName,
 };
 use openraft::{
     BasicNode, EntryPayload,
@@ -67,19 +70,24 @@ const CF_RAFT_META: &str = "ls_v1_raft_meta";
 const CF_RAFT_LOG: &str = "ls_v1_raft_log";
 const CF_PAYLOAD: &str = "ls_v1_payload";
 const CF_STATE: &str = "ls_v1_state";
+const CF_STATE_A: &str = "ls_v2_state_a";
+const CF_STATE_B: &str = "ls_v2_state_b";
 const CF_SNAPSHOT: &str = "ls_v1_snapshot";
-const COLUMN_FAMILIES: [&str; 6] = [
+const COLUMN_FAMILIES: [&str; 8] = [
     CF_META,
     CF_RAFT_META,
     CF_RAFT_LOG,
     CF_PAYLOAD,
     CF_STATE,
+    CF_STATE_A,
+    CF_STATE_B,
     CF_SNAPSHOT,
 ];
 
 const KEY_IDENTITY: &[u8] = b"identity";
 const KEY_SCHEMA_VERSION: &[u8] = b"schema-version";
 const KEY_SCHEMA_MIGRATION_CURSOR: &[u8] = b"schema-migration-cursor";
+const KEY_ACTIVE_STATE_BANK: &[u8] = b"active-state-bank";
 const KEY_VOTE: &[u8] = b"vote";
 const KEY_COMMITTED: &[u8] = b"committed";
 const KEY_PURGED: &[u8] = b"purged";
@@ -87,6 +95,8 @@ const KEY_APPLIED: &[u8] = b"applied";
 const KEY_MEMBERSHIP: &[u8] = b"membership";
 const KEY_BOOTSTRAP: &[u8] = b"bootstrap";
 const KEY_CURRENT_SNAPSHOT: &[u8] = b"current";
+const SNAPSHOT_MAGIC: &[u8; 8] = b"LSNP0002";
+const PAYLOAD_MAGIC: &[u8; 8] = b"LSPY0002";
 const KEY_NEXT_OFFSET: &[u8] = b"next-offset";
 const KEY_DATA_GROUP_POOL: &[u8] = b"data-group-pool";
 const KEY_MAX_STREAMS: &[u8] = b"max-streams";
@@ -114,6 +124,7 @@ const STREAM_BOOKMARK_PUBLICATION_PREFIX: &[u8] = b"stream-bookmark/publication/
 const RETENTION_PREFIX: &[u8] = b"retention/";
 const KEY_LEASE_CLOCK: &[u8] = b"lease-clock";
 const KEY_LEASE_BUDGET: &[u8] = b"lease-budget";
+const KEY_OPERATIONAL_PROOF: &[u8] = b"operational-proof";
 const LEASE_ID_PREFIX: &[u8] = b"lease/id/";
 const LEASE_REQUEST_PREFIX: &[u8] = b"lease/request/";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -254,6 +265,9 @@ pub enum GroupCommand {
         max_payload_bytes: u64,
         clock: ClockObservation,
     },
+    OperationalProbe {
+        group: GroupId,
+    },
 }
 
 impl fmt::Display for GroupCommand {
@@ -276,6 +290,7 @@ impl fmt::Display for GroupCommand {
             Self::RenewReplayLease { .. } => formatter.write_str("renew-replay-lease"),
             Self::ReleaseReplayLease { .. } => formatter.write_str("release-replay-lease"),
             Self::MaintainRetention { .. } => formatter.write_str("maintain-retention"),
+            Self::OperationalProbe { .. } => formatter.write_str("operational-probe"),
         }
     }
 }
@@ -290,6 +305,7 @@ pub enum ApplyResult {
     Retention(RetentionResult),
     ReplayLease(ReplayLease),
     RetentionStatus(RetentionStatus),
+    OperationalProof(OperationalProof),
     Rejected(DomainError),
     Noop,
 }
@@ -312,6 +328,9 @@ impl fmt::Display for ApplyResult {
                     "retention cursor {}",
                     value.reclaim_cursor().get()
                 )
+            }
+            Self::OperationalProof(value) => {
+                write!(formatter, "operational proof {}", value.log_index())
             }
             Self::Rejected(error) => write!(formatter, "rejected: {error}"),
             Self::Noop => formatter.write_str("noop"),
@@ -360,9 +379,40 @@ impl GroupStorageBudget {
 #[derive(Clone)]
 struct GroupDb {
     db: Arc<DB>,
+    group_root: PathBuf,
     identity: GroupIdentity,
     receipt_window: usize,
     write_lane: Arc<OrderedWriteLane>,
+    state_bank: Arc<RwLock<StateBank>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum StateBank {
+    A,
+    B,
+}
+
+impl StateBank {
+    const fn column_family(self) -> &'static str {
+        match self {
+            Self::A => CF_STATE_A,
+            Self::B => CF_STATE_B,
+        }
+    }
+
+    const fn inactive(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::A,
+        }
+    }
+
+    const fn bit(self) -> u8 {
+        match self {
+            Self::A => 1,
+            Self::B => 2,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -536,18 +586,36 @@ enum ThinCommand {
         max_payload_bytes: u64,
         clock: ClockObservation,
     },
+    OperationalProbe {
+        group: GroupId,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct PayloadOwners {
     raft_log: bool,
+    #[serde(default)]
     applied_state: bool,
-    snapshot_artifact: bool,
+    #[serde(default)]
+    applied_banks: u8,
 }
 
 impl PayloadOwners {
     fn reachable(&self) -> bool {
-        self.raft_log || self.applied_state || self.snapshot_artifact
+        self.raft_log || self.applied_state || self.applied_banks != 0
+    }
+
+    fn applied_in(&self, bank: StateBank) -> bool {
+        self.applied_banks & bank.bit() != 0
+    }
+
+    fn set_applied_in(&mut self, bank: StateBank, applied: bool) {
+        if applied {
+            self.applied_banks |= bank.bit();
+        } else {
+            self.applied_banks &= !bank.bit();
+        }
+        self.applied_state = false;
     }
 }
 
@@ -603,6 +671,129 @@ struct SnapshotBundle {
     meta: GroupSnapshotMeta,
     state: Vec<(Vec<u8>, Vec<u8>)>,
     payloads: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct StoredCurrentSnapshot {
+    artifact: StoredArtifactDescriptor,
+    meta: GroupSnapshotMeta,
+}
+
+fn decode_snapshot_bundle(bytes: &[u8]) -> io::Result<SnapshotBundle> {
+    if let Some(decoded) = decode_snapshot_v3(bytes)? {
+        return Ok(SnapshotBundle {
+            format_version: decoded.storage_format_version,
+            identity: serde_json::from_slice(&decoded.identity_json).map_err(io_error)?,
+            meta: serde_json::from_slice(&decoded.meta_json).map_err(io_error)?,
+            state: decoded.state,
+            payloads: decoded.payloads,
+        });
+    }
+    if !bytes.starts_with(SNAPSHOT_MAGIC) {
+        return decode(bytes);
+    }
+    if bytes.len() < SNAPSHOT_MAGIC.len() + 4 + 32 {
+        return Err(io_error("snapshot artifact is truncated"));
+    }
+    let content_len = bytes.len() - 32;
+    let (content, expected_digest) = bytes.split_at(content_len);
+    if Sha256::digest(content).as_slice() != expected_digest {
+        return Err(io_error("snapshot artifact checksum mismatch"));
+    }
+    let mut cursor = SnapshotCursor::new(content);
+    cursor.expect(SNAPSHOT_MAGIC)?;
+    let format_version = cursor.read_u32()?;
+    let identity = cursor.read_json()?;
+    let meta = cursor.read_json()?;
+    let state = cursor.read_entries()?;
+    let payloads = cursor.read_entries()?;
+    if !cursor.is_finished() {
+        return Err(io_error("snapshot artifact has trailing bytes"));
+    }
+    Ok(SnapshotBundle {
+        format_version,
+        identity,
+        meta,
+        state,
+        payloads,
+    })
+}
+
+fn encode_payload_value(payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(PAYLOAD_MAGIC.len() + payload.len());
+    bytes.extend_from_slice(PAYLOAD_MAGIC);
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+fn decode_payload_value(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    if let Some(payload) = bytes.strip_prefix(PAYLOAD_MAGIC) {
+        Ok(payload.to_vec())
+    } else {
+        decode(bytes)
+    }
+}
+
+struct SnapshotCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SnapshotCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn expect(&mut self, expected: &[u8]) -> io::Result<()> {
+        if self.take(expected.len())? != expected {
+            return Err(io_error("snapshot artifact magic mismatch"));
+        }
+        Ok(())
+    }
+
+    fn read_u32(&mut self) -> io::Result<u32> {
+        let bytes: [u8; 4] = self.take(4)?.try_into().map_err(io_error)?;
+        Ok(u32::from_be_bytes(bytes))
+    }
+
+    fn read_u64(&mut self) -> io::Result<u64> {
+        let bytes: [u8; 8] = self.take(8)?.try_into().map_err(io_error)?;
+        Ok(u64::from_be_bytes(bytes))
+    }
+
+    fn read_json<T: DeserializeOwned>(&mut self) -> io::Result<T> {
+        let len = usize::try_from(self.read_u32()?).map_err(io_error)?;
+        serde_json::from_slice(self.take(len)?).map_err(io_error)
+    }
+
+    fn read_entries(&mut self) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let count = usize::try_from(self.read_u64()?).map_err(io_error)?;
+        let mut entries = Vec::new();
+        entries.try_reserve(count).map_err(io_error)?;
+        for _ in 0..count {
+            let key_len = usize::try_from(self.read_u32()?).map_err(io_error)?;
+            let value_len = usize::try_from(self.read_u64()?).map_err(io_error)?;
+            let key = self.take(key_len)?.to_vec();
+            let value = self.take(value_len)?.to_vec();
+            entries.push((key, value));
+        }
+        Ok(entries)
+    }
+
+    fn take(&mut self, len: usize) -> io::Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(len)
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or_else(|| io_error("snapshot artifact frame is truncated"))?;
+        let value = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(value)
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
 }
 
 impl<C> Debug for RocksLogStore<C> {
@@ -706,15 +897,24 @@ fn create_store<C>(
     let db = DB::open_cf_descriptors(&options, &db_path, descriptors).map_err(storage_open)?;
     let group_db = GroupDb {
         db: Arc::new(db),
+        group_root: path.to_path_buf(),
         identity: identity.clone(),
         receipt_window,
         write_lane: Arc::new(OrderedWriteLane::default()),
+        state_bank: Arc::new(RwLock::new(StateBank::A)),
     };
     group_db
         .put_sync(CF_META, KEY_IDENTITY, &identity)
         .map_err(storage_open)?;
     group_db
         .put_sync(CF_META, KEY_SCHEMA_VERSION, &CURRENT_SCHEMA_VERSION)
+        .map_err(storage_open)?;
+    group_db
+        .put_sync(CF_META, KEY_ACTIVE_STATE_BANK, &StateBank::A)
+        .map_err(storage_open)?;
+    group_db
+        .snapshot_catalog()
+        .and_then(|catalog| catalog.reconcile_on_open())
         .map_err(storage_open)?;
     Ok(StoreHandles::new(group_db))
 }
@@ -731,24 +931,27 @@ fn open_store<C>(
             path: db_path.display().to_string(),
         });
     }
-    let options = db_options(false, budget);
+    let mut options = db_options(false, budget);
+    options.create_missing_column_families(true);
     let actual_cfs = DB::list_cf(&options, &db_path).map_err(storage_open)?;
     let expected_cfs: BTreeSet<_> = std::iter::once("default")
         .chain(COLUMN_FAMILIES)
         .map(str::to_owned)
         .collect();
     let actual_cfs: BTreeSet<_> = actual_cfs.into_iter().collect();
-    if actual_cfs != expected_cfs {
+    if !actual_cfs.is_subset(&expected_cfs) || !actual_cfs.contains(CF_STATE) {
         return Err(StorageOpenError::Storage(format!(
-            "column family set mismatch: expected {expected_cfs:?}, found {actual_cfs:?}"
+            "column family set contains unsupported entries: expected subset of {expected_cfs:?}, found {actual_cfs:?}"
         )));
     }
     let db = DB::open_cf_descriptors(&options, &db_path, descriptors()).map_err(storage_open)?;
     let group_db = GroupDb {
         db: Arc::new(db),
+        group_root: path.to_path_buf(),
         identity: expected.clone(),
         receipt_window,
         write_lane: Arc::new(OrderedWriteLane::default()),
+        state_bank: Arc::new(RwLock::new(StateBank::A)),
     };
     let actual = group_db
         .get::<GroupIdentity>(CF_META, KEY_IDENTITY)
@@ -763,7 +966,15 @@ fn open_store<C>(
             actual,
         });
     }
+    group_db
+        .snapshot_catalog()
+        .and_then(|catalog| catalog.reconcile_on_open())
+        .map_err(storage_open)?;
+    group_db.migrate_state_banks().map_err(storage_open)?;
     group_db.migrate_schema().map_err(storage_open)?;
+    group_db
+        .migrate_current_snapshot_artifact()
+        .map_err(storage_open)?;
     Ok(StoreHandles::new(group_db))
 }
 
@@ -826,18 +1037,190 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
 
 impl GroupDb {
     fn cf(&self, name: &str) -> io::Result<Arc<rocksdb::BoundColumnFamily<'_>>> {
+        let resolved = if name == CF_STATE {
+            self.active_state_bank()?.column_family()
+        } else {
+            name
+        };
+        self.raw_cf(resolved)
+    }
+
+    fn raw_cf(&self, name: &str) -> io::Result<Arc<rocksdb::BoundColumnFamily<'_>>> {
         self.db
             .cf_handle(name)
             .ok_or_else(|| io_error(format!("missing column family {name}")))
     }
 
+    fn active_state_bank(&self) -> io::Result<StateBank> {
+        self.state_bank
+            .read()
+            .map(|bank| *bank)
+            .map_err(|_| io_error("state bank lock poisoned"))
+    }
+
+    fn migrate_state_banks(&self) -> io::Result<()> {
+        if let Some(bank) = self.get::<StateBank>(CF_META, KEY_ACTIVE_STATE_BANK)? {
+            *self
+                .state_bank
+                .write()
+                .map_err(|_| io_error("state bank lock poisoned"))? = bank;
+            self.clear_legacy_state()?;
+            return Ok(());
+        }
+        let legacy = self.raw_cf(CF_STATE)?;
+        let target = self.raw_cf(CF_STATE_A)?;
+        let mut batch = WriteBatch::default();
+        let mut pending = 0_u32;
+        for item in self
+            .db
+            .iterator_cf(&legacy, IteratorMode::From(b"", Direction::Forward))
+        {
+            let (key, value) = item.map_err(io_error)?;
+            batch.put_cf(&target, key, value);
+            pending += 1;
+            if pending == 1024 {
+                self.write_sync(std::mem::take(&mut batch))?;
+                pending = 0;
+            }
+        }
+        if pending != 0 {
+            self.write_sync(batch)?;
+        }
+        self.migrate_payload_owner_banks()?;
+        self.put_sync(CF_META, KEY_ACTIVE_STATE_BANK, &StateBank::A)?;
+        *self
+            .state_bank
+            .write()
+            .map_err(|_| io_error("state bank lock poisoned"))? = StateBank::A;
+        self.clear_legacy_state()
+    }
+
+    fn migrate_payload_owner_banks(&self) -> io::Result<()> {
+        let payload = self.raw_cf(CF_PAYLOAD)?;
+        let mut batch = WriteBatch::default();
+        let mut pending = 0_u32;
+        for item in self.db.iterator_cf(
+            &payload,
+            IteratorMode::From(PAYLOAD_OWNERS_PREFIX, Direction::Forward),
+        ) {
+            let (key, value) = item.map_err(io_error)?;
+            if !key.starts_with(PAYLOAD_OWNERS_PREFIX) {
+                break;
+            }
+            let mut owners: PayloadOwners = decode(&value)?;
+            if owners.applied_state {
+                owners.set_applied_in(StateBank::A, true);
+            }
+            if owners.reachable() {
+                batch.put_cf(&payload, key, encode(&owners)?);
+            } else {
+                let id = &key[PAYLOAD_OWNERS_PREFIX.len()..];
+                batch.delete_cf(&payload, &key);
+                batch.delete_cf(&payload, payload_bytes_key(id));
+            }
+            pending += 1;
+            if pending == 1024 {
+                self.write_sync(std::mem::take(&mut batch))?;
+                pending = 0;
+            }
+        }
+        if pending != 0 {
+            self.write_sync(batch)?;
+        }
+        Ok(())
+    }
+
+    fn clear_legacy_state(&self) -> io::Result<()> {
+        let legacy = self.raw_cf(CF_STATE)?;
+        let mut batch = WriteBatch::default();
+        let mut pending = 0_u32;
+        for item in self
+            .db
+            .iterator_cf(&legacy, IteratorMode::From(b"", Direction::Forward))
+        {
+            let (key, _) = item.map_err(io_error)?;
+            batch.delete_cf(&legacy, key);
+            pending += 1;
+            if pending == 1024 {
+                self.write_sync(std::mem::take(&mut batch))?;
+                pending = 0;
+            }
+        }
+        if pending != 0 {
+            self.write_sync(batch)?;
+        }
+        Ok(())
+    }
+
     fn get<T: DeserializeOwned>(&self, cf: &str, key: &[u8]) -> io::Result<Option<T>> {
-        let handle = self.cf(cf)?;
+        let state_guard = if cf == CF_STATE {
+            Some(
+                self.state_bank
+                    .read()
+                    .map_err(|_| io_error("state bank lock poisoned"))?,
+            )
+        } else {
+            None
+        };
+        let handle = match state_guard.as_deref() {
+            Some(bank) => self.raw_cf(bank.column_family())?,
+            None => self.raw_cf(cf)?,
+        };
         self.db
             .get_cf(&handle, key)
             .map_err(io_error)?
             .map(|bytes| decode(&bytes))
             .transpose()
+    }
+
+    fn snapshot_catalog(&self) -> io::Result<SnapshotCatalog> {
+        SnapshotCatalog::open(&self.group_root)
+    }
+
+    fn current_snapshot_value(&self) -> io::Result<Option<Vec<u8>>> {
+        self.db
+            .get_cf(&self.cf(CF_SNAPSHOT)?, KEY_CURRENT_SNAPSHOT)
+            .map_err(io_error)
+            .map(|value| value.map(|bytes| bytes.to_vec()))
+    }
+
+    fn current_snapshot_artifact(
+        &self,
+    ) -> io::Result<Option<(GroupSnapshotMeta, SnapshotArtifact)>> {
+        let Some(bytes) = self.current_snapshot_value()? else {
+            return Ok(None);
+        };
+        let current: StoredCurrentSnapshot = decode(&bytes)?;
+        let artifact = self
+            .snapshot_catalog()?
+            .open_descriptor(&current.artifact)?;
+        Ok(Some((current.meta, artifact)))
+    }
+
+    fn migrate_current_snapshot_artifact(&self) -> io::Result<()> {
+        let Some(bytes) = self.current_snapshot_value()? else {
+            return Ok(());
+        };
+        if let Ok(current) = decode::<StoredCurrentSnapshot>(&bytes) {
+            self.snapshot_catalog()?
+                .open_descriptor(&current.artifact)?;
+            return Ok(());
+        }
+        let artifact_bytes = if bytes.starts_with(SNAPSHOT_MAGIC) {
+            bytes
+        } else {
+            decode::<Vec<u8>>(&bytes)?
+        };
+        let bundle = decode_snapshot_bundle(&artifact_bytes)?;
+        let (_, descriptor) = self.snapshot_catalog()?.store_bytes(&artifact_bytes)?;
+        self.put_sync(
+            CF_SNAPSHOT,
+            KEY_CURRENT_SNAPSHOT,
+            &StoredCurrentSnapshot {
+                artifact: descriptor,
+                meta: bundle.meta,
+            },
+        )
     }
 
     fn put_sync<T: Serialize>(&self, cf: &str, key: &[u8], value: &T) -> io::Result<()> {
@@ -855,7 +1238,19 @@ impl GroupDb {
     }
 
     fn scan_prefix(&self, cf: &str, prefix: &[u8]) -> io::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-        let handle = self.cf(cf)?;
+        let state_guard = if cf == CF_STATE {
+            Some(
+                self.state_bank
+                    .read()
+                    .map_err(|_| io_error("state bank lock poisoned"))?,
+            )
+        } else {
+            None
+        };
+        let handle = match state_guard.as_deref() {
+            Some(bank) => self.raw_cf(bank.column_family())?,
+            None => self.raw_cf(cf)?,
+        };
         let mut values = Vec::new();
         for item in self
             .db
@@ -912,9 +1307,15 @@ impl GroupDb {
                 };
                 let mut record = decode::<StoredRecord>(&value)?;
                 let payload_bytes = if record.payload_bytes == 0 {
-                    let bytes = self
-                        .get::<Vec<u8>>(CF_PAYLOAD, &payload_bytes_key(&record.payload_key))?
+                    let stored = self
+                        .db
+                        .get_cf(
+                            &self.cf(CF_PAYLOAD)?,
+                            payload_bytes_key(&record.payload_key),
+                        )
+                        .map_err(io_error)?
                         .ok_or_else(|| io_error("migration record payload is missing"))?;
+                    let bytes = decode_payload_value(&stored)?;
                     u64::try_from(bytes.len()).map_err(io_error)?
                 } else {
                     record.payload_bytes
@@ -1446,6 +1847,13 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                 },
                 Vec::new(),
             )),
+            GroupCommand::OperationalProbe { group } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::OperationalProbe { group }),
+                },
+                Vec::new(),
+            )),
         },
     }
 }
@@ -1537,7 +1945,7 @@ macro_rules! impl_log_storage {
                                             .ok_or_else(|| {
                                                 io_error("log entry references a missing payload")
                                             })?;
-                                        records.push(decode::<Vec<u8>>(&bytes)?);
+                                        records.push(decode_payload_value(&bytes)?);
                                     }
                                     let mut batch =
                                         PublishBatch::new(cluster, partition, request, records)
@@ -1592,6 +2000,9 @@ macro_rules! impl_log_storage {
                                     max_payload_bytes,
                                     clock,
                                 },
+                                ThinCommand::OperationalProbe { group } => {
+                                    GroupCommand::OperationalProbe { group }
+                                }
                             };
                             EntryPayload::Normal(hydrated)
                         }
@@ -1691,14 +2102,18 @@ macro_rules! impl_log_storage {
                     for entry in entries {
                         let (thin, payloads) = thin_entry(entry)?;
                         for (key, bytes) in payloads {
-                            write.put_cf(&payload_cf, payload_bytes_key(&key), encode(&bytes)?);
+                            write.put_cf(
+                                &payload_cf,
+                                payload_bytes_key(&key),
+                                encode_payload_value(&bytes),
+                            );
                             write.put_cf(
                                 &payload_cf,
                                 payload_owners_key(&key),
                                 encode(&PayloadOwners {
                                     raft_log: true,
                                     applied_state: false,
-                                    snapshot_artifact: false,
+                                    applied_banks: 0,
                                 })?,
                             );
                         }
@@ -1793,7 +2208,7 @@ impl_log_storage!(DataRaftConfig);
 macro_rules! impl_state_machine {
     ($config:ty) => {
         impl RaftStateMachine<$config> for RocksStateMachine<$config> {
-            type SnapshotData = Vec<u8>;
+            type SnapshotData = SnapshotArtifact;
             type SnapshotBuilder = GroupSnapshotBuilder<$config>;
 
             async fn applied_state(
@@ -1848,28 +2263,36 @@ macro_rules! impl_state_machine {
             async fn get_current_snapshot(
                 &mut self,
             ) -> Result<Option<SnapshotOf<$config, Self::SnapshotData>>, io::Error> {
-                let Some(bytes) = self.db.get::<Vec<u8>>(CF_SNAPSHOT, KEY_CURRENT_SNAPSHOT)? else {
+                let Some((meta, artifact)) = self.db.current_snapshot_artifact()? else {
                     return Ok(None);
                 };
-                let bundle: SnapshotBundle = decode(&bytes)?;
                 Ok(Some(Snapshot {
-                    meta: bundle.meta,
-                    snapshot: bytes,
+                    meta,
+                    snapshot: artifact,
                 }))
             }
         }
 
         impl RaftSnapshotBuilder<$config> for GroupSnapshotBuilder<$config> {
-            type SnapshotData = Vec<u8>;
+            type SnapshotData = SnapshotArtifact;
 
             async fn build_snapshot(
                 &mut self,
             ) -> Result<SnapshotOf<$config, Self::SnapshotData>, io::Error> {
-                let bytes = self.db.build_snapshot()?;
-                let bundle: SnapshotBundle = decode(&bytes)?;
+                let (meta, artifact) = self.db.build_snapshot().map_err(|error| {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "snapshot_build_failed",
+                            "group_id": self.db.identity.group_id,
+                            "error": error.to_string(),
+                        })
+                    );
+                    error
+                })?;
                 Ok(Snapshot {
-                    meta: bundle.meta,
-                    snapshot: bytes,
+                    meta,
+                    snapshot: artifact,
                 })
             }
         }
@@ -1983,7 +2406,31 @@ impl GroupDb {
                 clock,
                 write,
             ),
+            GroupCommand::OperationalProbe { group } => {
+                self.apply_operational_probe(log_id, group, write)
+            }
         }
+    }
+
+    fn apply_operational_probe(
+        &self,
+        log_id: GroupLogId,
+        group: GroupId,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if group != self.identity.group_id {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "operational probe reached another group".to_owned(),
+            }));
+        }
+        let proof = OperationalProof::new(
+            group,
+            NodeId::new(log_id.leader_id.node_id).map_err(io_error)?,
+            log_id.leader_id.term,
+            log_id.index,
+        );
+        write.put_cf(&self.cf(CF_STATE)?, KEY_OPERATIONAL_PROOF, encode(&proof)?);
+        Ok(ApplyResult::OperationalProof(proof))
     }
 
     fn apply_bootstrap_control(
@@ -3143,7 +3590,7 @@ impl GroupDb {
             let mut owners = self
                 .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
                 .ok_or_else(|| io_error("retained record payload is missing ownership"))?;
-            owners.applied_state = false;
+            owners.set_applied_in(self.active_state_bank()?, false);
             write.delete_cf(&state, record_key);
             if owners.reachable() {
                 if owners.raft_log {
@@ -3252,7 +3699,7 @@ impl GroupDb {
             let mut owners = self
                 .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
                 .ok_or_else(|| io_error("applied entry payload is missing ownership"))?;
-            owners.applied_state = true;
+            owners.set_applied_in(self.active_state_bank()?, true);
             write.put_cf(&payload_cf, owners_key, encode(&owners)?);
             let offset = first + u64::try_from(slot).map_err(io_error)?;
             let payload_bytes = u64::try_from(record.len()).map_err(io_error)?;
@@ -3306,7 +3753,7 @@ impl GroupDb {
         Ok(ApplyResult::Published(receipt))
     }
 
-    fn build_snapshot(&self) -> io::Result<Vec<u8>> {
+    fn build_snapshot(&self) -> io::Result<(GroupSnapshotMeta, SnapshotArtifact)> {
         let _guard = self.write_lane.enter()?;
         let applied = self.get::<GroupLogId>(CF_STATE, KEY_APPLIED)?;
         let membership = self
@@ -3316,15 +3763,34 @@ impl GroupDb {
             last_log_id: applied,
             last_membership: membership,
         };
-        let state = self.scan_prefix(CF_STATE, b"")?;
-        let mut payloads = Vec::new();
+        let identity_json = serde_json::to_vec(&self.identity).map_err(io_error)?;
+        let meta_json = serde_json::to_vec(&meta).map_err(io_error)?;
+        let mut artifact = self.snapshot_catalog()?.begin_artifact(
+            STORAGE_FORMAT_VERSION,
+            &identity_json,
+            &meta_json,
+        )?;
+        let state_cf = self.cf(CF_STATE)?;
+        for item in self
+            .db
+            .iterator_cf(&state_cf, IteratorMode::From(b"", Direction::Forward))
+        {
+            let (key, value) = item.map_err(io_error)?;
+            artifact.write_state(&key, &value)?;
+        }
         let mut write = WriteBatch::default();
+        let active_bank = self.active_state_bank()?;
         let payload_cf = self.cf(CF_PAYLOAD)?;
-        for (key, value) in self.scan_prefix(CF_PAYLOAD, PAYLOAD_OWNERS_PREFIX)? {
-            let mut owners: PayloadOwners = decode(&value)?;
-            if owners.applied_state {
-                owners.snapshot_artifact = true;
-                write.put_cf(&payload_cf, &key, encode(&owners)?);
+        for item in self.db.iterator_cf(
+            &payload_cf,
+            IteratorMode::From(PAYLOAD_OWNERS_PREFIX, Direction::Forward),
+        ) {
+            let (key, value) = item.map_err(io_error)?;
+            if !key.starts_with(PAYLOAD_OWNERS_PREFIX) {
+                break;
+            }
+            let owners: PayloadOwners = decode(&value)?;
+            if owners.applied_in(active_bank) {
                 let id = &key[PAYLOAD_OWNERS_PREFIX.len()..];
                 let bytes_key = payload_bytes_key(id);
                 let bytes = self
@@ -3332,104 +3798,257 @@ impl GroupDb {
                     .get_cf(&payload_cf, &bytes_key)
                     .map_err(io_error)?
                     .ok_or_else(|| io_error("snapshot payload bytes are missing"))?;
-                payloads.push((bytes_key, bytes.to_vec()));
-            } else {
-                owners.snapshot_artifact = false;
-                if owners.reachable() {
-                    write.put_cf(&payload_cf, &key, encode(&owners)?);
-                } else {
-                    let id = &key[PAYLOAD_OWNERS_PREFIX.len()..];
-                    write.delete_cf(&payload_cf, &key);
-                    write.delete_cf(&payload_cf, payload_bytes_key(id));
-                }
+                artifact.write_payload(&bytes_key, &bytes)?;
             }
         }
-        let bundle = SnapshotBundle {
-            format_version: STORAGE_FORMAT_VERSION,
-            identity: self.identity.clone(),
-            meta,
-            state,
-            payloads,
-        };
-        let bytes = encode(&bundle)?;
-        if bytes.len() > MAX_SNAPSHOT_BYTES {
-            return Err(io_error("snapshot exceeds the LS02a byte limit"));
-        }
+        let (artifact, descriptor) = artifact.finish()?;
         write.put_cf(
             &self.cf(CF_SNAPSHOT)?,
             KEY_CURRENT_SNAPSHOT,
-            encode(&bytes)?,
+            encode(&StoredCurrentSnapshot {
+                artifact: descriptor.clone(),
+                meta: meta.clone(),
+            })?,
         );
         self.write_sync(write)?;
-        Ok(bytes)
+        if let Err(error) = self.snapshot_catalog()?.collect_except(&descriptor) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "snapshot_artifact_cleanup_failed",
+                    "group_id": self.identity.group_id,
+                    "error": error.to_string(),
+                })
+            );
+        }
+        Ok((meta, artifact))
     }
 
-    fn install_snapshot(&self, meta: &GroupSnapshotMeta, bytes: &[u8]) -> io::Result<()> {
-        if bytes.len() > MAX_SNAPSHOT_BYTES {
-            return Err(io_error("snapshot exceeds the LS02a byte limit"));
-        }
-        let bundle: SnapshotBundle = decode(bytes)?;
-        if bundle.format_version != STORAGE_FORMAT_VERSION || bundle.identity != self.identity {
-            return Err(io_error("snapshot identity or format mismatch"));
-        }
-        if &bundle.meta != meta {
-            return Err(io_error("snapshot metadata mismatch"));
-        }
-        let _guard = self.write_lane.enter()?;
-        let state_cf = self.cf(CF_STATE)?;
+    fn install_snapshot(
+        &self,
+        meta: &GroupSnapshotMeta,
+        artifact: &SnapshotArtifact,
+    ) -> io::Result<()> {
+        let _write_guard = self.write_lane.enter()?;
+        let mut bank = self
+            .state_bank
+            .write()
+            .map_err(|_| io_error("state bank lock poisoned"))?;
+        let active_bank = *bank;
+        let target_bank = active_bank.inactive();
+        let state_cf = self.raw_cf(target_bank.column_family())?;
         let payload_cf = self.cf(CF_PAYLOAD)?;
         let mut write = WriteBatch::default();
-        for (key, _) in self.scan_prefix(CF_STATE, b"")? {
-            write.delete_cf(&state_cf, key);
-        }
-        for (key, value) in &bundle.state {
-            write.put_cf(&state_cf, key, value);
-        }
-        let snapshot_payloads: BTreeMap<Vec<u8>, Vec<u8>> =
-            bundle.payloads.iter().cloned().collect();
-        for (key, value) in self.scan_prefix(CF_PAYLOAD, PAYLOAD_OWNERS_PREFIX)? {
-            let id = key[PAYLOAD_OWNERS_PREFIX.len()..].to_vec();
-            let mut owners: PayloadOwners = decode(&value)?;
-            owners.applied_state = false;
-            owners.snapshot_artifact = false;
-            if snapshot_payloads.contains_key(&payload_bytes_key(&id)) {
-                owners.applied_state = true;
-                owners.snapshot_artifact = true;
+        let mut pending = 0_u32;
+        let mut pending_bytes = 0_usize;
+        match artifact.reader() {
+            Ok(mut reader) => {
+                let identity: GroupIdentity =
+                    serde_json::from_slice(reader.identity_json()).map_err(io_error)?;
+                let artifact_meta: GroupSnapshotMeta =
+                    serde_json::from_slice(reader.meta_json()).map_err(io_error)?;
+                if reader.storage_format_version() != STORAGE_FORMAT_VERSION
+                    || identity != self.identity
+                {
+                    return Err(io_error("snapshot identity or format mismatch"));
+                }
+                if &artifact_meta != meta {
+                    return Err(io_error("snapshot metadata mismatch"));
+                }
+                self.clear_state_bank(target_bank)?;
+                while let Some(record) = reader.next_record()? {
+                    match record {
+                        SnapshotRecord::State { key, value } => {
+                            pending_bytes = pending_bytes
+                                .saturating_add(key.len())
+                                .saturating_add(value.len());
+                            write.put_cf(&state_cf, key, value);
+                        }
+                        SnapshotRecord::Payload {
+                            key: bytes_key,
+                            value,
+                        } => {
+                            pending_bytes = pending_bytes
+                                .saturating_add(bytes_key.len())
+                                .saturating_add(value.len());
+                            let id = bytes_key
+                                .strip_prefix(PAYLOAD_BYTES_PREFIX)
+                                .ok_or_else(|| io_error("invalid snapshot payload key"))?
+                                .to_vec();
+                            write.put_cf(&payload_cf, &bytes_key, value);
+                            let owners_key = payload_owners_key(&id);
+                            let mut owners = self
+                                .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
+                                .unwrap_or_default();
+                            owners.set_applied_in(target_bank, true);
+                            write.put_cf(&payload_cf, owners_key, encode(&owners)?);
+                        }
+                    }
+                    pending += 1;
+                    if pending == 1024 || pending_bytes >= 8 * 1024 * 1024 {
+                        self.write_sync(std::mem::take(&mut write))?;
+                        pending = 0;
+                        pending_bytes = 0;
+                    }
+                }
             }
-            if owners.reachable() {
-                write.put_cf(&payload_cf, key, encode(&owners)?);
-            } else {
-                write.delete_cf(&payload_cf, payload_bytes_key(&id));
-                write.delete_cf(&payload_cf, key);
+            Err(_) if artifact.len() <= MAX_SNAPSHOT_BYTES as u64 => {
+                let bytes = artifact.read_all_limited(MAX_SNAPSHOT_BYTES)?;
+                let bundle = decode_snapshot_bundle(&bytes)?;
+                if bundle.format_version != STORAGE_FORMAT_VERSION
+                    || bundle.identity != self.identity
+                {
+                    return Err(io_error("snapshot identity or format mismatch"));
+                }
+                if &bundle.meta != meta {
+                    return Err(io_error("snapshot metadata mismatch"));
+                }
+                self.clear_state_bank(target_bank)?;
+                for (key, value) in bundle.state {
+                    pending_bytes = pending_bytes
+                        .saturating_add(key.len())
+                        .saturating_add(value.len());
+                    write.put_cf(&state_cf, key, value);
+                    pending += 1;
+                    if pending == 1024 || pending_bytes >= 8 * 1024 * 1024 {
+                        self.write_sync(std::mem::take(&mut write))?;
+                        pending = 0;
+                        pending_bytes = 0;
+                    }
+                }
+                for (bytes_key, value) in bundle.payloads {
+                    pending_bytes = pending_bytes
+                        .saturating_add(bytes_key.len())
+                        .saturating_add(value.len());
+                    let id = bytes_key
+                        .strip_prefix(PAYLOAD_BYTES_PREFIX)
+                        .ok_or_else(|| io_error("invalid snapshot payload key"))?
+                        .to_vec();
+                    write.put_cf(&payload_cf, &bytes_key, value);
+                    let owners_key = payload_owners_key(&id);
+                    let mut owners = self
+                        .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
+                        .unwrap_or_default();
+                    owners.set_applied_in(target_bank, true);
+                    write.put_cf(&payload_cf, owners_key, encode(&owners)?);
+                    pending += 1;
+                    if pending == 1024 || pending_bytes >= 8 * 1024 * 1024 {
+                        self.write_sync(std::mem::take(&mut write))?;
+                        pending = 0;
+                        pending_bytes = 0;
+                    }
+                }
             }
+            Err(error) => return Err(error),
         }
-        for (bytes_key, value) in snapshot_payloads {
-            let id = bytes_key[PAYLOAD_BYTES_PREFIX.len()..].to_vec();
-            write.put_cf(&payload_cf, &bytes_key, value);
-            let owners_key = payload_owners_key(&id);
-            let mut owners = self
-                .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)?
-                .unwrap_or_default();
-            owners.applied_state = true;
-            owners.snapshot_artifact = true;
-            write.put_cf(&payload_cf, owners_key, encode(&owners)?);
+        if pending != 0 {
+            self.write_sync(std::mem::take(&mut write))?;
         }
+        let (_, descriptor) = self.snapshot_catalog()?.adopt(artifact)?;
         write.put_cf(
             &self.cf(CF_SNAPSHOT)?,
             KEY_CURRENT_SNAPSHOT,
-            encode(&bytes.to_vec())?,
+            encode(&StoredCurrentSnapshot {
+                artifact: descriptor.clone(),
+                meta: meta.clone(),
+            })?,
         );
-        self.write_sync(write)
+        write.put_cf(
+            &self.raw_cf(CF_META)?,
+            KEY_ACTIVE_STATE_BANK,
+            encode(&target_bank)?,
+        );
+        self.write_sync(write)?;
+        *bank = target_bank;
+        self.clear_state_bank(active_bank)?;
+        drop(bank);
+        if let Err(error) = self.snapshot_catalog()?.collect_except(&descriptor) {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "snapshot_artifact_cleanup_failed",
+                    "group_id": self.identity.group_id,
+                    "error": error.to_string(),
+                })
+            );
+        }
+        Ok(())
+    }
+
+    fn clear_state_bank(&self, bank: StateBank) -> io::Result<()> {
+        let state = self.raw_cf(bank.column_family())?;
+        let mut write = WriteBatch::default();
+        let mut pending = 0_u32;
+        for item in self
+            .db
+            .iterator_cf(&state, IteratorMode::From(b"", Direction::Forward))
+        {
+            let (key, _) = item.map_err(io_error)?;
+            write.delete_cf(&state, key);
+            pending += 1;
+            if pending == 1024 {
+                self.write_sync(std::mem::take(&mut write))?;
+                pending = 0;
+            }
+        }
+        if pending != 0 {
+            self.write_sync(std::mem::take(&mut write))?;
+        }
+        let payload = self.raw_cf(CF_PAYLOAD)?;
+        pending = 0;
+        for item in self.db.iterator_cf(
+            &payload,
+            IteratorMode::From(PAYLOAD_OWNERS_PREFIX, Direction::Forward),
+        ) {
+            let (key, value) = item.map_err(io_error)?;
+            if !key.starts_with(PAYLOAD_OWNERS_PREFIX) {
+                break;
+            }
+            let id = &key[PAYLOAD_OWNERS_PREFIX.len()..];
+            let mut owners: PayloadOwners = decode(&value)?;
+            if !owners.applied_in(bank) {
+                continue;
+            }
+            owners.set_applied_in(bank, false);
+            if owners.reachable() {
+                write.put_cf(&payload, &key, encode(&owners)?);
+            } else {
+                write.delete_cf(&payload, &key);
+                write.delete_cf(&payload, payload_bytes_key(id));
+            }
+            pending += 1;
+            if pending == 1024 {
+                self.write_sync(std::mem::take(&mut write))?;
+                pending = 0;
+            }
+        }
+        if pending != 0 {
+            self.write_sync(write)?;
+        }
+        Ok(())
     }
 }
 
 impl CommittedStateReader {
+    pub fn snapshot_artifact_bytes(&self) -> Result<Option<u64>, DomainError> {
+        self.db
+            .current_snapshot_artifact()
+            .map(|value| value.map(|(_, artifact)| artifact.len()))
+            .map_err(storage_domain)
+    }
+
     pub fn bootstrap_spec(&self) -> Result<Option<BootstrapSpec>, DomainError> {
         self.db
             .get(CF_STATE, KEY_BOOTSTRAP)
             .map_err(|error| DomainError::Storage {
                 reason: error.to_string(),
             })
+    }
+
+    pub fn operational_proof(&self) -> Result<Option<OperationalProof>, DomainError> {
+        self.db
+            .get(CF_STATE, KEY_OPERATIONAL_PROOF)
+            .map_err(storage_domain)
     }
 
     pub fn receipt(
@@ -3471,9 +4090,20 @@ impl CommittedStateReader {
         }
         let prefix = record_prefix(partition);
         let start = record_key(partition, offset.get());
-        let state_cf = self.db.cf(CF_STATE).map_err(storage_domain)?;
+        let state_bank = self
+            .db
+            .state_bank
+            .read()
+            .map_err(|_| DomainError::Storage {
+                reason: "state bank lock poisoned".to_owned(),
+            })?;
+        let state_cf = self
+            .db
+            .raw_cf(state_bank.column_family())
+            .map_err(storage_domain)?;
         let payload_cf = self.db.cf(CF_PAYLOAD).map_err(storage_domain)?;
         let snapshot = self.db.db.snapshot();
+        drop(state_bank);
         let retention = snapshot
             .get_cf(&state_cf, retention_key(partition))
             .map_err(storage_domain)?
@@ -3508,7 +4138,7 @@ impl CommittedStateReader {
                 .ok_or_else(|| DomainError::Storage {
                     reason: "committed record payload is missing".to_owned(),
                 })?;
-            let payload: Vec<u8> = decode(&payload).map_err(storage_domain)?;
+            let payload = decode_payload_value(&payload).map_err(storage_domain)?;
             if !records.is_empty() && payload_bytes.saturating_add(payload.len()) > MAX_FETCH_BYTES
             {
                 break;
@@ -3661,9 +4291,20 @@ impl CommittedStateReader {
                 reason: "fetch cluster does not match the data group".to_owned(),
             });
         }
-        let state_cf = self.db.cf(CF_STATE).map_err(storage_domain)?;
+        let state_bank = self
+            .db
+            .state_bank
+            .read()
+            .map_err(|_| DomainError::Storage {
+                reason: "state bank lock poisoned".to_owned(),
+            })?;
+        let state_cf = self
+            .db
+            .raw_cf(state_bank.column_family())
+            .map_err(storage_domain)?;
         let payload_cf = self.db.cf(CF_PAYLOAD).map_err(storage_domain)?;
         let snapshot = self.db.db.snapshot();
+        drop(state_bank);
         let lease = snapshot
             .get_cf(&state_cf, replay_lease_id_key(lease_id))
             .map_err(storage_domain)?
@@ -3723,7 +4364,7 @@ impl CommittedStateReader {
                 .ok_or_else(|| DomainError::Storage {
                     reason: "protected record payload is missing".to_owned(),
                 })?;
-            let payload: Vec<u8> = decode(&payload).map_err(storage_domain)?;
+            let payload = decode_payload_value(&payload).map_err(storage_domain)?;
             if !records.is_empty() && payload_bytes.saturating_add(payload.len()) > MAX_FETCH_BYTES
             {
                 break;
@@ -3983,7 +4624,7 @@ impl<C> RaftNetworkV2<C> for NoRemoteNetwork
 where
     C: openraft::RaftTypeConfig<NodeId = u64, Node = BasicNode>,
 {
-    type SnapshotData = Vec<u8>;
+    type SnapshotData = SnapshotArtifact;
 
     async fn append_entries(
         &mut self,
@@ -5129,6 +5770,135 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_state_bank_migration_converts_payload_ownership_before_publication() {
+        let directory = ProjectTestDir::new("state-bank-migration");
+        let (cluster, stream) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(DATA_GROUP_ID).unwrap(),
+            GroupKind::Data,
+        );
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        {
+            let handles = create_data_store(
+                &directory.0,
+                identity.clone(),
+                DEFAULT_RECEIPT_WINDOW,
+                test_budget(),
+            )
+            .unwrap();
+            let mut log = handles.log_store;
+            let mut state = handles.state_machine;
+            let entries = [
+                GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        1,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BootstrapData {
+                        spec: BootstrapSpec::new(
+                            cluster,
+                            stream,
+                            StreamName::parse("bootstrap").unwrap(),
+                        ),
+                    }),
+                },
+                GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        2,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::Publish {
+                        batch: PublishBatch::new(
+                            cluster,
+                            partition,
+                            ProducerRequestId::new(
+                                light_stream_core::PrincipalId::parse("migration").unwrap(),
+                                light_stream_core::ProducerSessionId::from_uuid(Uuid::new_v4()),
+                                light_stream_core::RequestSequence::new(1),
+                            ),
+                            vec![b"banked".to_vec()],
+                        )
+                        .unwrap(),
+                    }),
+                },
+            ];
+            log.append(entries.clone(), IOFlushed::noop())
+                .await
+                .unwrap();
+            state
+                .apply(futures_util::stream::iter(
+                    entries.into_iter().map(|entry| Ok((entry, None))),
+                ))
+                .await
+                .unwrap();
+            let db = &handles.reader.db;
+            let active = db.raw_cf(CF_STATE_A).unwrap();
+            let legacy = db.raw_cf(CF_STATE).unwrap();
+            let mut write = WriteBatch::default();
+            for item in db
+                .db
+                .iterator_cf(&active, IteratorMode::From(b"", Direction::Forward))
+            {
+                let (key, value) = item.unwrap();
+                write.put_cf(&legacy, &key, &value);
+                write.delete_cf(&active, key);
+            }
+            let record = db
+                .get::<StoredRecord>(CF_STATE_A, &record_key(partition, 0))
+                .unwrap()
+                .unwrap();
+            let owners_key = payload_owners_key(&record.payload_key);
+            let mut owners = db
+                .get::<PayloadOwners>(CF_PAYLOAD, &owners_key)
+                .unwrap()
+                .unwrap();
+            owners.applied_state = true;
+            owners.applied_banks = 0;
+            write.put_cf(
+                &db.raw_cf(CF_PAYLOAD).unwrap(),
+                owners_key,
+                encode(&owners).unwrap(),
+            );
+            write.delete_cf(&db.raw_cf(CF_META).unwrap(), KEY_ACTIVE_STATE_BANK);
+            db.write_sync(write).unwrap();
+        }
+
+        let handles = open_data_store(
+            &directory.0,
+            &identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let page = handles
+            .reader
+            .fetch(cluster, partition, RecordOffset::new(0), 1)
+            .unwrap();
+        assert_eq!(page.records()[0].payload(), b"banked");
+        let record = handles
+            .reader
+            .db
+            .get::<StoredRecord>(CF_STATE, &record_key(partition, 0))
+            .unwrap()
+            .unwrap();
+        let owners = handles
+            .reader
+            .db
+            .get::<PayloadOwners>(CF_PAYLOAD, &payload_owners_key(&record.payload_key))
+            .unwrap()
+            .unwrap();
+        assert!(owners.applied_in(StateBank::A));
+        assert!(!owners.applied_state);
+    }
+
+    #[tokio::test]
     async fn snapshot_contains_and_installs_payloads() {
         let source = ProjectTestDir::new("snapshot-source");
         let target = ProjectTestDir::new("snapshot-target");
@@ -5199,6 +5969,24 @@ mod tests {
             .unwrap();
         let mut builder = source_state.get_snapshot_builder().await;
         let snapshot = builder.build_snapshot().await.unwrap();
+        let artifact_bytes = snapshot
+            .snapshot
+            .read_all_limited(MAX_SNAPSHOT_BYTES)
+            .unwrap();
+        assert!(artifact_bytes.starts_with(b"LSNP0003"));
+        let mut corrupted = artifact_bytes;
+        corrupted[b"LSNP0003".len() + 4] ^= 1;
+        assert!(decode_snapshot_bundle(&corrupted).is_err());
+        assert!(
+            !source_handles
+                .reader
+                .db
+                .current_snapshot_artifact()
+                .unwrap()
+                .unwrap()
+                .1
+                .is_empty()
+        );
         let stored = source_handles
             .reader
             .db

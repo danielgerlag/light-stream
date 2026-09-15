@@ -1,0 +1,32 @@
+{
+  "checkpoint": "snapshot-recovery",
+  "verdict": "PASS",
+  "b7": {
+    "evidence": "artifacts/LS06/b7-1g-4",
+    "retained_bytes": 1073741824,
+    "snapshot_artifact_bytes": 1075598548,
+    "chunk_count": 1026,
+    "interrupted_durable_offset": 67108864,
+    "verified_records": 1025,
+    "repaired_node_peak_rss_delta_bytes": 138264576,
+    "locked_rss_delta_bytes": 178274304,
+    "independent_host": "BLOCKED",
+    "success_data_removed": true
+  },
+  "functional": {
+    "evidence": "artifacts/LS06/skill-banked-install-final",
+    "verdict": "PASS",
+    "success_data_removed": true
+  },
+  "ls02b_regression": {
+    "evidence": "artifacts/LS06/ls02b-regression-banked-final",
+    "verdict": "PASS",
+    "success_data_removed": true
+  },
+  "pending": [
+    "learner voter replacement",
+    "durable leader transfer",
+    "interrupted membership recovery",
+    "independent-host verification"
+  ]
+}

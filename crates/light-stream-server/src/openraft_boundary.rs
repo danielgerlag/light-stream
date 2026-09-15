@@ -40,6 +40,7 @@ mod tests {
     use std::{fmt::Debug, future::Future, io, ops::RangeBounds};
 
     use futures_util::Stream;
+    use light_stream_storage::SnapshotArtifact;
     use openraft::{
         OptionalSend,
         errors::{RPCError, ReplicationClosed, StreamingError},
@@ -130,7 +131,7 @@ mod tests {
     }
 
     impl RaftSnapshotBuilder<BoundaryConfig> for CompileSnapshotBuilder {
-        type SnapshotData = Vec<u8>;
+        type SnapshotData = SnapshotArtifact;
 
         async fn build_snapshot(
             &mut self,
@@ -140,7 +141,7 @@ mod tests {
     }
 
     impl RaftStateMachine<BoundaryConfig> for CompileStateMachine {
-        type SnapshotData = Vec<u8>;
+        type SnapshotData = SnapshotArtifact;
         type SnapshotBuilder = CompileSnapshotBuilder;
 
         async fn applied_state(
@@ -191,7 +192,7 @@ mod tests {
     }
 
     impl RaftNetworkV2<BoundaryConfig> for CompileNetwork {
-        type SnapshotData = Vec<u8>;
+        type SnapshotData = SnapshotArtifact;
 
         async fn append_entries(
             &mut self,

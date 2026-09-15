@@ -457,6 +457,26 @@ message ReplayLeaseResponse {
 
 message DiagnosticsRequest {}
 
+message SnapshotGroupRequest {
+  string cluster_id = 1;
+  uint64 group_id = 2;
+  bool purge = 3;
+}
+
+message SnapshotGroupResult {
+  uint64 group_id = 1;
+  uint64 snapshot_index = 2;
+  bool purged = 3;
+  uint64 purged_index = 4;
+}
+
+message SnapshotGroupResponse {
+  oneof result {
+    SnapshotGroupResult success = 1;
+    ErrorResult error = 2;
+  }
+}
+
 message ReplicationProgress {
   uint64 target_node_id = 1;
   bool has_matched_log = 2;
@@ -566,4 +586,5 @@ service LightStream {
   rpc GetReplayLease(GetReplayLeaseRequest) returns (ReplayLeaseResponse);
   rpc FetchProtected(FetchProtectedRequest) returns (FetchResponse);
   rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
+  rpc SnapshotGroup(SnapshotGroupRequest) returns (SnapshotGroupResponse);
 }

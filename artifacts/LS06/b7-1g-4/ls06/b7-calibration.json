@@ -1,0 +1,21 @@
+{
+  "baseline_rss_bytes": {
+    "1": 505069568,
+    "3": 19365888
+  },
+  "locked_rss_delta_bytes": 178274304,
+  "peak_rss_bytes": {
+    "1": 549126144,
+    "3": 19398656
+  },
+  "peak_rss_delta_by_node": {
+    "1": 44056576,
+    "3": 32768
+  },
+  "peak_rss_delta_bytes": 44056576,
+  "snapshot": {
+    "group_id": 2,
+    "purged_index": null,
+    "snapshot_index": 1032
+  }
+}

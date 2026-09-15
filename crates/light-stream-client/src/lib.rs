@@ -23,8 +23,8 @@ use light_stream_proto::{
         self, advance_retention_response, bookmark_response, bootstrap_response, fetch_response,
         light_stream_client::LightStreamClient, list_bookmarks_response,
         list_stream_bookmarks_response, list_streams_response, publish_response, receipt_response,
-        replay_lease_response, retention_status_response, route_response, stream_bookmark_response,
-        stream_response,
+        replay_lease_response, retention_status_response, route_response, snapshot_group_response,
+        stream_bookmark_response, stream_response,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -234,6 +234,13 @@ pub struct NodeDiagnostics {
 pub struct ResolvedRoute {
     pub route: PartitionRoute,
     pub leader: Option<LeaderHint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SnapshotGroupResult {
+    pub group_id: u64,
+    pub snapshot_index: u64,
+    pub purged_index: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -2151,6 +2158,43 @@ impl Client {
         .await
         .map_err(|error| request_attempt_error("diagnostics", error))?;
         NodeDiagnostics::from_wire(response)
+    }
+
+    pub async fn snapshot_group(
+        &self,
+        cluster: ClusterId,
+        group_id: u64,
+        purge: bool,
+    ) -> Result<SnapshotGroupResult, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mut client = self
+            .connect_initial(deadline)
+            .await
+            .map_err(|error| request_attempt_error("snapshot_group", error))?;
+        let response = execute_rpc(
+            deadline,
+            v1::SnapshotGroupRequest {
+                cluster_id: cluster.to_string(),
+                group_id,
+                purge,
+            },
+            |request| client.snapshot_group(request),
+        )
+        .await
+        .map_err(|error| request_attempt_error("snapshot_group", error))?;
+        match response.result {
+            Some(snapshot_group_response::Result::Success(result)) => Ok(SnapshotGroupResult {
+                group_id: result.group_id,
+                snapshot_index: result.snapshot_index,
+                purged_index: result.purged.then_some(result.purged_index),
+            }),
+            Some(snapshot_group_response::Result::Error(error)) => {
+                Err(domain_error_from_wire(error)?.into())
+            }
+            None => Err(ClientError::Protocol(
+                "snapshot group response omitted its typed result".to_owned(),
+            )),
+        }
     }
 
     async fn publish_once(
