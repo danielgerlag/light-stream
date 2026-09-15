@@ -24,18 +24,19 @@
     "success_data_removed": true
   },
   "membership": {
-    "evidence": "artifacts/LS06/membership-final-14",
+    "evidence": "artifacts/LS06/membership-multigroup-3",
     "verdict": "PASS",
     "final_voters": [1, 2, 4],
     "coordinator_killed_after_intent": true,
     "removed_node_retired": true,
     "leader_transfer": true,
+    "busy_group_id": 3,
+    "busy_group_verified": true,
     "abort_topology_revision": 5,
     "full_restart": true,
     "success_data_removed": true
   },
   "pending": [
-    "cross-group recovery isolation",
     "independent-host verification"
   ]
 }

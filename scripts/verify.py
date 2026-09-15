@@ -6286,6 +6286,7 @@ def run_ls06_membership_scenario(
     rng = random.Random(seed)
     cluster = deterministic_uuid(rng)
     stream = deterministic_uuid(rng)
+    session = deterministic_uuid(rng)
     nodes = {}
     configs = {}
     used_ports = set()
@@ -6322,9 +6323,9 @@ def run_ls06_membership_scenario(
                 peer_address=config["peer_address"],
                 advertise_public_uri=config["endpoint"],
                 advertise_peer_uri=config["peer_uri"],
-                max_data_groups=1,
-                max_streams=1,
-                max_partitions_per_stream=1,
+                max_data_groups=2,
+                max_streams=2,
+                max_partitions_per_stream=2,
                 verification_delay_group_id=2 if administration_delay_ms else None,
                 verification_delay_ms=administration_delay_ms,
                 ready_timeout_seconds=30,
@@ -6443,6 +6444,35 @@ def run_ls06_membership_scenario(
             "ls06-admin-active",
         )
         control_leader = wait_control_leader((1, 2, 3), "ls06-admin-control")
+        busy_stream = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[control_leader]["endpoint"],
+                    deadline_ms=30000,
+                )
+                + [
+                    "stream",
+                    "create",
+                    "--cluster-id",
+                    cluster,
+                    "--request-id",
+                    deterministic_uuid(rng),
+                    "--name",
+                    "busy-during-replacement",
+                    "--partitions",
+                    "1",
+                ],
+                "ls06-create-busy-stream",
+                timeout=35,
+            ),
+            "LS06 create busy stream",
+        )["stream"]
+        busy_group = busy_stream["placements"][0]["group"]
+        if busy_group != 3:
+            raise VerificationError(
+                f"busy stream was assigned to group {busy_group}, expected group 3"
+            )
         replacement_request = deterministic_uuid(rng)
         replacement = parse_json_output(
             runner.run(
@@ -6474,6 +6504,43 @@ def run_ls06_membership_scenario(
         result["coordinator_killed_after_intent"] = control_leader
         operation_nodes = tuple(
             node_id for node_id in (1, 2, 3, 4) if node_id != control_leader
+        )
+        busy_endpoint = next(
+            nodes[node_id]["endpoint"]
+            for node_id in operation_nodes
+            if nodes[node_id]["server"].is_running()
+        )
+        busy_publish = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    busy_endpoint,
+                    seeds=[
+                        nodes[node_id]["endpoint"]
+                        for node_id in operation_nodes
+                        if nodes[node_id]["server"].is_running()
+                    ],
+                    deadline_ms=15000,
+                )
+                + [
+                    "publish",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    busy_stream["stream"],
+                    "--principal",
+                    "ls06-membership",
+                    "--session",
+                    session,
+                    "--sequence",
+                    "1",
+                    "--payload",
+                    "busy-group-remained-available",
+                ],
+                "ls06-busy-group-publish",
+                timeout=20,
+            ),
+            "LS06 busy group publish",
         )
         replacement_complete = wait_operation(
             replacement_request, operation_nodes, "ls06-replacement"
@@ -6633,6 +6700,32 @@ def run_ls06_membership_scenario(
         post_abort_membership = wait_exact_membership(
             (1, 2, 4), "ls06-post-abort-membership"
         )
+        busy_fetch = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[1]["endpoint"],
+                    seeds=[nodes[2]["endpoint"], nodes[4]["endpoint"]],
+                    deadline_ms=15000,
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    busy_stream["stream"],
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "1",
+                ],
+                "ls06-busy-group-fetch",
+                timeout=20,
+            ),
+            "LS06 busy group fetch",
+        )
+        if payloads_from_page(busy_fetch) != [b"busy-group-remained-available"]:
+            raise VerificationError("unrelated data group lost traffic during replacement")
         for node_id in (1, 2, 4):
             nodes[node_id]["server"].stop()
         for node_id in (1, 2, 4):
@@ -6652,6 +6745,9 @@ def run_ls06_membership_scenario(
                 "unreachable_replacement": unreachable["operation"],
                 "aborted_replacement": aborted["operation"],
                 "post_abort_membership": post_abort_membership,
+                "busy_group_id": busy_group,
+                "busy_group_publish": busy_publish["receipt"],
+                "busy_group_verified": True,
                 "restarted_membership": restarted_memberships,
                 "verdict": "PASS",
             }

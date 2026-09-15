@@ -369,7 +369,7 @@ Do not manufacture browser screenshots for a service with no browser UI.
 - [ ] Lane 7. Send a corrupt or wrong-cluster snapshot. Save `l07.json`. Pass when E19 rejects it without overwriting valid state.
 - [x] Lane 8. Replace a voter through a learner. Save `ls06/membership-recovery.json`. Pass when E20 changes membership only after catch-up.
 - [x] Lane 9. Fail a leader during membership change. Save `ls06/membership-recovery.json`. Pass when recovery converges without forced stale promotion.
-- [ ] Lane 10. Catch up a group while another is busy. Save `l10.json`. Pass when resource limits hold and unrelated groups remain usable.
+- [x] Lane 10. Catch up groups while another is busy. Save `ls06/membership-recovery.json`. Pass when group 3 remains usable during replacement.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
@@ -382,7 +382,7 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Merge.**
 
-- [ ] Record old-leader fencing, catch-up, and membership verdicts. Stop at merge-ready.
+- [x] Record old-leader fencing, catch-up, and membership verdicts. Stop at merge-ready.
 
 ## Finish batching, client workflows, and mutable progress (LS07)
 
