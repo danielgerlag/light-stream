@@ -24,6 +24,7 @@ crc32fast = "1"
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
 futures-util = "0.3"
+http = "1"
 openraft = { version = "=0.10.0-alpha.34", features = ["serde", "type-alias"] }
 prost = "0.14"
 rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime", "multi-threaded-cf"] }

@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use light_stream_core::{
-    Capability, CapabilityReport, CapabilitySupport, HealthStatus, SecurityMode,
+    AdministrationIntent, AdministrationLifecycle, AdministrationOperation,
+    AdministrationRequestId, Capability, CapabilityReport, CapabilitySupport, ClusterId, GroupId,
+    HealthStatus, NodeDescriptor, NodeId, SecurityMode,
 };
 use light_stream_proto::{
     admit_replay_lease_from_wire, advance_retention_from_wire, bookmark_page_to_wire,
@@ -694,5 +696,163 @@ impl LightStream for PublicApi {
                 )),
             },
         }))
+    }
+
+    async fn replace_voter(
+        &self,
+        request: Request<v1::ReplaceVoterRequest>,
+    ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let request = request.into_inner();
+        let result = (|| {
+            let add = request.add_node.ok_or_else(|| {
+                light_stream_core::DomainError::InvalidIdentity {
+                    kind: "replacement node".to_owned(),
+                    reason: "node descriptor is required".to_owned(),
+                }
+            })?;
+            Ok((
+                request.cluster_id.parse::<ClusterId>()?,
+                AdministrationIntent::ReplaceVoter {
+                    request: request.request_id.parse::<AdministrationRequestId>()?,
+                    expected_topology_revision: request.expected_topology_revision,
+                    remove: NodeId::new(request.remove_node_id)?,
+                    add: NodeDescriptor::new(
+                        NodeId::new(add.node_id)?,
+                        add.public_uri,
+                        add.peer_uri,
+                    ),
+                },
+            ))
+        })();
+        let result = match result {
+            Ok((cluster, intent)) => self.cluster.begin_administration(cluster, intent).await,
+            Err(error) => Err(error),
+        };
+        Ok(Response::new(administration_response(result)))
+    }
+
+    async fn transfer_leadership(
+        &self,
+        request: Request<v1::TransferLeadershipRequest>,
+    ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let request = request.into_inner();
+        let result = (|| {
+            Ok((
+                request.cluster_id.parse::<ClusterId>()?,
+                AdministrationIntent::TransferLeader {
+                    request: request.request_id.parse::<AdministrationRequestId>()?,
+                    group: GroupId::new(request.group_id)?,
+                    target: NodeId::new(request.target_node_id)?,
+                },
+            ))
+        })();
+        let result = match result {
+            Ok((cluster, intent)) => self.cluster.begin_administration(cluster, intent).await,
+            Err(error) => Err(error),
+        };
+        Ok(Response::new(administration_response(result)))
+    }
+
+    async fn get_administration(
+        &self,
+        request: Request<v1::AdministrationStatusRequest>,
+    ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let request = request.into_inner();
+        let result = match (
+            request.cluster_id.parse::<ClusterId>(),
+            request.request_id.parse::<AdministrationRequestId>(),
+        ) {
+            (Ok(cluster), Ok(request)) => {
+                self.cluster
+                    .administration_operation(cluster, request)
+                    .await
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(administration_response(result)))
+    }
+
+    async fn abort_administration(
+        &self,
+        request: Request<v1::AbortAdministrationRequest>,
+    ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let request = request.into_inner();
+        let result = match (
+            request.cluster_id.parse::<ClusterId>(),
+            request.request_id.parse::<AdministrationRequestId>(),
+        ) {
+            (Ok(cluster), Ok(request)) => self.cluster.abort_administration(cluster, request).await,
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        };
+        Ok(Response::new(administration_response(result)))
+    }
+}
+
+fn administration_response(
+    result: Result<AdministrationOperation, light_stream_core::DomainError>,
+) -> v1::AdministrationResponse {
+    match result {
+        Ok(operation) => {
+            let (request_id, kind, remove_node_id, add_node, group_id, target_node_id) =
+                match operation.intent() {
+                    AdministrationIntent::ReplaceVoter {
+                        request,
+                        remove,
+                        add,
+                        ..
+                    } => (
+                        request.to_string(),
+                        "replace_voter".to_owned(),
+                        remove.get(),
+                        Some(v1::NodeDescriptor {
+                            node_id: add.node_id().get(),
+                            public_uri: add.public_uri().to_owned(),
+                            peer_uri: add.peer_uri().to_owned(),
+                        }),
+                        0,
+                        0,
+                    ),
+                    AdministrationIntent::TransferLeader {
+                        request,
+                        group,
+                        target,
+                    } => (
+                        request.to_string(),
+                        "transfer_leader".to_owned(),
+                        0,
+                        None,
+                        group.get(),
+                        target.get(),
+                    ),
+                };
+            let (lifecycle, topology_revision) = match operation.lifecycle() {
+                AdministrationLifecycle::Pending => ("pending".to_owned(), 0),
+                AdministrationLifecycle::Complete {
+                    completed_topology_revision,
+                } => ("complete".to_owned(), *completed_topology_revision),
+                AdministrationLifecycle::Aborted {
+                    completed_topology_revision,
+                } => ("aborted".to_owned(), *completed_topology_revision),
+            };
+            v1::AdministrationResponse {
+                result: Some(v1::administration_response::Result::Operation(
+                    v1::AdministrationOperation {
+                        request_id,
+                        kind,
+                        lifecycle,
+                        topology_revision,
+                        remove_node_id,
+                        add_node,
+                        group_id,
+                        target_node_id,
+                    },
+                )),
+            }
+        }
+        Err(error) => v1::AdministrationResponse {
+            result: Some(v1::administration_response::Result::Error(
+                domain_error_to_wire(&error),
+            )),
+        },
     }
 }

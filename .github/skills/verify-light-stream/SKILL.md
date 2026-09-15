@@ -103,6 +103,17 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS06/b7-1g-4
 ```
 
+For LS06 voter replacement and leader transfer, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS06 \
+  --scenario membership \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS06/membership-final-14
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -122,5 +133,7 @@ For LS05, inspect `retention-journey.json` and `l01.json` through `l10.json`. Co
 For LS06, inspect `ls06/snapshot-recovery.json`. Confirm that a stopped follower falls behind a completed snapshot and purge, crashes after an acknowledged chunk, resumes from the durable offset, reaches the leader's committed and applied index, preserves exact record bytes, and removes completed staging files.
 
 For B7, inspect `ls06/b7-plan.json`, `ls06/b7-calibration.json`, and `ls06/b7-recovery.json`. Confirm at least 1 GiB retained, the locked post-load RSS budget, the 64 MiB interrupted offset, the resumed 1,026-chunk transfer, all 1,025 records verified from the stopped repaired node, and successful scratch cleanup. Keep independent-host verification `BLOCKED`.
+
+For membership administration, inspect `ls06/membership-recovery.json`. Confirm that the coordinator dies after the durable intent, voter 4 joins through learner catch-up, every group converges to `{1,2,4}`, voter 3 restarts as `retired`, data leadership moves to the requested voter, an unreachable replacement aborts at topology revision 5, and the final membership survives a full restart.
 
 Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report secured mode as `UNSUPPORTED_LS08`. Report independent-host verification as `BLOCKED`.

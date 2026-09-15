@@ -52,6 +52,10 @@
     "b7-snapshot-recovery": {
       "command": "python3 scripts/verify.py --phase LS06 --scenario b7-snapshot --profile local --security local-insecure --artifacts artifacts/LS06/b7-1g-4",
       "evidence": ["ls06/b7-plan.json", "ls06/b7-calibration.json", "ls06/b7-recovery.json", "result.json", "cleanup.json"]
+    },
+    "membership-administration": {
+      "command": "python3 scripts/verify.py --phase LS06 --scenario membership --profile local --security all --artifacts artifacts/LS06/membership-final-14",
+      "evidence": ["ls06/membership-recovery.json", "diagnostics/raft.jsonl", "result.json", "cleanup.json"]
     }
   }
 }

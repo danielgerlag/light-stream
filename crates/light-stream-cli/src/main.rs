@@ -96,6 +96,40 @@ enum ClusterCommand {
         #[arg(long = "member")]
         members: Vec<String>,
     },
+    ReplaceVoter {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        expected_topology_revision: u64,
+        #[arg(long)]
+        remove_node_id: u64,
+        #[arg(long)]
+        add: String,
+    },
+    TransferLeader {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        group_id: u64,
+        #[arg(long)]
+        target_node_id: u64,
+    },
+    Operation {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    Abort {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -446,49 +480,124 @@ async fn run(args: Args) -> Result<serde_json::Value, ClientError> {
                 "snapshot": snapshot,
             }))
         }
-        Command::Cluster {
-            command:
+        Command::Cluster { command } => {
+            let client =
+                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            match command {
                 ClusterCommand::Bootstrap {
                     cluster_id,
                     stream_id,
                     stream_name,
                     seed_node_id,
                     members,
-                },
-        } => {
-            let spec = BootstrapSpec::new(
-                cluster_id.parse::<ClusterId>()?,
-                stream_id.parse::<StreamId>()?,
-                StreamName::parse(stream_name)?,
-            );
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
-            let bootstrap = match (seed_node_id, members.is_empty()) {
-                (None, true) => client.bootstrap(spec).await?,
-                (Some(seed_node_id), false) => {
-                    let members = members
-                        .into_iter()
-                        .map(|member| parse_member(&member))
-                        .collect::<Result<Vec<_>, DomainError>>()?;
-                    client
-                        .bootstrap_three_voter(spec, seed_node_id, &members)
-                        .await?
+                } => {
+                    let spec = BootstrapSpec::new(
+                        cluster_id.parse::<ClusterId>()?,
+                        stream_id.parse::<StreamId>()?,
+                        StreamName::parse(stream_name)?,
+                    );
+                    let bootstrap = match (seed_node_id, members.is_empty()) {
+                        (None, true) => client.bootstrap(spec).await?,
+                        (Some(seed_node_id), false) => {
+                            let members = members
+                                .into_iter()
+                                .map(|member| parse_member(&member))
+                                .collect::<Result<Vec<_>, DomainError>>()?;
+                            client
+                                .bootstrap_three_voter(spec, seed_node_id, &members)
+                                .await?
+                        }
+                        _ => {
+                            return Err(DomainError::InvalidIdentity {
+                                kind: "bootstrap topology".to_owned(),
+                                reason:
+                                    "use both --seed-node-id and three --member values, or neither"
+                                        .to_owned(),
+                            }
+                            .into());
+                        }
+                    };
+                    Ok(json!({
+                        "command": "cluster-bootstrap",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "cluster": bootstrap,
+                    }))
                 }
-                _ => {
-                    return Err(DomainError::InvalidIdentity {
-                        kind: "bootstrap topology".to_owned(),
-                        reason: "use both --seed-node-id and three --member values, or neither"
-                            .to_owned(),
-                    }
-                    .into());
+                ClusterCommand::ReplaceVoter {
+                    cluster_id,
+                    request_id,
+                    expected_topology_revision,
+                    remove_node_id,
+                    add,
+                } => {
+                    let add = parse_member(&add)?;
+                    let operation = client
+                        .replace_voter(
+                            cluster_id.parse()?,
+                            &request_id,
+                            expected_topology_revision,
+                            remove_node_id,
+                            &add,
+                        )
+                        .await?;
+                    Ok(json!({
+                        "command": "cluster-replace-voter",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "operation": operation,
+                    }))
                 }
-            };
-            Ok(json!({
-                "command": "cluster-bootstrap",
-                "ok": true,
-                "endpoint": endpoint,
-                "cluster": bootstrap,
-            }))
+                ClusterCommand::TransferLeader {
+                    cluster_id,
+                    request_id,
+                    group_id,
+                    target_node_id,
+                } => {
+                    let operation = client
+                        .transfer_leadership(
+                            cluster_id.parse()?,
+                            &request_id,
+                            group_id,
+                            target_node_id,
+                        )
+                        .await?;
+                    Ok(json!({
+                        "command": "cluster-transfer-leader",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "operation": operation,
+                    }))
+                }
+                ClusterCommand::Operation {
+                    cluster_id,
+                    request_id,
+                } => {
+                    let operation = client
+                        .administration_status(cluster_id.parse()?, &request_id)
+                        .await?;
+                    Ok(json!({
+                        "command": "cluster-operation",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "operation": operation,
+                    }))
+                }
+                ClusterCommand::Abort {
+                    cluster_id,
+                    request_id,
+                } => {
+                    let operation = client
+                        .abort_administration(cluster_id.parse()?, &request_id)
+                        .await?;
+                    Ok(json!({
+                        "command": "cluster-abort",
+                        "ok": true,
+                        "endpoint": endpoint,
+                        "operation": operation,
+                    }))
+                }
+            }
         }
         Command::Stream { command } => {
             let client =

@@ -1,0 +1,461 @@
+{
+  "aborted_replacement": {
+    "add_node": {
+      "node_id": 5,
+      "peer_uri": "http://127.0.0.1:53472",
+      "public_uri": "http://127.0.0.1:53471"
+    },
+    "group_id": null,
+    "kind": "replace_voter",
+    "lifecycle": "aborted",
+    "remove_node_id": 4,
+    "request_id": "87335f93-a94e-5d96-2a24-5e999a64bce3",
+    "target_node_id": null,
+    "topology_revision": 5
+  },
+  "cluster_id": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+  "coordinator_killed_after_intent": 1,
+  "final_membership": {
+    "1": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    "2": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    "4": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 4
+    }
+  },
+  "post_abort_membership": {
+    "1": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    "2": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    "4": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 4
+    }
+  },
+  "removed_node_refusal": {
+    "command": "request",
+    "error": {
+      "code": "cluster_forming",
+      "detail": {
+        "code": "cluster_forming"
+      },
+      "message": "cluster formation is not complete"
+    },
+    "ok": false
+  },
+  "replacement_begin": {
+    "add_node": {
+      "node_id": 4,
+      "peer_uri": "http://127.0.0.1:52610",
+      "public_uri": "http://127.0.0.1:52609"
+    },
+    "group_id": null,
+    "kind": "replace_voter",
+    "lifecycle": "pending",
+    "remove_node_id": 3,
+    "request_id": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c",
+    "target_node_id": null,
+    "topology_revision": 0
+  },
+  "replacement_complete": {
+    "add_node": {
+      "node_id": 4,
+      "peer_uri": "http://127.0.0.1:52610",
+      "public_uri": "http://127.0.0.1:52609"
+    },
+    "group_id": null,
+    "kind": "replace_voter",
+    "lifecycle": "complete",
+    "remove_node_id": 3,
+    "request_id": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c",
+    "target_node_id": null,
+    "topology_revision": 3
+  },
+  "restarted_membership": {
+    "1": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    "2": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    "4": {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            4
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            4
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 4
+    }
+  },
+  "revision": "d31a78454dc05281246591ef125a5e4ef8c7650d50374f4b93754c803ae72dee",
+  "stream_id": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+  "transfer_begin": {
+    "add_node": null,
+    "group_id": 2,
+    "kind": "transfer_leader",
+    "lifecycle": "pending",
+    "remove_node_id": null,
+    "request_id": "831af6a2-243c-f61a-40b4-0462617739a8",
+    "target_node_id": 1,
+    "topology_revision": 0
+  },
+  "transfer_complete": {
+    "add_node": null,
+    "group_id": 2,
+    "kind": "transfer_leader",
+    "lifecycle": "complete",
+    "remove_node_id": null,
+    "request_id": "831af6a2-243c-f61a-40b4-0462617739a8",
+    "target_node_id": 1,
+    "topology_revision": 3
+  },
+  "transferred_data_leader": 1,
+  "unreachable_replacement": {
+    "add_node": {
+      "node_id": 5,
+      "peer_uri": "http://127.0.0.1:53472",
+      "public_uri": "http://127.0.0.1:53471"
+    },
+    "group_id": null,
+    "kind": "replace_voter",
+    "lifecycle": "pending",
+    "remove_node_id": 4,
+    "request_id": "87335f93-a94e-5d96-2a24-5e999a64bce3",
+    "target_node_id": null,
+    "topology_revision": 0
+  },
+  "verdict": "PASS"
+}

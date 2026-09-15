@@ -19,14 +19,23 @@
     "success_data_removed": true
   },
   "ls02b_regression": {
-    "evidence": "artifacts/LS06/ls02b-regression-banked-final",
+    "evidence": "artifacts/LS06/final-ls02b",
     "verdict": "PASS",
     "success_data_removed": true
   },
+  "membership": {
+    "evidence": "artifacts/LS06/membership-final-14",
+    "verdict": "PASS",
+    "final_voters": [1, 2, 4],
+    "coordinator_killed_after_intent": true,
+    "removed_node_retired": true,
+    "leader_transfer": true,
+    "abort_topology_revision": 5,
+    "full_restart": true,
+    "success_data_removed": true
+  },
   "pending": [
-    "learner voter replacement",
-    "durable leader transfer",
-    "interrupted membership recovery",
+    "cross-group recovery isolation",
     "independent-host verification"
   ]
 }

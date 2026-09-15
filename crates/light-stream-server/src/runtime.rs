@@ -11,21 +11,23 @@ use std::{
 };
 
 use light_stream_core::{
-    AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
-    BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology, ClusterId,
-    CommittedBookmark, CommittedStreamBookmark, ConsensusGroup, CreateBookmarkSpec,
-    CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint, LeaseRelease, LeaseRenewal,
-    NodeDescriptor, NodeId, OperationalProof, PartitionId, PartitionKey, PartitionRoute,
-    ProducerRequestId, ProtectedFetchRequest, PublishBatch, PublishReceipt, RecordOffset,
-    ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome, RetentionRequest,
-    RetentionResult, RetentionStatus, StreamBookmarkPage, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName,
+    AdministrationIntent, AdministrationLifecycle, AdministrationOperation,
+    AdministrationRequestId, AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage,
+    BookmarkPageRequest, BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology,
+    ClusterId, ClusterTopology, CommittedBookmark, CommittedStreamBookmark, ConsensusGroup,
+    CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint,
+    LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, OperationalProof, PartitionId,
+    PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest, PublishBatch,
+    PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome,
+    RetentionRequest, RetentionResult, RetentionStatus, StreamBookmarkPage,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
+    StreamName,
 };
 use light_stream_storage::{
     ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
     DATA_GROUP_ID, DataRaftConfig, GroupCommand, GroupIdentity, GroupKind, GroupStorageBudget,
     NoRemoteNetworkFactory, RocksStateMachine, SnapshotArtifact, create_control_store,
-    create_data_store, open_control_store, open_data_store,
+    create_data_store, open_control_store, open_control_store_with_topology, open_data_store,
 };
 use openraft::{
     BasicNode, Config, Raft, ReadPolicy, ServerState, SnapshotPolicy,
@@ -38,8 +40,8 @@ use tokio::sync::{Mutex, RwLock};
 use crate::{
     config::PeerRoutes,
     manifest::{
-        FormationSpec, GroupPoolConfig, NODE_MANIFEST_VERSION, NodeManifestV1, NodeManifestV2,
-        PersistedNodeState,
+        FormationSpec, GroupPoolConfig, LEGACY_NODE_MANIFEST_VERSION, LegacyNodeManifestV3,
+        NODE_MANIFEST_VERSION, NodeManifestV1, NodeManifestV2, PersistedNodeState,
     },
     peer::{self, TonicNetworkFactory, wire},
 };
@@ -83,6 +85,7 @@ impl ActiveManifest {
                 PersistedNodeState::Joining => "joining",
                 PersistedNodeState::Forming => "forming",
                 PersistedNodeState::Active => "active",
+                PersistedNodeState::Retired => "retired",
             },
         }
     }
@@ -105,6 +108,10 @@ struct ActiveCluster {
     data: BTreeMap<u64, DataGroup>,
     control_reader: CommittedStateReader,
     operational: RwLock<BTreeMap<u64, OperationalProof>>,
+    peer_topology: Option<peer::PeerTopology>,
+    topology_manifest_dirty: AtomicBool,
+    administration_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    administration_delay: Option<Duration>,
     maintenance_shutdown: AtomicBool,
 }
 
@@ -119,6 +126,9 @@ struct DataGroup {
 impl ActiveCluster {
     async fn shutdown(&self) -> Result<(), DomainError> {
         self.maintenance_shutdown.store(true, Ordering::Release);
+        if let Some(task) = self.administration_task.lock().await.take() {
+            let _ = tokio::time::timeout(FORMATION_TIMEOUT, task).await;
+        }
         self.control.shutdown().await.map_err(raft_fatal)?;
         for group in self.data.values() {
             group.raft.shutdown().await.map_err(raft_fatal)?;
@@ -226,16 +236,16 @@ impl ClusterManager {
                     }
                     manager.open_v1(manifest).await?
                 }
-                ActiveManifest::V2(manifest) => {
-                    manager
-                        .peer_routes
-                        .validate_topology(manager.local.node_id(), &manifest.formation.members)?;
-                    manager.open_v2(manifest).await?
-                }
+                ActiveManifest::V2(manifest) => manager.open_v2(manifest).await?,
             };
             let active = Arc::new(active);
+            if let ActiveManifest::V2(manifest) = &*active.manifest.read().await {
+                write_manifest(&manager.data_dir, manifest)?;
+            }
             spawn_retention_maintenance(active.clone());
             spawn_operational_probes(active.clone());
+            spawn_topology_sync(active.clone(), manager.data_dir.clone());
+            start_administration_reconciler(active.clone()).await;
             *manager.active.write().await = Some(active);
         }
         Ok(manager)
@@ -302,6 +312,8 @@ impl ClusterManager {
         let active = Arc::new(active);
         spawn_retention_maintenance(active.clone());
         spawn_operational_probes(active.clone());
+        spawn_topology_sync(active.clone(), self.data_dir.clone());
+        start_administration_reconciler(active.clone()).await;
         *self.active.write().await = Some(active);
         bootstrap_result(spec)
     }
@@ -345,11 +357,13 @@ impl ClusterManager {
                 self.local.node_id(),
                 formation.clone(),
                 PersistedNodeState::Forming,
-            );
+            )?;
             write_manifest(&self.data_dir, &manifest)?;
             let active = Arc::new(self.create_v2(manifest, true).await?);
             spawn_retention_maintenance(active.clone());
             spawn_operational_probes(active.clone());
+            spawn_topology_sync(active.clone(), self.data_dir.clone());
+            start_administration_reconciler(active.clone()).await;
             *self.active.write().await = Some(active.clone());
             active
         };
@@ -367,7 +381,11 @@ impl ClusterManager {
         active: &Arc<ActiveCluster>,
         formation: &FormationSpec,
     ) -> Result<(), DomainError> {
-        if prove_active(active, formation).await.is_ok() {
+        let topology = topology_from_formation(formation)?;
+        if prove_active(active, &formation.bootstrap, &topology)
+            .await
+            .is_ok()
+        {
             self.set_active(active).await?;
             return self.activate_members(formation).await;
         }
@@ -401,6 +419,11 @@ impl ClusterManager {
             &active.control_reader,
             GroupCommand::BootstrapControl {
                 spec: formation.bootstrap.clone(),
+                topology: Some(ClusterTopology::try_new(
+                    1,
+                    formation.members.clone(),
+                    formation.members.iter().map(|member| member.node_id()),
+                )?),
                 data_groups: formation.group_pool.data_group_ids()?,
                 max_streams: formation.group_pool.max_streams,
                 max_partitions_per_stream: formation.group_pool.max_partitions_per_stream,
@@ -432,7 +455,7 @@ impl ClusterManager {
         for group in active.data.values() {
             converge_membership(&group.raft, formation).await?;
         }
-        prove_active(active, formation).await?;
+        prove_active(active, &formation.bootstrap, &topology).await?;
         self.set_active(active).await?;
         self.activate_members(formation).await
     }
@@ -487,7 +510,8 @@ impl ClusterManager {
             ));
         }
         let manifest =
-            NodeManifestV2::new(self.local.node_id(), formation, PersistedNodeState::Joining);
+            NodeManifestV2::new(self.local.node_id(), formation, PersistedNodeState::Joining)
+                .map_err(internal_status)?;
         write_manifest(&self.data_dir, &manifest).map_err(internal_status)?;
         let active = Arc::new(
             self.create_v2(manifest, true)
@@ -496,6 +520,72 @@ impl ClusterManager {
         );
         spawn_retention_maintenance(active.clone());
         spawn_operational_probes(active.clone());
+        spawn_topology_sync(active.clone(), self.data_dir.clone());
+        start_administration_reconciler(active.clone()).await;
+        *self.active.write().await = Some(active);
+        Ok(())
+    }
+
+    pub(crate) async fn prepare_replacement(
+        &self,
+        envelope: &wire::PeerEnvelope,
+        preparation: peer::ReplacementPreparation,
+    ) -> Result<(), tonic::Status> {
+        validate_replacement_envelope(&self.local, envelope, &preparation)?;
+        let nodes = preparation
+            .topology
+            .authorized_nodes()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.peer_routes
+            .validate_topology(self.local.node_id(), &nodes)
+            .map_err(internal_status)?;
+        let _guard = self.bootstrap_lock.lock().await;
+        if let Some(active) = self.active.read().await.as_ref() {
+            let mut manifest = active.manifest.write().await;
+            return match &mut *manifest {
+                ActiveManifest::V2(existing)
+                    if existing.formation.cluster_id == preparation.formation.cluster_id =>
+                {
+                    if preparation.topology.revision() < existing.topology.revision() {
+                        return Err(tonic::Status::failed_precondition(
+                            "replacement topology is older than the durable topology",
+                        ));
+                    }
+                    existing.topology = preparation.topology.clone();
+                    if let Some(peers) = &active.peer_topology {
+                        peers.replace(nodes).map_err(internal_status)?;
+                    }
+                    write_manifest(&self.data_dir, existing).map_err(internal_status)
+                }
+                _ => Err(tonic::Status::already_exists(
+                    "node already belongs to another cluster",
+                )),
+            };
+        }
+        if has_group_storage(&self.data_dir).map_err(internal_status)? {
+            return Err(tonic::Status::failed_precondition(
+                "group storage exists without a matching manifest",
+            ));
+        }
+        let manifest = NodeManifestV2::with_topology(
+            self.local.node_id(),
+            preparation.formation,
+            preparation.topology,
+            PersistedNodeState::Joining,
+        )
+        .map_err(internal_status)?;
+        write_manifest(&self.data_dir, &manifest).map_err(internal_status)?;
+        let active = Arc::new(
+            self.create_v2(manifest, true)
+                .await
+                .map_err(internal_status)?,
+        );
+        spawn_retention_maintenance(active.clone());
+        spawn_operational_probes(active.clone());
+        spawn_topology_sync(active.clone(), self.data_dir.clone());
+        start_administration_reconciler(active.clone()).await;
         *self.active.write().await = Some(active);
         Ok(())
     }
@@ -523,10 +613,85 @@ impl ClusterManager {
                 }
             }
         }
-        prove_active(&active, formation)
+        let topology = {
+            let manifest = active.manifest.read().await;
+            let ActiveManifest::V2(manifest) = &*manifest else {
+                return Err(tonic::Status::failed_precondition(
+                    "replacement activation requires a replicated manifest",
+                ));
+            };
+            manifest.topology.clone()
+        };
+        prove_active(&active, &formation.bootstrap, &topology)
             .await
             .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
         self.set_active(&active).await.map_err(internal_status)
+    }
+
+    pub(crate) async fn activate_replacement(
+        &self,
+        envelope: &wire::PeerEnvelope,
+        preparation: &peer::ReplacementPreparation,
+    ) -> Result<(), tonic::Status> {
+        validate_replacement_envelope(&self.local, envelope, preparation)?;
+        let active = self
+            .active
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| tonic::Status::failed_precondition("node is pristine"))?;
+        sync_active_topology(&active, &preparation.topology)
+            .await
+            .map_err(internal_status)?;
+        prove_active(
+            &active,
+            &preparation.formation.bootstrap,
+            &preparation.topology,
+        )
+        .await
+        .map_err(|error| tonic::Status::failed_precondition(error.to_string()))?;
+        self.set_active(&active).await.map_err(internal_status)
+    }
+
+    pub(crate) async fn retire_replacement(
+        &self,
+        envelope: &wire::PeerEnvelope,
+        retirement: peer::ReplacementRetirement,
+    ) -> Result<(), tonic::Status> {
+        validate_replacement_envelope(
+            &self.local,
+            envelope,
+            &peer::ReplacementPreparation {
+                formation: retirement.formation.clone(),
+                topology: retirement.transitional_topology,
+            },
+        )?;
+        let active = self
+            .active
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| tonic::Status::failed_precondition("node is pristine"))?;
+        let mut manifest = active.manifest.write().await;
+        let ActiveManifest::V2(manifest) = &mut *manifest else {
+            return Err(tonic::Status::failed_precondition(
+                "standalone node cannot be retired by replacement",
+            ));
+        };
+        manifest.topology = retirement.final_topology.clone();
+        manifest.state = PersistedNodeState::Retired;
+        if let Some(peers) = &active.peer_topology {
+            peers
+                .replace(
+                    retirement
+                        .final_topology
+                        .authorized_nodes()
+                        .values()
+                        .cloned(),
+                )
+                .map_err(internal_status)?;
+        }
+        write_manifest(&self.data_dir, manifest).map_err(internal_status)
     }
 
     async fn set_active(&self, active: &Arc<ActiveCluster>) -> Result<(), DomainError> {
@@ -592,7 +757,10 @@ impl ClusterManager {
             || envelope.group_id != expected_group
             || envelope.target_node_id != self.local.node_id().get()
             || envelope.sender_node_id == self.local.node_id().get()
-            || manifest.formation.member(envelope.sender_node_id).is_none()
+            || NodeId::new(envelope.sender_node_id)
+                .ok()
+                .and_then(|node| manifest.topology.node(node))
+                .is_none()
         {
             return Err(tonic::Status::permission_denied(
                 "peer envelope conflicts with the durable topology",
@@ -634,7 +802,12 @@ impl ClusterManager {
                 .ok_or(DomainError::ClusterForming)?;
             let voters = match &*active.manifest.read().await {
                 ActiveManifest::V1(_) => BTreeSet::from([self.local.node_id().get()]),
-                ActiveManifest::V2(value) => value.formation.voter_ids(),
+                ActiveManifest::V2(value) => value
+                    .topology
+                    .desired_voters()
+                    .iter()
+                    .map(|node| node.get())
+                    .collect(),
             };
             if !membership_is_exact(&group.raft.metrics().borrow_watched(), &voters) {
                 return Err(DomainError::ClusterForming);
@@ -1370,7 +1543,12 @@ impl ClusterManager {
         let manifest = active.manifest.read().await.clone();
         let peers = match &manifest {
             ActiveManifest::V1(_) => vec![self.local.clone()],
-            ActiveManifest::V2(value) => value.formation.members.clone(),
+            ActiveManifest::V2(value) => value
+                .topology
+                .authorized_nodes()
+                .values()
+                .cloned()
+                .collect(),
         };
         let pool = manifest.group_pool().clone();
         let budget = pool.per_group_budget().ok();
@@ -1441,6 +1619,67 @@ impl ClusterManager {
         }
     }
 
+    pub async fn begin_administration(
+        &self,
+        cluster: ClusterId,
+        intent: AdministrationIntent,
+    ) -> Result<AdministrationOperation, DomainError> {
+        let active = self.application_cluster().await?;
+        validate_cluster(&active, cluster).await?;
+        control_administration_write(&active, GroupCommand::BeginAdministration { intent }).await
+    }
+
+    pub async fn administration_operation(
+        &self,
+        cluster: ClusterId,
+        request: AdministrationRequestId,
+    ) -> Result<AdministrationOperation, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_control(&active).await?;
+        validate_cluster(&active, cluster).await?;
+        active
+            .control_reader
+            .administration_operation(request)?
+            .ok_or_else(|| DomainError::InvalidIdentity {
+                kind: "administration request".to_owned(),
+                reason: "request was not found".to_owned(),
+            })
+    }
+
+    pub async fn abort_administration(
+        &self,
+        cluster: ClusterId,
+        request: AdministrationRequestId,
+    ) -> Result<AdministrationOperation, DomainError> {
+        let active = self.application_cluster().await?;
+        validate_cluster(&active, cluster).await?;
+        if let Some(operation) = active.control_reader.administration_operation(request)?
+            && let AdministrationIntent::ReplaceVoter { remove, add, .. } = operation.intent()
+        {
+            let topology =
+                active
+                    .control_reader
+                    .cluster_topology()?
+                    .ok_or_else(|| DomainError::Storage {
+                        reason: "replacement topology is missing".to_owned(),
+                    })?;
+            let mut original = topology
+                .desired_voters()
+                .iter()
+                .map(|node| node.get())
+                .collect::<BTreeSet<_>>();
+            original.remove(&add.node_id().get());
+            original.insert(remove.get());
+            if !all_groups_have_membership(&active, &original) {
+                return Err(DomainError::UnsupportedOperation {
+                    operation: "abort after membership change".to_owned(),
+                    available_phase: "manual recovery".to_owned(),
+                });
+            }
+        }
+        control_administration_write(&active, GroupCommand::AbortAdministration { request }).await
+    }
+
     pub async fn shutdown(&self) -> Result<(), DomainError> {
         if let Some(active) = self.active.read().await.as_ref() {
             active.shutdown().await?;
@@ -1456,6 +1695,22 @@ impl ClusterManager {
             .clone()
             .ok_or(DomainError::NotBootstrapped)?;
         if !active.manifest.read().await.is_application_active() {
+            return Err(DomainError::ClusterForming);
+        }
+        if let ActiveManifest::V2(manifest) = &*active.manifest.read().await
+            && manifest.topology.node(self.local.node_id()).is_none()
+        {
+            return Err(DomainError::ClusterForming);
+        }
+        let control_membership = active
+            .control
+            .metrics()
+            .borrow_watched()
+            .committed_membership_config
+            .membership()
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        if !control_membership.contains(&self.local.node_id().get()) {
             return Err(DomainError::ClusterForming);
         }
         Ok(active)
@@ -1548,6 +1803,10 @@ impl ClusterManager {
             data,
             control_reader,
             operational: RwLock::new(BTreeMap::new()),
+            peer_topology: None,
+            topology_manifest_dirty: AtomicBool::new(false),
+            administration_task: Mutex::new(None),
+            administration_delay: self.verification_delay.map(|(_, delay)| delay),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1631,6 +1890,11 @@ impl ClusterManager {
             &control_reader,
             GroupCommand::BootstrapControl {
                 spec: manifest.bootstrap.clone(),
+                topology: Some(ClusterTopology::try_new(
+                    1,
+                    [self.local.clone()],
+                    [self.local.node_id()],
+                )?),
                 data_groups: manifest.group_pool.data_group_ids()?,
                 max_streams: manifest.group_pool.max_streams,
                 max_partitions_per_stream: manifest.group_pool.max_partitions_per_stream,
@@ -1655,6 +1919,10 @@ impl ClusterManager {
             data,
             control_reader,
             operational: RwLock::new(BTreeMap::new()),
+            peer_topology: None,
+            topology_manifest_dirty: AtomicBool::new(false),
+            administration_task: Mutex::new(None),
+            administration_delay: self.verification_delay.map(|(_, delay)| delay),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1668,7 +1936,8 @@ impl ClusterManager {
             )
             .await?;
         if manifest.state == PersistedNodeState::Active {
-            wait_active_local_recovery(&active, &manifest.formation).await?;
+            wait_active_local_recovery(&active, &manifest.formation.bootstrap, &manifest.topology)
+                .await?;
         } else if manifest.state == PersistedNodeState::Forming
             && manifest.formation.seed_node_id == self.local.node_id()
         {
@@ -1692,7 +1961,7 @@ impl ClusterManager {
 
     async fn create_v2(
         &self,
-        manifest: NodeManifestV2,
+        mut manifest: NodeManifestV2,
         create: bool,
     ) -> Result<ActiveCluster, DomainError> {
         if manifest.formation.group_pool != self.group_pool {
@@ -1714,24 +1983,36 @@ impl ClusterManager {
         let control_handles = if create {
             create_control_store(&control_path, control_identity, self.receipt_window, budget)
         } else {
-            open_control_store(
+            open_control_store_with_topology(
                 &control_path,
                 &control_identity,
                 self.receipt_window,
                 budget,
+                &manifest.topology,
             )
         }
         .map_err(storage_error)?;
         let control_reader = control_handles.reader.clone();
-        let members = manifest.formation.members.clone();
+        if let Some(topology) = control_reader.cluster_topology()? {
+            manifest.topology = topology;
+        }
+        let members = manifest
+            .topology
+            .authorized_nodes()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.peer_routes
+            .validate_topology(self.local.node_id(), &members)?;
+        let peer_topology = peer::PeerTopology::new(members);
         let control = Raft::new(
             self.local.node_id().get(),
             raft_config(format!("{}-control", manifest.formation.cluster_id), true)?,
-            TonicNetworkFactory::<ControlRaftConfig>::new(
+            TonicNetworkFactory::<ControlRaftConfig>::with_topology(
                 manifest.formation.cluster_id,
                 CONTROL_GROUP_ID,
                 self.local.node_id().get(),
-                members.clone(),
+                peer_topology.clone(),
                 self.peer_routes.clone(),
             ),
             control_handles.log_store,
@@ -1766,11 +2047,11 @@ impl ClusterManager {
                     format!("{}-data-{}", manifest.formation.cluster_id, group_id),
                     true,
                 )?,
-                TonicNetworkFactory::<DataRaftConfig>::new(
+                TonicNetworkFactory::<DataRaftConfig>::with_topology(
                     manifest.formation.cluster_id,
                     group_id.get(),
                     self.local.node_id().get(),
-                    members.clone(),
+                    peer_topology.clone(),
                     self.peer_routes.clone(),
                 ),
                 handles.log_store,
@@ -1795,18 +2076,42 @@ impl ClusterManager {
             data,
             control_reader,
             operational: RwLock::new(BTreeMap::new()),
+            peer_topology: Some(peer_topology),
+            topology_manifest_dirty: AtomicBool::new(false),
+            administration_task: Mutex::new(None),
+            administration_delay: self.verification_delay.map(|(_, delay)| delay),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
 }
 
+fn topology_from_formation(formation: &FormationSpec) -> Result<ClusterTopology, DomainError> {
+    ClusterTopology::try_new(
+        1,
+        formation.members.clone(),
+        formation.members.iter().map(|member| member.node_id()),
+    )
+}
+
 async fn wait_active_local_recovery(
     active: &ActiveCluster,
-    formation: &FormationSpec,
+    bootstrap: &BootstrapSpec,
+    topology: &ClusterTopology,
 ) -> Result<(), DomainError> {
     let deadline = Instant::now() + FORMATION_TIMEOUT;
     loop {
-        if prove_active(active, formation).await.is_ok() {
+        if active.control_reader.cluster_topology()?.is_none() {
+            ensure_control_topology(active, topology).await?;
+        }
+        let effective_topology = active
+            .control_reader
+            .cluster_topology()?
+            .unwrap_or_else(|| topology.clone());
+        sync_active_topology(active, &effective_topology).await?;
+        if prove_active(active, bootstrap, &effective_topology)
+            .await
+            .is_ok()
+        {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -1816,6 +2121,491 @@ async fn wait_active_local_recovery(
             });
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn sync_active_topology(
+    active: &ActiveCluster,
+    topology: &ClusterTopology,
+) -> Result<(), DomainError> {
+    let mut manifest = active.manifest.write().await;
+    let ActiveManifest::V2(manifest) = &mut *manifest else {
+        return Ok(());
+    };
+    if &manifest.topology == topology {
+        return Ok(());
+    }
+    if let Some(peers) = &active.peer_topology {
+        peers.replace(topology.authorized_nodes().values().cloned())?;
+    }
+    manifest.topology = topology.clone();
+    active
+        .topology_manifest_dirty
+        .store(true, Ordering::Release);
+    Ok(())
+}
+
+fn spawn_topology_sync(active: Arc<ActiveCluster>, data_dir: PathBuf) {
+    tokio::spawn(async move {
+        while !active.maintenance_shutdown.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if active.maintenance_shutdown.load(Ordering::Acquire) {
+                break;
+            }
+
+            let topology = match active.control_reader.cluster_topology() {
+                Ok(Some(topology)) => topology,
+                Ok(None) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "topology_sync_read_failed",
+                            "detail": error.to_string(),
+                        })
+                    );
+                    continue;
+                }
+            };
+            let changed = {
+                let manifest = active.manifest.read().await;
+                matches!(
+                    &*manifest,
+                    ActiveManifest::V2(manifest) if manifest.topology != topology
+                )
+            };
+            if !changed && !active.topology_manifest_dirty.load(Ordering::Acquire) {
+                continue;
+            }
+            if let Err(error) = sync_active_topology(&active, &topology).await {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "topology_sync_failed",
+                        "detail": error.to_string(),
+                    })
+                );
+                continue;
+            }
+            let manifest = active.manifest.read().await.clone();
+            if let ActiveManifest::V2(manifest) = manifest {
+                match write_manifest(&data_dir, &manifest) {
+                    Ok(()) => active
+                        .topology_manifest_dirty
+                        .store(false, Ordering::Release),
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "topology_manifest_write_failed",
+                                "detail": error.to_string(),
+                            })
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn start_administration_reconciler(active: Arc<ActiveCluster>) {
+    if matches!(
+        &*active.manifest.read().await,
+        ActiveManifest::V2(NodeManifestV2 {
+            state: PersistedNodeState::Retired,
+            ..
+        })
+    ) {
+        return;
+    }
+    let task_active = active.clone();
+    let task = tokio::spawn(async move {
+        while !task_active.maintenance_shutdown.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if task_active.maintenance_shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            if matches!(
+                &*task_active.manifest.read().await,
+                ActiveManifest::V2(NodeManifestV2 {
+                    state: PersistedNodeState::Retired,
+                    ..
+                })
+            ) {
+                break;
+            }
+            let operation = match task_active.control_reader.active_administration() {
+                Ok(Some(operation)) => operation,
+                Ok(_) => continue,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "administration_read_failed",
+                            "detail": error.to_string(),
+                        })
+                    );
+                    continue;
+                }
+            };
+            if let Some(delay) = task_active.administration_delay {
+                tokio::time::sleep(delay).await;
+            }
+            if let Err(error) = reconcile_administration(&task_active, operation).await {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({
+                        "event": "administration_reconcile_failed",
+                        "detail": error.to_string(),
+                    })
+                );
+            }
+        }
+    });
+    *active.administration_task.lock().await = Some(task);
+}
+
+async fn reconcile_administration(
+    active: &Arc<ActiveCluster>,
+    operation: AdministrationOperation,
+) -> Result<(), DomainError> {
+    if matches!(
+        operation.lifecycle(),
+        AdministrationLifecycle::Aborted { .. }
+    ) {
+        let topology =
+            active
+                .control_reader
+                .cluster_topology()?
+                .ok_or_else(|| DomainError::Storage {
+                    reason: "aborted administration topology is missing".to_owned(),
+                })?;
+        let desired = topology
+            .desired_voters()
+            .iter()
+            .map(|node| node.get())
+            .collect::<BTreeSet<_>>();
+        reconcile_membership_target(active, &active.control, ConsensusGroup::Control, &desired)
+            .await?;
+        for group in active.data.values() {
+            reconcile_membership_target(active, &group.raft, ConsensusGroup::Data, &desired)
+                .await?;
+        }
+        if all_groups_have_membership(active, &desired)
+            && active.control.metrics().borrow_watched().state == ServerState::Leader
+        {
+            control_administration_write(
+                active,
+                GroupCommand::FinishAdministrationAbort {
+                    request: operation.intent().request(),
+                },
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+    match operation.intent() {
+        AdministrationIntent::ReplaceVoter {
+            request,
+            expected_topology_revision,
+            remove,
+            add,
+        } => {
+            let topology =
+                active
+                    .control_reader
+                    .cluster_topology()?
+                    .ok_or_else(|| DomainError::Storage {
+                        reason: "replacement topology is missing".to_owned(),
+                    })?;
+            let formation = {
+                let manifest = active.manifest.read().await;
+                let ActiveManifest::V2(manifest) = &*manifest else {
+                    return Err(DomainError::UnsupportedOperation {
+                        operation: "voter replacement".to_owned(),
+                        available_phase: "LS06 replicated clusters".to_owned(),
+                    });
+                };
+                manifest.formation.clone()
+            };
+            let control_metrics = active.control.metrics().borrow_watched().clone();
+            peer::prepare_replacement_remote(
+                &peer::ReplacementPreparation {
+                    formation: formation.clone(),
+                    topology: topology.clone(),
+                },
+                control_metrics.id,
+                add,
+            )
+            .await?;
+            let desired = topology
+                .desired_voters()
+                .iter()
+                .map(|node| node.get())
+                .collect::<BTreeSet<_>>();
+            reconcile_replacement_group(
+                active,
+                &active.control,
+                ConsensusGroup::Control,
+                &desired,
+                *remove,
+                add,
+            )
+            .await?;
+            for group in active.data.values() {
+                reconcile_replacement_group(
+                    active,
+                    &group.raft,
+                    ConsensusGroup::Data,
+                    &desired,
+                    *remove,
+                    add,
+                )
+                .await?;
+            }
+
+            if all_groups_have_membership(active, &desired)
+                && active.control.metrics().borrow_watched().state == ServerState::Leader
+            {
+                let sender_node_id = active.control.metrics().borrow_watched().id;
+                let final_topology = topology.replacement_complete(
+                    *expected_topology_revision,
+                    *remove,
+                    add.clone(),
+                )?;
+                if let Some(removed) = topology.node(*remove) {
+                    peer::retire_replacement_remote(
+                        &peer::ReplacementRetirement {
+                            formation: formation.clone(),
+                            transitional_topology: topology.clone(),
+                            final_topology: final_topology.clone(),
+                        },
+                        sender_node_id,
+                        removed,
+                    )
+                    .await?;
+                }
+                peer::activate_replacement_remote(
+                    &peer::ReplacementPreparation {
+                        formation,
+                        topology,
+                    },
+                    sender_node_id,
+                    add,
+                )
+                .await?;
+                control_administration_write(
+                    active,
+                    GroupCommand::CompleteAdministration { request: *request },
+                )
+                .await?;
+            }
+        }
+        AdministrationIntent::TransferLeader {
+            request,
+            group,
+            target,
+        } => {
+            let complete =
+                if group.get() == CONTROL_GROUP_ID {
+                    reconcile_leader_transfer(&active.control, *target).await?;
+                    leader_transfer_is_complete(&active.control, &active.control_reader, *target)?
+                } else {
+                    let data = active.data.get(&group.get()).ok_or_else(|| {
+                        DomainError::InvalidIdentity {
+                            kind: "leader transfer group".to_owned(),
+                            reason: "group is not hosted by this node".to_owned(),
+                        }
+                    })?;
+                    reconcile_leader_transfer(&data.raft, *target).await?;
+                    leader_transfer_is_complete(&data.raft, &data.reader, *target)?
+                };
+            if complete && active.control.metrics().borrow_watched().state == ServerState::Leader {
+                control_administration_write(
+                    active,
+                    GroupCommand::CompleteAdministration { request: *request },
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_membership_target<C>(
+    active: &Arc<ActiveCluster>,
+    raft: &Raft<C, RocksStateMachine<C>>,
+    group: ConsensusGroup,
+    desired: &BTreeSet<u64>,
+) -> Result<(), DomainError>
+where
+    C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    let metrics = raft.metrics().borrow_watched().clone();
+    if metrics.state != ServerState::Leader || membership_is_exact(&metrics, desired) {
+        return Ok(());
+    }
+    tokio::time::timeout(
+        FORMATION_TIMEOUT,
+        raft.change_membership(desired.clone(), false),
+    )
+    .await
+    .map_err(|_| DomainError::QuorumUnavailable {
+        group,
+        outcome: RequestOutcome::AmbiguousCommit,
+        request: None,
+    })?
+    .map_err(|error| map_write_error(error, active, group))?;
+    Ok(())
+}
+
+async fn reconcile_replacement_group<C>(
+    active: &Arc<ActiveCluster>,
+    raft: &Raft<C, RocksStateMachine<C>>,
+    group: ConsensusGroup,
+    desired: &BTreeSet<u64>,
+    remove: NodeId,
+    add: &NodeDescriptor,
+) -> Result<(), DomainError>
+where
+    C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    let metrics = raft.metrics().borrow_watched().clone();
+    if metrics.state != ServerState::Leader || membership_is_exact(&metrics, desired) {
+        return Ok(());
+    }
+    if metrics
+        .membership_config
+        .membership()
+        .get_node(&add.node_id().get())
+        .is_none()
+    {
+        tokio::time::timeout(
+            FORMATION_TIMEOUT,
+            raft.add_learner(add.node_id().get(), BasicNode::new(add.peer_uri()), true),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: None,
+        })?
+        .map_err(|error| map_write_error(error, active, group))?;
+        return Ok(());
+    }
+    if metrics.current_leader == Some(remove.get()) {
+        let target = metrics
+            .membership_config
+            .membership()
+            .voter_ids()
+            .find(|node| *node != remove.get() && desired.contains(node))
+            .ok_or_else(|| DomainError::InvalidRange {
+                reason: "replacement has no surviving leadership target".to_owned(),
+            })?;
+        raft.trigger()
+            .transfer_leader(target)
+            .await
+            .map_err(raft_fatal)?;
+        return Ok(());
+    }
+    tokio::time::timeout(
+        FORMATION_TIMEOUT,
+        raft.change_membership(desired.clone(), false),
+    )
+    .await
+    .map_err(|_| DomainError::QuorumUnavailable {
+        group,
+        outcome: RequestOutcome::AmbiguousCommit,
+        request: None,
+    })?
+    .map_err(|error| map_write_error(error, active, group))?;
+    Ok(())
+}
+
+async fn reconcile_leader_transfer<C>(
+    raft: &Raft<C, RocksStateMachine<C>>,
+    target: NodeId,
+) -> Result<(), DomainError>
+where
+    C: openraft::RaftTypeConfig<D = GroupCommand, R = ApplyResult, NodeId = u64, Node = BasicNode>,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    let metrics = raft.metrics().borrow_watched().clone();
+    if metrics.current_leader == Some(target.get()) {
+        return Ok(());
+    }
+    if metrics.state == ServerState::Leader {
+        raft.trigger()
+            .transfer_leader(target.get())
+            .await
+            .map_err(raft_fatal)?;
+    }
+    Ok(())
+}
+
+fn all_groups_have_membership(active: &ActiveCluster, desired: &BTreeSet<u64>) -> bool {
+    membership_is_exact(&active.control.metrics().borrow_watched(), desired)
+        && active
+            .data
+            .values()
+            .all(|group| membership_is_exact(&group.raft.metrics().borrow_watched(), desired))
+}
+
+fn leader_transfer_is_complete<C>(
+    raft: &Raft<C, RocksStateMachine<C>>,
+    reader: &CommittedStateReader,
+    target: NodeId,
+) -> Result<bool, DomainError>
+where
+    C: openraft::RaftTypeConfig<
+            D = GroupCommand,
+            R = ApplyResult,
+            NodeId = u64,
+            Node = BasicNode,
+            Term = u64,
+        >,
+    RocksStateMachine<C>: openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact>,
+{
+    let metrics = raft.metrics().borrow_watched().clone();
+    let applied = metrics.last_applied.map_or(0, |log| log.index);
+    Ok(metrics.current_leader == Some(target.get())
+        && reader
+            .operational_proof()?
+            .is_some_and(|proof| proof.matches(target, metrics.current_term, applied)))
+}
+
+async fn ensure_control_topology(
+    active: &ActiveCluster,
+    topology: &ClusterTopology,
+) -> Result<(), DomainError> {
+    match active.control_reader.cluster_topology()? {
+        Some(stored) if &stored == topology => return Ok(()),
+        Some(_) => {
+            return Err(DomainError::IdentityMismatch {
+                reason: "control topology conflicts with the durable node manifest".to_owned(),
+            });
+        }
+        None => {}
+    }
+    let metrics = active.control.metrics().borrow_watched().clone();
+    if metrics.state != ServerState::Leader || metrics.last_quorum_acked.is_none() {
+        return Ok(());
+    }
+    let response = active
+        .control
+        .client_write(GroupCommand::InitializeClusterTopology {
+            topology: topology.clone(),
+        })
+        .await
+        .map_err(raft_fatal)?;
+    match response.data {
+        ApplyResult::Noop => Ok(()),
+        ApplyResult::Rejected(error) => Err(error),
+        other => Err(DomainError::Storage {
+            reason: format!("unexpected topology initialization result {other}"),
+        }),
     }
 }
 
@@ -2032,19 +2822,65 @@ where
 
 async fn prove_active(
     active: &ActiveCluster,
-    formation: &FormationSpec,
+    bootstrap: &BootstrapSpec,
+    topology: &ClusterTopology,
 ) -> Result<(), DomainError> {
-    validate_bootstrap_readers(&active.control_reader, &active.data, &formation.bootstrap)?;
-    if !membership_is_exact(
-        &active.control.metrics().borrow_watched(),
-        &formation.voter_ids(),
-    ) || active.data.values().any(|group| {
-        !membership_is_exact(
-            &group.raft.metrics().borrow_watched(),
-            &formation.voter_ids(),
-        )
-    }) {
+    validate_bootstrap_readers(&active.control_reader, &active.data, bootstrap)?;
+    if active.control_reader.cluster_topology()?.as_ref() != Some(topology) {
+        return Err(DomainError::IdentityMismatch {
+            reason: "control topology conflicts with the durable node manifest".to_owned(),
+        });
+    }
+    if active
+        .control_reader
+        .active_administration()?
+        .is_some_and(|operation| matches!(operation.lifecycle(), AdministrationLifecycle::Pending))
+    {
+        if membership_is_authorized(&active.control.metrics().borrow_watched(), topology)
+            && active.data.values().all(|group| {
+                membership_is_authorized(&group.raft.metrics().borrow_watched(), topology)
+            })
+        {
+            return Ok(());
+        }
         return Err(DomainError::ClusterForming);
+    }
+    let voters = topology
+        .desired_voters()
+        .iter()
+        .map(|node| node.get())
+        .collect::<BTreeSet<_>>();
+    if !membership_is_exact(&active.control.metrics().borrow_watched(), &voters)
+        || active
+            .data
+            .values()
+            .any(|group| !membership_is_exact(&group.raft.metrics().borrow_watched(), &voters))
+    {
+        return Err(DomainError::ClusterForming);
+    }
+
+    fn membership_is_authorized<C>(
+        metrics: &openraft::RaftMetrics<C>,
+        topology: &ClusterTopology,
+    ) -> bool
+    where
+        C: openraft::RaftTypeConfig<NodeId = u64>,
+    {
+        let authorized = topology
+            .authorized_nodes()
+            .keys()
+            .map(|node| node.get())
+            .collect::<BTreeSet<_>>();
+        let effective = metrics.membership_config.membership();
+        let committed = metrics.committed_membership_config.membership();
+        effective.voter_ids().next().is_some()
+            && committed.voter_ids().next().is_some()
+            && effective
+                .voter_ids()
+                .chain(effective.learner_ids())
+                .chain(committed.voter_ids())
+                .chain(committed.learner_ids())
+                .all(|node| authorized.contains(&node))
     }
     Ok(())
 }
@@ -2158,6 +2994,36 @@ async fn control_write(
         ApplyResult::Rejected(error) => Err(error),
         other => Err(DomainError::Storage {
             reason: format!("unexpected catalog apply result {other}"),
+        }),
+    }
+}
+
+async fn control_administration_write(
+    active: &Arc<ActiveCluster>,
+    command: GroupCommand,
+) -> Result<AdministrationOperation, DomainError> {
+    require_operational_leader(
+        active,
+        GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
+        &active.control,
+        &active.control_reader,
+        RequestOutcome::DefiniteNoCommit,
+        None,
+    )
+    .await?;
+    let response = tokio::time::timeout(OPERATION_TIMEOUT, active.control.client_write(command))
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Control,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: None,
+        })?
+        .map_err(|error| map_write_error(error, active, ConsensusGroup::Control))?;
+    match response.data {
+        ApplyResult::Administration(operation) => Ok(operation),
+        ApplyResult::Rejected(error) => Err(error),
+        other => Err(DomainError::Storage {
+            reason: format!("unexpected administration apply result {other}"),
         }),
     }
 }
@@ -2659,7 +3525,7 @@ fn leader_hint(
         return None;
     };
     let leader_id = leader_id?;
-    let member = manifest.formation.member(leader_id)?;
+    let member = manifest.topology.node(NodeId::new(leader_id).ok()?)?;
     if node.is_some_and(|node| node.addr == member.peer_uri()) {
         Some(LeaderHint::new(member.node_id(), member.public_uri()))
     } else {
@@ -2813,6 +3679,30 @@ fn validate_lifecycle_envelope(
     Ok(())
 }
 
+fn validate_replacement_envelope(
+    local: &NodeDescriptor,
+    envelope: &wire::PeerEnvelope,
+    preparation: &peer::ReplacementPreparation,
+) -> Result<(), tonic::Status> {
+    let local_stored = preparation
+        .topology
+        .node(local.node_id())
+        .ok_or_else(|| tonic::Status::permission_denied("target is not authorized"))?;
+    let sender = NodeId::new(envelope.sender_node_id)
+        .ok()
+        .and_then(|node| preparation.topology.node(node));
+    if envelope.cluster_id != preparation.formation.cluster_id.to_string()
+        || envelope.target_node_id != local.node_id().get()
+        || local_stored != local
+        || sender.is_none()
+    {
+        return Err(tonic::Status::permission_denied(
+            "replacement envelope conflicts with the durable topology",
+        ));
+    }
+    Ok(())
+}
+
 fn bootstrap_result(spec: &BootstrapSpec) -> Result<BootstrapResult, DomainError> {
     Ok(BootstrapResult::new(
         spec.cluster(),
@@ -2882,6 +3772,12 @@ fn read_manifest(data_dir: &Path) -> Result<Option<ActiveManifest>, DomainError>
         }
         NODE_MANIFEST_VERSION => {
             let manifest: NodeManifestV2 = serde_json::from_slice(&bytes).map_err(storage_error)?;
+            Ok(Some(ActiveManifest::V2(manifest)))
+        }
+        LEGACY_NODE_MANIFEST_VERSION => {
+            let legacy: LegacyNodeManifestV3 =
+                serde_json::from_slice(&bytes).map_err(storage_error)?;
+            let manifest = NodeManifestV2::from_legacy(legacy)?;
             Ok(Some(ActiveManifest::V2(manifest)))
         }
         version => Err(DomainError::Storage {
@@ -3084,7 +3980,8 @@ mod tests {
                 light_stream_core::NodeId::new(2).unwrap(),
                 formation,
                 PersistedNodeState::Joining,
-            ),
+            )
+            .unwrap(),
         )
         .unwrap();
         let manager = ClusterManager::open(
@@ -3101,6 +3998,52 @@ mod tests {
         assert!(path.join("groups/2/rocksdb").is_dir());
         assert!(manager.identity().await.is_none());
         manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn version_three_manifest_migration_is_not_published_before_open_succeeds() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/light-stream-server/manifest-v3-migration");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let spec = BootstrapSpec::new(
+            ClusterId::from_uuid(Uuid::new_v4()),
+            light_stream_core::StreamId::from_uuid(Uuid::new_v4()),
+            light_stream_core::StreamName::parse("bootstrap").unwrap(),
+        );
+        let formation = FormationSpec::try_new(
+            spec,
+            1,
+            vec![local(1), local(2), local(3)],
+            GroupPoolConfig::default(),
+        )
+        .unwrap();
+        write_manifest(
+            &path,
+            &LegacyNodeManifestV3 {
+                format_version: LEGACY_NODE_MANIFEST_VERSION,
+                local_node_id: NodeId::new(2).unwrap(),
+                formation,
+                state: PersistedNodeState::Active,
+            },
+        )
+        .unwrap();
+
+        let Some(ActiveManifest::V2(manifest)) = read_manifest(&path).unwrap() else {
+            panic!("expected migrated version 2 manifest");
+        };
+
+        assert_eq!(NODE_MANIFEST_VERSION, manifest.format_version);
+        assert_eq!(3, manifest.topology.authorized_nodes().len());
+        assert_eq!(3, manifest.topology.desired_voters().len());
+        let stored_before: ManifestHeader =
+            serde_json::from_slice(&fs::read(manifest_path(&path)).unwrap()).unwrap();
+        assert_eq!(LEGACY_NODE_MANIFEST_VERSION, stored_before.format_version);
+        write_manifest(&path, &manifest).unwrap();
+        let stored_after: ManifestHeader =
+            serde_json::from_slice(&fs::read(manifest_path(&path)).unwrap()).unwrap();
+        assert_eq!(NODE_MANIFEST_VERSION, stored_after.format_version);
         let _ = fs::remove_dir_all(path);
     }
 }

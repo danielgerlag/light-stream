@@ -48,6 +48,7 @@ uuid_id!(ProducerSessionId, "producer session ID");
 uuid_id!(BookmarkId, "bookmark ID");
 uuid_id!(MutationSessionId, "mutation session ID");
 uuid_id!(ReplayLeaseId, "replay lease ID");
+uuid_id!(AdministrationRequestId, "administration request ID");
 
 macro_rules! nonzero_id {
     ($name:ident, $kind:literal) => {

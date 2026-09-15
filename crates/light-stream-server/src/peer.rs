@@ -6,7 +6,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     marker::PhantomData,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -23,6 +23,7 @@ use openraft::{
     raft::{
         AppendEntriesRequest, AppendEntriesResponse, SnapshotResponse, VoteRequest, VoteResponse,
     },
+    raft::{TransferLeaderRequest, TransferLeaderResponse},
     storage::RaftStateMachine,
     type_config::alias::{LogIdOf, SnapshotMetaOf, SnapshotOf, VoteOf},
     type_config::async_runtime::WatchReceiver,
@@ -60,6 +61,19 @@ struct SnapshotIntent {
     sha256: Vec<u8>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReplacementPreparation {
+    pub formation: FormationSpec,
+    pub topology: light_stream_core::ClusterTopology,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReplacementRetirement {
+    pub formation: FormationSpec,
+    pub transitional_topology: light_stream_core::ClusterTopology,
+    pub final_topology: light_stream_core::ClusterTopology,
+}
+
 #[derive(Clone, Copy)]
 struct RpcDeadline {
     timeout: Duration,
@@ -90,12 +104,44 @@ pub struct TonicNetworkFactory<C> {
     cluster_id: ClusterId,
     group_id: u64,
     sender_node_id: u64,
-    members: Arc<BTreeMap<u64, NodeDescriptor>>,
+    topology: PeerTopology,
     peer_routes: PeerRoutes,
     marker: PhantomData<C>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PeerTopology {
+    members: Arc<RwLock<BTreeMap<u64, NodeDescriptor>>>,
+}
+
+impl PeerTopology {
+    pub fn new(members: impl IntoIterator<Item = NodeDescriptor>) -> Self {
+        Self {
+            members: Arc::new(RwLock::new(
+                members
+                    .into_iter()
+                    .map(|member| (member.node_id().get(), member))
+                    .collect(),
+            )),
+        }
+    }
+
+    pub fn replace(
+        &self,
+        members: impl IntoIterator<Item = NodeDescriptor>,
+    ) -> Result<(), DomainError> {
+        *self.members.write().map_err(|_| DomainError::Storage {
+            reason: "peer topology lock poisoned".to_owned(),
+        })? = members
+            .into_iter()
+            .map(|member| (member.node_id().get(), member))
+            .collect();
+        Ok(())
+    }
+}
+
 impl<C> TonicNetworkFactory<C> {
+    #[cfg(test)]
     pub fn new(
         cluster_id: ClusterId,
         group_id: u64,
@@ -103,23 +149,35 @@ impl<C> TonicNetworkFactory<C> {
         members: impl IntoIterator<Item = NodeDescriptor>,
         peer_routes: PeerRoutes,
     ) -> Self {
+        Self::with_topology(
+            cluster_id,
+            group_id,
+            sender_node_id,
+            PeerTopology::new(members),
+            peer_routes,
+        )
+    }
+
+    pub fn with_topology(
+        cluster_id: ClusterId,
+        group_id: u64,
+        sender_node_id: u64,
+        topology: PeerTopology,
+        peer_routes: PeerRoutes,
+    ) -> Self {
         Self {
             cluster_id,
             group_id,
             sender_node_id,
-            members: Arc::new(
-                members
-                    .into_iter()
-                    .map(|member| (member.node_id().get(), member))
-                    .collect(),
-            ),
+            topology,
             peer_routes,
             marker: PhantomData,
         }
     }
 
     fn build_network(&self, target: u64, node: &BasicNode) -> TonicRaftNetwork<C> {
-        let configured = self.members.get(&target);
+        let members = self.topology.members.read().ok();
+        let configured = members.as_ref().and_then(|members| members.get(&target));
         let (endpoint, valid) = match configured {
             Some(member) if member.peer_uri() == node.addr => (
                 Some(
@@ -151,6 +209,8 @@ where
     AppendEntriesResponse<C>: DeserializeOwned,
     VoteRequest<C>: Serialize,
     VoteResponse<C>: DeserializeOwned,
+    TransferLeaderRequest<C>: Serialize,
+    TransferLeaderResponse<C>: DeserializeOwned,
 {
     type Network = TonicRaftNetwork<C>;
 
@@ -308,6 +368,8 @@ where
     AppendEntriesResponse<C>: DeserializeOwned,
     VoteRequest<C>: Serialize,
     VoteResponse<C>: DeserializeOwned,
+    TransferLeaderRequest<C>: Serialize,
+    TransferLeaderResponse<C>: DeserializeOwned,
 {
     type SnapshotData = SnapshotArtifact;
 
@@ -495,6 +557,28 @@ where
             result = &mut transfer => result,
             closed = &mut cancel => Err(StreamingError::Closed(closed)),
         }
+    }
+
+    async fn transfer_leader(
+        &mut self,
+        rpc: TransferLeaderRequest<C>,
+        option: RPCOption,
+    ) -> Result<TransferLeaderResponse<C>, RPCError<C>> {
+        let deadline = RpcDeadline::after(option.soft_ttl());
+        let mut client = self.client(RPCTypes::TransferLeader, deadline).await?;
+        let timeout = deadline
+            .remaining()
+            .ok_or_else(|| self.timeout(RPCTypes::TransferLeader, deadline.timeout))?;
+        let request = self.request(&rpc, timeout)?;
+        let response = self
+            .response_with_deadline(
+                RPCTypes::TransferLeader,
+                deadline,
+                timeout,
+                client.transfer_leader(request),
+            )
+            .await?;
+        self.response(response)
     }
 }
 
@@ -897,6 +981,86 @@ impl wire::peer_service_server::PeerService for PeerApi {
         Ok(Response::new(encode_response(&envelope, &())?))
     }
 
+    async fn prepare_replacement(
+        &self,
+        request: Request<wire::PeerRequest>,
+    ) -> Result<Response<wire::PeerResponse>, Status> {
+        let envelope = require_envelope(request)?;
+        if envelope.group_id != LIFECYCLE_GROUP_ID {
+            return Err(Status::invalid_argument(
+                "lifecycle requests must use group zero",
+            ));
+        }
+        let preparation = decode::<ReplacementPreparation>(&envelope)?;
+        self.cluster
+            .prepare_replacement(&envelope, preparation)
+            .await?;
+        Ok(Response::new(encode_response(&envelope, &())?))
+    }
+
+    async fn activate_replacement(
+        &self,
+        request: Request<wire::PeerRequest>,
+    ) -> Result<Response<wire::PeerResponse>, Status> {
+        let envelope = require_envelope(request)?;
+        if envelope.group_id != LIFECYCLE_GROUP_ID {
+            return Err(Status::invalid_argument(
+                "lifecycle requests must use group zero",
+            ));
+        }
+        let preparation = decode::<ReplacementPreparation>(&envelope)?;
+        self.cluster
+            .activate_replacement(&envelope, &preparation)
+            .await?;
+        Ok(Response::new(encode_response(&envelope, &())?))
+    }
+
+    async fn retire_replacement(
+        &self,
+        request: Request<wire::PeerRequest>,
+    ) -> Result<Response<wire::PeerResponse>, Status> {
+        let envelope = require_envelope(request)?;
+        if envelope.group_id != LIFECYCLE_GROUP_ID {
+            return Err(Status::invalid_argument(
+                "lifecycle requests must use group zero",
+            ));
+        }
+        let retirement = decode::<ReplacementRetirement>(&envelope)?;
+        self.cluster
+            .retire_replacement(&envelope, retirement)
+            .await?;
+        Ok(Response::new(encode_response(&envelope, &())?))
+    }
+
+    async fn transfer_leader(
+        &self,
+        request: Request<wire::PeerRequest>,
+    ) -> Result<Response<wire::PeerResponse>, Status> {
+        let envelope = require_envelope(request)?;
+        let response = match envelope.group_id {
+            CONTROL_GROUP_ID => {
+                let rpc = decode::<TransferLeaderRequest<ControlRaftConfig>>(&envelope)?;
+                let raft = self.cluster.peer_control(&envelope).await?;
+                let value = raft
+                    .handle_transfer_leader(rpc)
+                    .await
+                    .map_err(internal_status)?;
+                encode_response(&envelope, &value)?
+            }
+            group_id if group_id >= DATA_GROUP_ID => {
+                let rpc = decode::<TransferLeaderRequest<DataRaftConfig>>(&envelope)?;
+                let raft = self.cluster.peer_data(&envelope).await?;
+                let value = raft
+                    .handle_transfer_leader(rpc)
+                    .await
+                    .map_err(internal_status)?;
+                encode_response(&envelope, &value)?
+            }
+            _ => return Err(Status::invalid_argument("unknown Raft group")),
+        };
+        Ok(Response::new(response))
+    }
+
     async fn begin_snapshot(
         &self,
         request: Request<wire::SnapshotBeginRequest>,
@@ -1153,9 +1317,71 @@ pub async fn activate_remote(
     lifecycle_call("activate", formation, sender_node_id, target).await
 }
 
+pub async fn prepare_replacement_remote(
+    preparation: &ReplacementPreparation,
+    sender_node_id: u64,
+    target: &NodeDescriptor,
+) -> Result<(), DomainError> {
+    lifecycle_payload_call(
+        "prepare_replacement",
+        preparation.formation.cluster_id,
+        serde_json::to_vec(preparation).map_err(storage_error)?,
+        sender_node_id,
+        target,
+    )
+    .await
+}
+
+pub async fn activate_replacement_remote(
+    preparation: &ReplacementPreparation,
+    sender_node_id: u64,
+    target: &NodeDescriptor,
+) -> Result<(), DomainError> {
+    lifecycle_payload_call(
+        "activate_replacement",
+        preparation.formation.cluster_id,
+        serde_json::to_vec(preparation).map_err(storage_error)?,
+        sender_node_id,
+        target,
+    )
+    .await
+}
+
+pub async fn retire_replacement_remote(
+    retirement: &ReplacementRetirement,
+    sender_node_id: u64,
+    target: &NodeDescriptor,
+) -> Result<(), DomainError> {
+    lifecycle_payload_call(
+        "retire_replacement",
+        retirement.formation.cluster_id,
+        serde_json::to_vec(retirement).map_err(storage_error)?,
+        sender_node_id,
+        target,
+    )
+    .await
+}
+
 async fn lifecycle_call(
     operation: &str,
     formation: &FormationSpec,
+    sender_node_id: u64,
+    target: &NodeDescriptor,
+) -> Result<(), DomainError> {
+    lifecycle_payload_call(
+        operation,
+        formation.cluster_id,
+        serde_json::to_vec(formation).map_err(storage_error)?,
+        sender_node_id,
+        target,
+    )
+    .await
+}
+
+async fn lifecycle_payload_call(
+    operation: &str,
+    cluster_id: ClusterId,
+    payload: Vec<u8>,
     sender_node_id: u64,
     target: &NodeDescriptor,
 ) -> Result<(), DomainError> {
@@ -1175,12 +1401,11 @@ async fn lifecycle_call(
     let mut client = wire::peer_service_client::PeerServiceClient::new(channel)
         .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
-    let payload = serde_json::to_vec(formation).map_err(storage_error)?;
     let mut request = Request::new(wire::PeerRequest {
         envelope: Some(wire::PeerEnvelope {
             protocol_version: PEER_PROTOCOL_VERSION,
             codec_version: PEER_CODEC_VERSION,
-            cluster_id: formation.cluster_id.to_string(),
+            cluster_id: cluster_id.to_string(),
             group_id: LIFECYCLE_GROUP_ID,
             sender_node_id,
             target_node_id: target.node_id().get(),
@@ -1188,10 +1413,12 @@ async fn lifecycle_call(
         }),
     });
     request.set_timeout(LIFECYCLE_TIMEOUT);
-    let result = if operation == "prepare_join" {
-        client.prepare_join(request).await
-    } else {
-        client.activate(request).await
+    let result = match operation {
+        "prepare_join" => client.prepare_join(request).await,
+        "prepare_replacement" => client.prepare_replacement(request).await,
+        "activate_replacement" => client.activate_replacement(request).await,
+        "retire_replacement" => client.retire_replacement(request).await,
+        _ => client.activate(request).await,
     };
     result.map_err(storage_error)?;
     Ok(())
@@ -1303,6 +1530,45 @@ mod tests {
         let invalid = factory.build_network(2, &BasicNode::new("http://127.0.0.1:7999"));
         assert!(!invalid.valid);
         assert_eq!(None, invalid.endpoint.as_deref());
+    }
+
+    #[test]
+    fn raft_network_factory_observes_replaced_authorized_topology() {
+        let cluster = ClusterId::from_uuid(Uuid::new_v4());
+        let node2 = NodeDescriptor::new(
+            light_stream_core::NodeId::new(2).unwrap(),
+            "http://127.0.0.1:7102",
+            "http://127.0.0.1:7202",
+        );
+        let topology = PeerTopology::new([node2.clone()]);
+        let factory = TonicNetworkFactory::<DataRaftConfig>::with_topology(
+            cluster,
+            DATA_GROUP_ID,
+            1,
+            topology.clone(),
+            PeerRoutes::default(),
+        );
+        assert!(
+            factory
+                .build_network(2, &BasicNode::new(node2.peer_uri()))
+                .valid
+        );
+        let node4 = NodeDescriptor::new(
+            light_stream_core::NodeId::new(4).unwrap(),
+            "http://127.0.0.1:7104",
+            "http://127.0.0.1:7204",
+        );
+        topology.replace([node4.clone()]).unwrap();
+        assert!(
+            !factory
+                .build_network(2, &BasicNode::new(node2.peer_uri()))
+                .valid
+        );
+        assert!(
+            factory
+                .build_network(4, &BasicNode::new(node4.peer_uri()))
+                .valid
+        );
     }
 
     #[test]

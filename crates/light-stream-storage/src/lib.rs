@@ -24,8 +24,9 @@ use std::{
 use crc32fast::Hasher as Crc32;
 use futures_util::{Stream, StreamExt};
 use light_stream_core::{
-    BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest, BookmarkPublicationSequence,
-    BootstrapResult, BootstrapSpec, ByteCount, CatalogRequestId, ClusterId, CommittedBookmark,
+    AdministrationIntent, AdministrationOperation, AdministrationRequestId, BookmarkId,
+    BookmarkName, BookmarkPage, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapResult,
+    BootstrapSpec, ByteCount, CatalogRequestId, ClusterId, ClusterTopology, CommittedBookmark,
     CommittedCursor, CommittedRecord, CommittedRecordRange, CommittedStreamBookmark,
     CreateStreamSpec, DomainError, FetchPage, GroupId, LeaseDeadline, LeaseRelease, LeaseRenewal,
     MutationRequestId, NodeId, OperationalProof, PartitionId, PartitionKey, PartitionPlacement,
@@ -125,6 +126,9 @@ const RETENTION_PREFIX: &[u8] = b"retention/";
 const KEY_LEASE_CLOCK: &[u8] = b"lease-clock";
 const KEY_LEASE_BUDGET: &[u8] = b"lease-budget";
 const KEY_OPERATIONAL_PROOF: &[u8] = b"operational-proof";
+const KEY_CLUSTER_TOPOLOGY: &[u8] = b"cluster-topology";
+const KEY_ACTIVE_ADMINISTRATION: &[u8] = b"administration/active";
+const ADMINISTRATION_REQUEST_PREFIX: &[u8] = b"administration/request/";
 const LEASE_ID_PREFIX: &[u8] = b"lease/id/";
 const LEASE_REQUEST_PREFIX: &[u8] = b"lease/request/";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -196,6 +200,7 @@ impl GroupIdentity {
 pub enum GroupCommand {
     BootstrapControl {
         spec: BootstrapSpec,
+        topology: Option<ClusterTopology>,
         data_groups: Vec<GroupId>,
         max_streams: u32,
         max_partitions_per_stream: u32,
@@ -268,6 +273,21 @@ pub enum GroupCommand {
     OperationalProbe {
         group: GroupId,
     },
+    BeginAdministration {
+        intent: AdministrationIntent,
+    },
+    CompleteAdministration {
+        request: AdministrationRequestId,
+    },
+    AbortAdministration {
+        request: AdministrationRequestId,
+    },
+    FinishAdministrationAbort {
+        request: AdministrationRequestId,
+    },
+    InitializeClusterTopology {
+        topology: ClusterTopology,
+    },
 }
 
 impl fmt::Display for GroupCommand {
@@ -291,6 +311,15 @@ impl fmt::Display for GroupCommand {
             Self::ReleaseReplayLease { .. } => formatter.write_str("release-replay-lease"),
             Self::MaintainRetention { .. } => formatter.write_str("maintain-retention"),
             Self::OperationalProbe { .. } => formatter.write_str("operational-probe"),
+            Self::BeginAdministration { .. } => formatter.write_str("begin-administration"),
+            Self::CompleteAdministration { .. } => formatter.write_str("complete-administration"),
+            Self::AbortAdministration { .. } => formatter.write_str("abort-administration"),
+            Self::FinishAdministrationAbort { .. } => {
+                formatter.write_str("finish-administration-abort")
+            }
+            Self::InitializeClusterTopology { .. } => {
+                formatter.write_str("initialize-cluster-topology")
+            }
         }
     }
 }
@@ -306,6 +335,7 @@ pub enum ApplyResult {
     ReplayLease(ReplayLease),
     RetentionStatus(RetentionStatus),
     OperationalProof(OperationalProof),
+    Administration(AdministrationOperation),
     Rejected(DomainError),
     Noop,
 }
@@ -331,6 +361,9 @@ impl fmt::Display for ApplyResult {
             }
             Self::OperationalProof(value) => {
                 write!(formatter, "operational proof {}", value.log_index())
+            }
+            Self::Administration(value) => {
+                write!(formatter, "administration {:?}", value.lifecycle())
             }
             Self::Rejected(error) => write!(formatter, "rejected: {error}"),
             Self::Noop => formatter.write_str("noop"),
@@ -512,6 +545,8 @@ enum ThinPayload {
 enum ThinCommand {
     BootstrapControl {
         spec: BootstrapSpec,
+        #[serde(default)]
+        topology: Option<ClusterTopology>,
         data_groups: Vec<GroupId>,
         max_streams: u32,
         max_partitions_per_stream: u32,
@@ -588,6 +623,21 @@ enum ThinCommand {
     },
     OperationalProbe {
         group: GroupId,
+    },
+    BeginAdministration {
+        intent: AdministrationIntent,
+    },
+    CompleteAdministration {
+        request: AdministrationRequestId,
+    },
+    AbortAdministration {
+        request: AdministrationRequestId,
+    },
+    FinishAdministrationAbort {
+        request: AdministrationRequestId,
+    },
+    InitializeClusterTopology {
+        topology: ClusterTopology,
     },
 }
 
@@ -866,6 +916,22 @@ pub fn open_control_store(
     open_store(path, identity, receipt_window, budget)
 }
 
+pub fn open_control_store_with_topology(
+    path: &Path,
+    identity: &GroupIdentity,
+    receipt_window: usize,
+    budget: GroupStorageBudget,
+    topology: &ClusterTopology,
+) -> Result<StoreHandles<ControlRaftConfig>, StorageOpenError> {
+    let handles = open_store(path, identity, receipt_window, budget)?;
+    handles
+        .reader
+        .db
+        .initialize_control_topology(topology)
+        .map_err(storage_open)?;
+    Ok(handles)
+}
+
 pub fn open_data_store(
     path: &Path,
     identity: &GroupIdentity,
@@ -1036,6 +1102,109 @@ fn decode<T: DeserializeOwned>(bytes: &[u8]) -> io::Result<T> {
 }
 
 impl GroupDb {
+    fn initialize_control_topology(&self, topology: &ClusterTopology) -> io::Result<()> {
+        if self.identity.kind != GroupKind::Control {
+            return Err(io_error("cluster topology belongs to the control group"));
+        }
+        match self.get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)? {
+            Some(_) => {}
+            None => self.put_sync(CF_STATE, KEY_CLUSTER_TOPOLOGY, topology)?,
+        }
+        self.migrate_control_snapshot_topology()?;
+        Ok(())
+    }
+
+    fn migrate_control_snapshot_topology(&self) -> io::Result<()> {
+        let topology = self
+            .get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?
+            .ok_or_else(|| io_error("control topology is missing"))?;
+        let Some((meta, artifact)) = self.current_snapshot_artifact()? else {
+            return Ok(());
+        };
+        let topology_value = encode(&topology)?;
+        let catalog = self.snapshot_catalog()?;
+        let mut writer = match artifact.reader() {
+            Ok(reader) => catalog.begin_artifact(
+                reader.storage_format_version(),
+                reader.identity_json(),
+                reader.meta_json(),
+            )?,
+            Err(_) if artifact.len() <= MAX_SNAPSHOT_BYTES as u64 => {
+                let bytes = artifact.read_all_limited(MAX_SNAPSHOT_BYTES)?;
+                let mut bundle = decode_snapshot_bundle(&bytes)?;
+                let identity = serde_json::to_vec(&bundle.identity).map_err(io_error)?;
+                let metadata = serde_json::to_vec(&bundle.meta).map_err(io_error)?;
+                let mut writer =
+                    catalog.begin_artifact(bundle.format_version, &identity, &metadata)?;
+                if bundle
+                    .state
+                    .iter()
+                    .any(|(key, _)| key.as_slice() == KEY_CLUSTER_TOPOLOGY)
+                {
+                    return Ok(());
+                }
+                bundle
+                    .state
+                    .push((KEY_CLUSTER_TOPOLOGY.to_vec(), topology_value));
+                bundle.state.sort_by(|left, right| left.0.cmp(&right.0));
+                for (key, value) in bundle.state {
+                    writer.write_state(&key, &value)?;
+                }
+                for (key, value) in bundle.payloads {
+                    writer.write_payload(&key, &value)?;
+                }
+                let (_, descriptor) = writer.finish()?;
+                self.put_sync(
+                    CF_SNAPSHOT,
+                    KEY_CURRENT_SNAPSHOT,
+                    &StoredCurrentSnapshot {
+                        artifact: descriptor.clone(),
+                        meta,
+                    },
+                )?;
+                catalog.collect_except(&descriptor)?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut reader = artifact.reader()?;
+        let mut inserted = false;
+        while let Some(record) = reader.next_record()? {
+            match record {
+                SnapshotRecord::State { key, value } => {
+                    if key.as_slice() == KEY_CLUSTER_TOPOLOGY {
+                        return Ok(());
+                    }
+                    if !inserted && key.as_slice() >= KEY_CLUSTER_TOPOLOGY {
+                        writer.write_state(KEY_CLUSTER_TOPOLOGY, &topology_value)?;
+                        inserted = true;
+                    }
+                    writer.write_state(&key, &value)?;
+                }
+                SnapshotRecord::Payload { key, value } => {
+                    if !inserted {
+                        writer.write_state(KEY_CLUSTER_TOPOLOGY, &topology_value)?;
+                        inserted = true;
+                    }
+                    writer.write_payload(&key, &value)?;
+                }
+            }
+        }
+        if !inserted {
+            writer.write_state(KEY_CLUSTER_TOPOLOGY, &topology_value)?;
+        }
+        let (_, descriptor) = writer.finish()?;
+        self.put_sync(
+            CF_SNAPSHOT,
+            KEY_CURRENT_SNAPSHOT,
+            &StoredCurrentSnapshot {
+                artifact: descriptor.clone(),
+                meta,
+            },
+        )?;
+        catalog.collect_except(&descriptor)
+    }
+
     fn cf(&self, name: &str) -> io::Result<Arc<rocksdb::BoundColumnFamily<'_>>> {
         let resolved = if name == CF_STATE {
             self.active_state_bank()?.column_family()
@@ -1488,6 +1657,10 @@ fn create_intent_key(request: CatalogRequestId) -> Vec<u8> {
     [CREATE_INTENT_PREFIX, request.as_uuid().as_bytes()].concat()
 }
 
+fn administration_request_key(request: AdministrationRequestId) -> Vec<u8> {
+    [ADMINISTRATION_REQUEST_PREFIX, request.as_uuid().as_bytes()].concat()
+}
+
 fn receipt_key(partition: PartitionKey, request: &ProducerRequestId) -> io::Result<Vec<u8>> {
     let body = serde_json::to_vec(request).map_err(io_error)?;
     let mut digest = Sha256::new();
@@ -1662,6 +1835,7 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
         EntryPayload::Normal(command) => match command {
             GroupCommand::BootstrapControl {
                 spec,
+                topology,
                 data_groups,
                 max_streams,
                 max_partitions_per_stream,
@@ -1670,6 +1844,7 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                     log_id,
                     payload: ThinPayload::Normal(ThinCommand::BootstrapControl {
                         spec,
+                        topology,
                         data_groups,
                         max_streams,
                         max_partitions_per_stream,
@@ -1854,6 +2029,45 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                 },
                 Vec::new(),
             )),
+            GroupCommand::BeginAdministration { intent } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::BeginAdministration { intent }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::CompleteAdministration { request } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::CompleteAdministration { request }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::AbortAdministration { request } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::AbortAdministration { request }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::FinishAdministrationAbort { request } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::FinishAdministrationAbort {
+                        request,
+                    }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::InitializeClusterTopology { topology } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::InitializeClusterTopology {
+                        topology,
+                    }),
+                },
+                Vec::new(),
+            )),
         },
     }
 }
@@ -1897,11 +2111,13 @@ macro_rules! impl_log_storage {
                             let hydrated = match command {
                                 ThinCommand::BootstrapControl {
                                     spec,
+                                    topology,
                                     data_groups,
                                     max_streams,
                                     max_partitions_per_stream,
                                 } => GroupCommand::BootstrapControl {
                                     spec,
+                                    topology,
                                     data_groups,
                                     max_streams,
                                     max_partitions_per_stream,
@@ -2002,6 +2218,21 @@ macro_rules! impl_log_storage {
                                 },
                                 ThinCommand::OperationalProbe { group } => {
                                     GroupCommand::OperationalProbe { group }
+                                }
+                                ThinCommand::BeginAdministration { intent } => {
+                                    GroupCommand::BeginAdministration { intent }
+                                }
+                                ThinCommand::CompleteAdministration { request } => {
+                                    GroupCommand::CompleteAdministration { request }
+                                }
+                                ThinCommand::AbortAdministration { request } => {
+                                    GroupCommand::AbortAdministration { request }
+                                }
+                                ThinCommand::FinishAdministrationAbort { request } => {
+                                    GroupCommand::FinishAdministrationAbort { request }
+                                }
+                                ThinCommand::InitializeClusterTopology { topology } => {
+                                    GroupCommand::InitializeClusterTopology { topology }
                                 }
                             };
                             EntryPayload::Normal(hydrated)
@@ -2335,11 +2566,13 @@ impl GroupDb {
         match command {
             GroupCommand::BootstrapControl {
                 spec,
+                topology,
                 data_groups,
                 max_streams,
                 max_partitions_per_stream,
             } => self.apply_bootstrap_control(
                 spec,
+                topology,
                 data_groups,
                 max_streams,
                 max_partitions_per_stream,
@@ -2409,7 +2642,278 @@ impl GroupDb {
             GroupCommand::OperationalProbe { group } => {
                 self.apply_operational_probe(log_id, group, write)
             }
+            GroupCommand::BeginAdministration { intent } => {
+                self.apply_begin_administration(intent, write)
+            }
+            GroupCommand::CompleteAdministration { request } => {
+                self.apply_complete_administration(request, write)
+            }
+            GroupCommand::AbortAdministration { request } => {
+                self.apply_abort_administration(request, write)
+            }
+            GroupCommand::FinishAdministrationAbort { request } => {
+                self.apply_finish_administration_abort(request, write)
+            }
+            GroupCommand::InitializeClusterTopology { topology } => {
+                self.apply_initialize_cluster_topology(topology, write)
+            }
         }
+    }
+
+    fn apply_begin_administration(
+        &self,
+        intent: AdministrationIntent,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "administration intent reached a data group".to_owned(),
+            }));
+        }
+        let request_key = administration_request_key(intent.request());
+        if let Some(existing) = self.get::<AdministrationOperation>(CF_STATE, &request_key)? {
+            return if existing.intent() == &intent {
+                Ok(ApplyResult::Administration(existing))
+            } else {
+                Ok(ApplyResult::Rejected(DomainError::MutationConflict))
+            };
+        }
+        if self
+            .get::<AdministrationOperation>(CF_STATE, KEY_ACTIVE_ADMINISTRATION)?
+            .is_some()
+        {
+            return Ok(ApplyResult::Rejected(DomainError::ResourceLimit {
+                resource: "active_administration_operations".to_owned(),
+                limit: 1,
+            }));
+        }
+        let topology = self
+            .get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?
+            .ok_or_else(|| io_error("control topology is missing"))?;
+        let transitional_topology = match &intent {
+            AdministrationIntent::ReplaceVoter {
+                expected_topology_revision,
+                remove,
+                add,
+                ..
+            } => {
+                match topology.replacement_transition(
+                    *expected_topology_revision,
+                    *remove,
+                    add.clone(),
+                ) {
+                    Ok(topology) => Some(topology),
+                    Err(error) => return Ok(ApplyResult::Rejected(error)),
+                }
+            }
+            AdministrationIntent::TransferLeader { group, target, .. } => {
+                if !topology.desired_voters().contains(target) {
+                    return Ok(ApplyResult::Rejected(DomainError::InvalidIdentity {
+                        kind: "leader transfer target".to_owned(),
+                        reason: "target is not a desired voter".to_owned(),
+                    }));
+                }
+                let data_groups = self
+                    .get::<Vec<GroupId>>(CF_STATE, KEY_DATA_GROUP_POOL)?
+                    .unwrap_or_default();
+                if group.get() != CONTROL_GROUP_ID && !data_groups.contains(group) {
+                    return Ok(ApplyResult::Rejected(DomainError::InvalidIdentity {
+                        kind: "leader transfer group".to_owned(),
+                        reason: "group is not in the bounded group pool".to_owned(),
+                    }));
+                }
+                None
+            }
+        };
+        let operation = AdministrationOperation::pending(intent);
+        let state = self.cf(CF_STATE)?;
+        if let Some(topology) = transitional_topology {
+            write.put_cf(&state, KEY_CLUSTER_TOPOLOGY, encode(&topology)?);
+        }
+        write.put_cf(&state, request_key, encode(&operation)?);
+        write.put_cf(&state, KEY_ACTIVE_ADMINISTRATION, encode(&operation)?);
+        Ok(ApplyResult::Administration(operation))
+    }
+
+    fn apply_complete_administration(
+        &self,
+        request: AdministrationRequestId,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "administration completion reached a data group".to_owned(),
+            }));
+        }
+        let request_key = administration_request_key(request);
+        let Some(operation) = self.get::<AdministrationOperation>(CF_STATE, &request_key)? else {
+            return Ok(ApplyResult::Rejected(DomainError::InvalidIdentity {
+                kind: "administration request".to_owned(),
+                reason: "request was not found".to_owned(),
+            }));
+        };
+        if !matches!(
+            operation.lifecycle(),
+            light_stream_core::AdministrationLifecycle::Pending
+        ) {
+            return Ok(ApplyResult::Administration(operation));
+        }
+        if operation.intent().request() != request {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        }
+        let Some(active) =
+            self.get::<AdministrationOperation>(CF_STATE, KEY_ACTIVE_ADMINISTRATION)?
+        else {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        };
+        if active.intent().request() != request {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        }
+        let current = self
+            .get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?
+            .ok_or_else(|| io_error("control topology is missing"))?;
+        let topology = match operation.intent() {
+            AdministrationIntent::ReplaceVoter {
+                expected_topology_revision,
+                remove,
+                add,
+                ..
+            } => current.replacement_complete(*expected_topology_revision, *remove, add.clone()),
+            AdministrationIntent::TransferLeader { .. } => Ok(current),
+        };
+        let topology = match topology {
+            Ok(topology) => topology,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        let completed = operation.completed(topology.revision());
+        let state = self.cf(CF_STATE)?;
+        write.put_cf(&state, KEY_CLUSTER_TOPOLOGY, encode(&topology)?);
+        write.put_cf(&state, request_key, encode(&completed)?);
+        write.delete_cf(&state, KEY_ACTIVE_ADMINISTRATION);
+        Ok(ApplyResult::Administration(completed))
+    }
+
+    fn apply_abort_administration(
+        &self,
+        request: AdministrationRequestId,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "administration abort reached a data group".to_owned(),
+            }));
+        }
+        let request_key = administration_request_key(request);
+        let Some(operation) = self.get::<AdministrationOperation>(CF_STATE, &request_key)? else {
+            return Ok(ApplyResult::Rejected(DomainError::InvalidIdentity {
+                kind: "administration request".to_owned(),
+                reason: "request was not found".to_owned(),
+            }));
+        };
+        if !matches!(
+            operation.lifecycle(),
+            light_stream_core::AdministrationLifecycle::Pending
+        ) {
+            return Ok(ApplyResult::Administration(operation));
+        }
+        let Some(active) =
+            self.get::<AdministrationOperation>(CF_STATE, KEY_ACTIVE_ADMINISTRATION)?
+        else {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        };
+        if active.intent().request() != request {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        }
+        let current = self
+            .get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?
+            .ok_or_else(|| io_error("control topology is missing"))?;
+        let topology_revision = match operation.intent() {
+            AdministrationIntent::ReplaceVoter {
+                expected_topology_revision,
+                remove,
+                add,
+                ..
+            } => {
+                let topology = match current.replacement_abort(
+                    *expected_topology_revision,
+                    *remove,
+                    add.clone(),
+                ) {
+                    Ok(topology) => topology,
+                    Err(error) => return Ok(ApplyResult::Rejected(error)),
+                };
+                let revision = topology.revision();
+                write.put_cf(
+                    &self.cf(CF_STATE)?,
+                    KEY_CLUSTER_TOPOLOGY,
+                    encode(&topology)?,
+                );
+                revision
+            }
+            AdministrationIntent::TransferLeader { .. } => current.revision(),
+        };
+        let aborted = operation.aborted(topology_revision);
+        let state = self.cf(CF_STATE)?;
+        write.put_cf(&state, request_key, encode(&aborted)?);
+        write.put_cf(&state, KEY_ACTIVE_ADMINISTRATION, encode(&aborted)?);
+        Ok(ApplyResult::Administration(aborted))
+    }
+
+    fn apply_finish_administration_abort(
+        &self,
+        request: AdministrationRequestId,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let request_key = administration_request_key(request);
+        let Some(operation) = self.get::<AdministrationOperation>(CF_STATE, &request_key)? else {
+            return Ok(ApplyResult::Rejected(DomainError::InvalidIdentity {
+                kind: "administration request".to_owned(),
+                reason: "request was not found".to_owned(),
+            }));
+        };
+        if !matches!(
+            operation.lifecycle(),
+            light_stream_core::AdministrationLifecycle::Aborted { .. }
+        ) {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        }
+        let Some(active) =
+            self.get::<AdministrationOperation>(CF_STATE, KEY_ACTIVE_ADMINISTRATION)?
+        else {
+            return Ok(ApplyResult::Administration(operation));
+        };
+        if active.intent().request() != request {
+            return Ok(ApplyResult::Rejected(DomainError::MutationConflict));
+        }
+        write.delete_cf(&self.cf(CF_STATE)?, KEY_ACTIVE_ADMINISTRATION);
+        Ok(ApplyResult::Administration(operation))
+    }
+
+    fn apply_initialize_cluster_topology(
+        &self,
+        topology: ClusterTopology,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "cluster topology initialization reached a data group".to_owned(),
+            }));
+        }
+        if let Some(existing) = self.get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)? {
+            return if existing == topology {
+                Ok(ApplyResult::Noop)
+            } else {
+                Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                    reason: "cluster topology conflicts with existing control state".to_owned(),
+                }))
+            };
+        }
+        write.put_cf(
+            &self.cf(CF_STATE)?,
+            KEY_CLUSTER_TOPOLOGY,
+            encode(&topology)?,
+        );
+        Ok(ApplyResult::Noop)
     }
 
     fn apply_operational_probe(
@@ -2436,6 +2940,7 @@ impl GroupDb {
     fn apply_bootstrap_control(
         &self,
         spec: BootstrapSpec,
+        topology: Option<ClusterTopology>,
         data_groups: Vec<GroupId>,
         max_streams: u32,
         max_partitions: u32,
@@ -2457,7 +2962,11 @@ impl GroupDb {
             return Ok(result);
         }
         if let Some(existing) = self.get::<Vec<GroupId>>(CF_STATE, KEY_DATA_GROUP_POOL)? {
+            let stored_topology = self.get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?;
             if existing != data_groups
+                || topology
+                    .as_ref()
+                    .is_some_and(|topology| stored_topology.as_ref() != Some(topology))
                 || self.get::<u32>(CF_STATE, KEY_MAX_STREAMS)? != Some(max_streams)
                 || self.get::<u32>(CF_STATE, KEY_MAX_PARTITIONS)? != Some(max_partitions)
             {
@@ -2479,6 +2988,9 @@ impl GroupDb {
         );
         let state = self.cf(CF_STATE)?;
         write.put_cf(&state, KEY_DATA_GROUP_POOL, encode(&data_groups)?);
+        if let Some(topology) = topology {
+            write.put_cf(&state, KEY_CLUSTER_TOPOLOGY, encode(&topology)?);
+        }
         write.put_cf(&state, KEY_MAX_STREAMS, encode(&max_streams)?);
         write.put_cf(&state, KEY_MAX_PARTITIONS, encode(&max_partitions)?);
         write.put_cf(&state, KEY_ASSIGNMENT_CURSOR, encode(&1_u64)?);
@@ -4030,6 +4542,27 @@ impl GroupDb {
 }
 
 impl CommittedStateReader {
+    pub fn cluster_topology(&self) -> Result<Option<ClusterTopology>, DomainError> {
+        self.db
+            .get(CF_STATE, KEY_CLUSTER_TOPOLOGY)
+            .map_err(storage_domain)
+    }
+
+    pub fn active_administration(&self) -> Result<Option<AdministrationOperation>, DomainError> {
+        self.db
+            .get(CF_STATE, KEY_ACTIVE_ADMINISTRATION)
+            .map_err(storage_domain)
+    }
+
+    pub fn administration_operation(
+        &self,
+        request: AdministrationRequestId,
+    ) -> Result<Option<AdministrationOperation>, DomainError> {
+        self.db
+            .get(CF_STATE, &administration_request_key(request))
+            .map_err(storage_domain)
+    }
+
     pub fn snapshot_artifact_bytes(&self) -> Result<Option<u64>, DomainError> {
         self.db
             .current_snapshot_artifact()
@@ -4760,6 +5293,40 @@ mod tests {
         )
     }
 
+    fn test_topology() -> ClusterTopology {
+        let node = light_stream_core::NodeDescriptor::new(
+            NodeId::new(1).unwrap(),
+            "http://127.0.0.1:7101",
+            "http://127.0.0.1:7201",
+        );
+        ClusterTopology::try_new(1, [node.clone()], [node.node_id()]).unwrap()
+    }
+
+    #[test]
+    fn legacy_bootstrap_log_without_topology_still_decodes() {
+        let (cluster, stream) = ids();
+        let command = ThinCommand::BootstrapControl {
+            spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            topology: Some(test_topology()),
+            data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
+            max_streams: 8,
+            max_partitions_per_stream: 4,
+        };
+        let mut value = serde_json::to_value(command).unwrap();
+        value
+            .get_mut("BootstrapControl")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("topology");
+
+        let decoded: ThinCommand = serde_json::from_value(value).unwrap();
+
+        assert!(matches!(
+            decoded,
+            ThinCommand::BootstrapControl { topology: None, .. }
+        ));
+    }
+
     #[tokio::test]
     async fn purge_keeps_applied_payload_readable() {
         let directory = ProjectTestDir::new("purge-retention");
@@ -5026,6 +5593,7 @@ mod tests {
                 ),
                 payload: EntryPayload::Normal(GroupCommand::BootstrapControl {
                     spec,
+                    topology: Some(test_topology()),
                     data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
                     max_streams: 8,
                     max_partitions_per_stream: 4,
@@ -5071,6 +5639,509 @@ mod tests {
                 .items(),
             &[bookmark]
         );
+    }
+
+    #[tokio::test]
+    async fn administration_intents_are_idempotent_exclusive_and_restartable() {
+        let directory = ProjectTestDir::new("administration-intents");
+        let (cluster, stream) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(CONTROL_GROUP_ID).unwrap(),
+            GroupKind::Control,
+        );
+        let bootstrap =
+            BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap());
+        let node1 = light_stream_core::NodeDescriptor::new(
+            NodeId::new(1).unwrap(),
+            "http://127.0.0.1:7101",
+            "http://127.0.0.1:7201",
+        );
+        let node2 = light_stream_core::NodeDescriptor::new(
+            NodeId::new(2).unwrap(),
+            "http://127.0.0.1:7102",
+            "http://127.0.0.1:7202",
+        );
+        let node3 = light_stream_core::NodeDescriptor::new(
+            NodeId::new(3).unwrap(),
+            "http://127.0.0.1:7103",
+            "http://127.0.0.1:7203",
+        );
+        let topology = ClusterTopology::try_new(
+            1,
+            [node1.clone(), node2.clone(), node3.clone()],
+            [node1.node_id(), node2.node_id(), node3.node_id()],
+        )
+        .unwrap();
+        let request = AdministrationRequestId::from_uuid(Uuid::new_v4());
+        let replacement = light_stream_core::NodeDescriptor::new(
+            NodeId::new(4).unwrap(),
+            "http://127.0.0.1:7104",
+            "http://127.0.0.1:7204",
+        );
+        let intent = AdministrationIntent::ReplaceVoter {
+            request,
+            expected_topology_revision: 1,
+            remove: node3.node_id(),
+            add: replacement.clone(),
+        };
+        let other_request = AdministrationRequestId::from_uuid(Uuid::new_v4());
+        {
+            let handles = create_control_store(
+                &directory.0,
+                identity.clone(),
+                DEFAULT_RECEIPT_WINDOW,
+                test_budget(),
+            )
+            .unwrap();
+            let mut state = handles.state_machine;
+            let commands = [
+                GroupCommand::BootstrapControl {
+                    spec: bootstrap,
+                    topology: Some(topology.clone()),
+                    data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
+                    max_streams: 8,
+                    max_partitions_per_stream: 4,
+                },
+                GroupCommand::BeginAdministration {
+                    intent: intent.clone(),
+                },
+                GroupCommand::BeginAdministration {
+                    intent: intent.clone(),
+                },
+                GroupCommand::BeginAdministration {
+                    intent: AdministrationIntent::TransferLeader {
+                        request: other_request,
+                        group: GroupId::new(DATA_GROUP_ID).unwrap(),
+                        target: node2.node_id(),
+                    },
+                },
+            ];
+            let entries = commands
+                .into_iter()
+                .enumerate()
+                .map(|(index, command)| GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        index as u64 + 1,
+                    ),
+                    payload: EntryPayload::Normal(command),
+                });
+            state
+                .apply(futures_util::stream::iter(
+                    entries.map(|entry| Ok((entry, None))),
+                ))
+                .await
+                .unwrap();
+            let active = handles.reader.active_administration().unwrap().unwrap();
+            assert_eq!(active.intent(), &intent);
+            assert!(
+                handles
+                    .reader
+                    .administration_operation(other_request)
+                    .unwrap()
+                    .is_none()
+            );
+            let conflict = handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        5,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BeginAdministration {
+                        intent: AdministrationIntent::TransferLeader {
+                            request,
+                            group: GroupId::new(DATA_GROUP_ID).unwrap(),
+                            target: node2.node_id(),
+                        },
+                    }),
+                })
+                .unwrap();
+            assert_eq!(
+                ApplyResult::Rejected(DomainError::MutationConflict),
+                conflict
+            );
+            let transitional_topology = topology
+                .replacement_transition(1, node3.node_id(), replacement.clone())
+                .unwrap();
+            assert_eq!(
+                handles.reader.cluster_topology().unwrap(),
+                Some(transitional_topology.clone())
+            );
+            let final_topology = transitional_topology
+                .replacement_complete(1, node3.node_id(), replacement)
+                .unwrap();
+            let complete = GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    6,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::CompleteAdministration { request }),
+            };
+            state
+                .apply(futures_util::stream::iter([Ok((complete, None))]))
+                .await
+                .unwrap();
+            assert!(handles.reader.active_administration().unwrap().is_none());
+            assert_eq!(
+                handles.reader.cluster_topology().unwrap(),
+                Some(final_topology)
+            );
+            let stale_request = AdministrationRequestId::from_uuid(Uuid::new_v4());
+            let stale = handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        7,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BeginAdministration {
+                        intent: AdministrationIntent::ReplaceVoter {
+                            request: stale_request,
+                            expected_topology_revision: 1,
+                            remove: node2.node_id(),
+                            add: light_stream_core::NodeDescriptor::new(
+                                NodeId::new(5).unwrap(),
+                                "http://127.0.0.1:7105",
+                                "http://127.0.0.1:7205",
+                            ),
+                        },
+                    }),
+                })
+                .unwrap();
+            assert_eq!(ApplyResult::Rejected(DomainError::StaleRoute), stale);
+            assert!(handles.reader.active_administration().unwrap().is_none());
+            let invalid_group = handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        8,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BeginAdministration {
+                        intent: AdministrationIntent::TransferLeader {
+                            request: AdministrationRequestId::from_uuid(Uuid::new_v4()),
+                            group: GroupId::new(999).unwrap(),
+                            target: node2.node_id(),
+                        },
+                    }),
+                })
+                .unwrap();
+            assert!(matches!(
+                invalid_group,
+                ApplyResult::Rejected(DomainError::InvalidIdentity { .. })
+            ));
+            let transfer_request = AdministrationRequestId::from_uuid(Uuid::new_v4());
+            let begin_transfer = handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        9,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BeginAdministration {
+                        intent: AdministrationIntent::TransferLeader {
+                            request: transfer_request,
+                            group: GroupId::new(DATA_GROUP_ID).unwrap(),
+                            target: node2.node_id(),
+                        },
+                    }),
+                })
+                .unwrap();
+            assert!(matches!(begin_transfer, ApplyResult::Administration(_)));
+            let abort = handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        10,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::AbortAdministration {
+                        request: transfer_request,
+                    }),
+                })
+                .unwrap();
+            assert!(matches!(
+                abort,
+                ApplyResult::Administration(operation)
+                    if matches!(
+                        operation.lifecycle(),
+                        light_stream_core::AdministrationLifecycle::Aborted { .. }
+                    )
+            ));
+            assert!(handles.reader.active_administration().unwrap().is_some());
+            handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        11,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::FinishAdministrationAbort {
+                        request: transfer_request,
+                    }),
+                })
+                .unwrap();
+            assert!(handles.reader.active_administration().unwrap().is_none());
+            let next_request = AdministrationRequestId::from_uuid(Uuid::new_v4());
+            handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        12,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::BeginAdministration {
+                        intent: AdministrationIntent::TransferLeader {
+                            request: next_request,
+                            group: GroupId::new(DATA_GROUP_ID).unwrap(),
+                            target: node2.node_id(),
+                        },
+                    }),
+                })
+                .unwrap();
+            let complete_aborted = handles
+                .reader
+                .db
+                .apply_entry(GroupEntry {
+                    log_id: GroupLogId::new(
+                        GroupLeaderId {
+                            term: 1,
+                            node_id: 1,
+                        },
+                        13,
+                    ),
+                    payload: EntryPayload::Normal(GroupCommand::CompleteAdministration {
+                        request: transfer_request,
+                    }),
+                })
+                .unwrap();
+            assert_eq!(
+                ApplyResult::Administration(
+                    handles
+                        .reader
+                        .administration_operation(transfer_request)
+                        .unwrap()
+                        .unwrap()
+                ),
+                complete_aborted
+            );
+            assert_eq!(
+                next_request,
+                handles
+                    .reader
+                    .active_administration()
+                    .unwrap()
+                    .unwrap()
+                    .intent()
+                    .request()
+            );
+        }
+        let handles = open_control_store(
+            &directory.0,
+            &identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let operation = handles
+            .reader
+            .administration_operation(request)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            operation.lifecycle(),
+            light_stream_core::AdministrationLifecycle::Complete {
+                completed_topology_revision: 3
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn committed_topology_wins_over_a_stale_manifest_topology() {
+        let directory = ProjectTestDir::new("authoritative-control-topology");
+        let (cluster, _stream) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(CONTROL_GROUP_ID).unwrap(),
+            GroupKind::Control,
+        );
+        let old_topology = ClusterTopology::try_new(
+            1,
+            [
+                light_stream_core::NodeDescriptor::new(
+                    NodeId::new(1).unwrap(),
+                    "http://127.0.0.1:7101",
+                    "http://127.0.0.1:7201",
+                ),
+                light_stream_core::NodeDescriptor::new(
+                    NodeId::new(2).unwrap(),
+                    "http://127.0.0.1:7102",
+                    "http://127.0.0.1:7202",
+                ),
+                light_stream_core::NodeDescriptor::new(
+                    NodeId::new(3).unwrap(),
+                    "http://127.0.0.1:7103",
+                    "http://127.0.0.1:7203",
+                ),
+            ],
+            [
+                NodeId::new(1).unwrap(),
+                NodeId::new(2).unwrap(),
+                NodeId::new(3).unwrap(),
+            ],
+        )
+        .unwrap();
+        let transition = old_topology
+            .replacement_transition(
+                1,
+                NodeId::new(3).unwrap(),
+                light_stream_core::NodeDescriptor::new(
+                    NodeId::new(4).unwrap(),
+                    "http://127.0.0.1:7104",
+                    "http://127.0.0.1:7204",
+                ),
+            )
+            .unwrap();
+        {
+            let handles = create_control_store(
+                &directory.0,
+                identity.clone(),
+                DEFAULT_RECEIPT_WINDOW,
+                test_budget(),
+            )
+            .unwrap();
+            handles
+                .reader
+                .db
+                .put_sync(CF_STATE, KEY_CLUSTER_TOPOLOGY, &transition)
+                .unwrap();
+        }
+
+        let handles = open_control_store_with_topology(
+            &directory.0,
+            &identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+            &old_topology,
+        )
+        .unwrap();
+
+        assert_eq!(handles.reader.cluster_topology().unwrap(), Some(transition));
+    }
+
+    #[tokio::test]
+    async fn legacy_control_snapshot_is_rebuilt_with_initialized_topology() {
+        let source = ProjectTestDir::new("legacy-control-snapshot-topology");
+        let (cluster, stream) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(CONTROL_GROUP_ID).unwrap(),
+            GroupKind::Control,
+        );
+        let topology = test_topology();
+        {
+            let handles = create_control_store(
+                &source.0,
+                identity.clone(),
+                DEFAULT_RECEIPT_WINDOW,
+                test_budget(),
+            )
+            .unwrap();
+            let mut state = handles.state_machine;
+            state
+                .apply(futures_util::stream::iter([Ok((
+                    GroupEntry {
+                        log_id: GroupLogId::new(
+                            GroupLeaderId {
+                                term: 1,
+                                node_id: 1,
+                            },
+                            1,
+                        ),
+                        payload: EntryPayload::Normal(GroupCommand::BootstrapControl {
+                            spec: BootstrapSpec::new(
+                                cluster,
+                                stream,
+                                StreamName::parse("bootstrap").unwrap(),
+                            ),
+                            topology: None,
+                            data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
+                            max_streams: 8,
+                            max_partitions_per_stream: 4,
+                        }),
+                    },
+                    None,
+                ))]))
+                .await
+                .unwrap();
+            state
+                .get_snapshot_builder()
+                .await
+                .build_snapshot()
+                .await
+                .unwrap();
+        }
+
+        let handles = open_control_store_with_topology(
+            &source.0,
+            &identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+            &topology,
+        )
+        .unwrap();
+        let (_, artifact) = handles
+            .reader
+            .db
+            .current_snapshot_artifact()
+            .unwrap()
+            .unwrap();
+        let mut reader = artifact.reader().unwrap();
+        let mut stored = None;
+        while let Some(record) = reader.next_record().unwrap() {
+            if let SnapshotRecord::State { key, value } = record
+                && key == KEY_CLUSTER_TOPOLOGY
+            {
+                stored = Some(decode::<ClusterTopology>(&value).unwrap());
+            }
+        }
+        assert_eq!(Some(topology), stored);
     }
 
     #[tokio::test]

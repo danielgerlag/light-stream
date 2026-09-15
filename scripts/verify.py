@@ -32,6 +32,7 @@ KNOWN_SCENARIOS = {
     "bookmarks",
     "retention-replay",
     "b7-snapshot",
+    "membership",
     "health-capabilities",
     "unsupported-publish",
     "process-isolation",
@@ -210,6 +211,7 @@ class OwnedServer:
         rocksdb_write_buffer_bytes=None,
         verification_delay_group_id=None,
         verification_delay_ms=0,
+        ready_timeout_seconds=5,
     ):
         self.data_dir = data_dir
         self.label = label
@@ -264,6 +266,7 @@ class OwnedServer:
                 ]
             )
         self.closed = False
+        self.ready_timeout_seconds = ready_timeout_seconds
         self.process = subprocess.Popen(
             self.command,
             cwd=ROOT,
@@ -281,7 +284,7 @@ class OwnedServer:
             raise
 
     def _wait_ready(self):
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + self.ready_timeout_seconds
         while time.monotonic() < deadline:
             lines = self.stdout_path.read_text().splitlines()
             if lines:
@@ -294,7 +297,10 @@ class OwnedServer:
                     f"{self.label} exited before readiness: {self.stderr_path.read_text()}"
                 )
             time.sleep(0.02)
-        raise VerificationError(f"{self.label} did not bind both listeners within 5 seconds")
+        raise VerificationError(
+            f"{self.label} did not bind both listeners within "
+            f"{self.ready_timeout_seconds} seconds"
+        )
 
     def stop(self):
         if self.closed:
@@ -6274,6 +6280,391 @@ def run_ls06_scenario(
                 pass
 
 
+def run_ls06_membership_scenario(
+    artifacts, runner, binaries, revision, profile, seed
+):
+    rng = random.Random(seed)
+    cluster = deterministic_uuid(rng)
+    stream = deterministic_uuid(rng)
+    nodes = {}
+    configs = {}
+    used_ports = set()
+
+    def allocate_port():
+        value = free_port()
+        while value in used_ports:
+            value = free_port()
+        used_ports.add(value)
+        return value
+
+    for node_id in (1, 2, 3, 4):
+        public_port = allocate_port()
+        peer_port = allocate_port()
+        configs[node_id] = {
+            "endpoint": f"http://127.0.0.1:{public_port}",
+            "peer_uri": f"http://127.0.0.1:{peer_port}",
+            "public_address": f"127.0.0.1:{public_port}",
+            "peer_address": f"127.0.0.1:{peer_port}",
+            "data_dir": artifacts / "scratch" / "success" / f"ls06-admin-node-{node_id}",
+        }
+
+    def start_node(node_id, suffix, administration_delay_ms=1000):
+        config = configs[node_id]
+        nodes[node_id] = {
+            **config,
+            "server": OwnedServer(
+                binaries["light-streamd"],
+                config["data_dir"],
+                artifacts / "node-logs",
+                f"ls06-admin-node-{node_id}-{suffix}",
+                node_id=node_id,
+                public_address=config["public_address"],
+                peer_address=config["peer_address"],
+                advertise_public_uri=config["endpoint"],
+                advertise_peer_uri=config["peer_uri"],
+                max_data_groups=1,
+                max_streams=1,
+                max_partitions_per_stream=1,
+                verification_delay_group_id=2 if administration_delay_ms else None,
+                verification_delay_ms=administration_delay_ms,
+                ready_timeout_seconds=30,
+            ),
+        }
+
+    def diagnostics(node_id, label):
+        return read_node_diagnostics(
+            artifacts, runner, binaries["light-streamctl"], nodes[node_id], label
+        )
+
+    def wait_control_leader(node_ids, label):
+        deadline = time.monotonic() + profile["leader_loss_seconds"] + 20
+        last = []
+        while time.monotonic() < deadline:
+            leaders = []
+            for node_id in node_ids:
+                try:
+                    group = group_by_name(
+                        diagnostics(node_id, f"{label}-{node_id}"), "control", 1
+                    )
+                    if group["current_leader"] in node_ids:
+                        leaders.append(group["current_leader"])
+                except (KeyError, VerificationError, subprocess.SubprocessError):
+                    pass
+            if leaders and len(set(leaders)) == 1:
+                return leaders[0]
+            last = leaders
+            time.sleep(0.05)
+        raise VerificationError(f"{label} control leader did not converge: {last}")
+
+    def wait_operation(request_id, node_ids, label):
+        deadline = time.monotonic() + profile["write_readiness_seconds"] + 80
+        last = None
+        while time.monotonic() < deadline:
+            leader = wait_control_leader(node_ids, f"{label}-leader")
+            value = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[leader]["endpoint"],
+                        deadline_ms=5000,
+                    )
+                    + [
+                        "cluster",
+                        "operation",
+                        "--cluster-id",
+                        cluster,
+                        "--request-id",
+                        request_id,
+                    ],
+                    f"{label}-status",
+                    expected_codes=(0, 5),
+                    timeout=10,
+                ),
+                label,
+            )
+            last = value
+            if value.get("ok") and value["operation"]["lifecycle"] == "complete":
+                return value["operation"]
+            time.sleep(0.1)
+        raise VerificationError(f"{label} operation did not complete: {last}")
+
+    def wait_exact_membership(node_ids, label):
+        deadline = time.monotonic() + profile["write_readiness_seconds"] + 30
+        last = {}
+        while time.monotonic() < deadline:
+            observed = {}
+            try:
+                for node_id in node_ids:
+                    observed[str(node_id)] = assert_exact_memberships(
+                        diagnostics(node_id, f"{label}-{node_id}"),
+                        [1, 2, 4],
+                    )
+                return observed
+            except (KeyError, VerificationError, subprocess.SubprocessError):
+                last = observed
+                time.sleep(0.1)
+        raise VerificationError(f"{label} membership did not converge: {last}")
+
+    result = {"revision": revision, "cluster_id": cluster, "stream_id": stream}
+    try:
+        for node_id in (1, 2, 3, 4):
+            start_node(node_id, "initial")
+        bootstrap = cli_endpoint_command(
+            binaries["light-streamctl"], nodes[1]["endpoint"], deadline_ms=30000
+        ) + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream,
+            "--stream-name",
+            "bootstrap",
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            bootstrap.extend(
+                [
+                    "--member",
+                    (
+                        f"{node_id},{nodes[node_id]['endpoint']},"
+                        f"{nodes[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        runner.run(bootstrap, "ls06-admin-bootstrap", timeout=45)
+        wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            {node_id: nodes[node_id] for node_id in (1, 2, 3)},
+            profile["write_readiness_seconds"] + 20,
+            "ls06-admin-active",
+        )
+        control_leader = wait_control_leader((1, 2, 3), "ls06-admin-control")
+        replacement_request = deterministic_uuid(rng)
+        replacement = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[control_leader]["endpoint"],
+                    deadline_ms=15000,
+                )
+                + [
+                    "cluster",
+                    "replace-voter",
+                    "--cluster-id",
+                    cluster,
+                    "--request-id",
+                    replacement_request,
+                    "--expected-topology-revision",
+                    "1",
+                    "--remove-node-id",
+                    "3",
+                    "--add",
+                    f"4,{nodes[4]['endpoint']},{nodes[4]['peer_uri']}",
+                ],
+                "ls06-replace-voter",
+                timeout=20,
+            ),
+            "LS06 replace voter",
+        )
+        nodes[control_leader]["server"].kill()
+        result["coordinator_killed_after_intent"] = control_leader
+        operation_nodes = tuple(
+            node_id for node_id in (1, 2, 3, 4) if node_id != control_leader
+        )
+        replacement_complete = wait_operation(
+            replacement_request, operation_nodes, "ls06-replacement"
+        )
+        if control_leader in (1, 2):
+            start_node(control_leader, "restart-after-intent", administration_delay_ms=0)
+        memberships = wait_exact_membership(
+            (1, 2, 4), "ls06-final-membership"
+        )
+        data_leader = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            {node_id: nodes[node_id] for node_id in (1, 2, 4)},
+            profile["leader_loss_seconds"] + 10,
+            "ls06-before-transfer",
+        )
+        target = next(node for node in (1, 2, 4) if node != data_leader)
+        control_leader = wait_control_leader((1, 2, 4), "ls06-transfer-control")
+        transfer_request = deterministic_uuid(rng)
+        transfer = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[control_leader]["endpoint"],
+                    deadline_ms=15000,
+                )
+                + [
+                    "cluster",
+                    "transfer-leader",
+                    "--cluster-id",
+                    cluster,
+                    "--request-id",
+                    transfer_request,
+                    "--group-id",
+                    "2",
+                    "--target-node-id",
+                    str(target),
+                ],
+                "ls06-transfer-leader",
+                timeout=20,
+            ),
+            "LS06 transfer leader",
+        )
+        transfer_complete = wait_operation(
+            transfer_request, (1, 2, 4), "ls06-transfer"
+        )
+        transferred = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            {node_id: nodes[node_id] for node_id in (1, 2, 4)},
+            profile["leader_loss_seconds"] + 10,
+            "ls06-after-transfer",
+        )
+        if transferred != target:
+            raise VerificationError(
+                f"transferred data leader is {transferred}, expected {target}"
+            )
+        nodes[3]["server"].stop()
+        start_node(3, "retired-restart", administration_delay_ms=0)
+        removed = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[3]["endpoint"],
+                    no_retry=True,
+                    deadline_ms=3000,
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "1",
+                ],
+                "ls06-removed-node-refusal",
+                expected_codes=(5,),
+                timeout=8,
+            ),
+            "LS06 removed node refusal",
+        )
+        removed_error = removed.get("error", {})
+        if (
+            removed.get("ok") is not False
+            or removed_error.get("code") != "cluster_forming"
+            or removed_error.get("detail", {}).get("leader") is not None
+        ):
+            raise VerificationError(
+                "removed node was not locally deauthorized after restart"
+            )
+        control_leader = wait_control_leader((1, 2, 4), "ls06-abort-control")
+        control_follower = next(
+            node_id for node_id in (1, 2, 4) if node_id != control_leader
+        )
+        abort_request = deterministic_uuid(rng)
+        unavailable_public = allocate_port()
+        unavailable_peer = allocate_port()
+        unreachable = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[control_follower]["endpoint"],
+                    deadline_ms=15000,
+                )
+                + [
+                    "cluster",
+                    "replace-voter",
+                    "--cluster-id",
+                    cluster,
+                    "--request-id",
+                    abort_request,
+                    "--expected-topology-revision",
+                    "3",
+                    "--remove-node-id",
+                    "4",
+                    "--add",
+                    (
+                        f"5,http://127.0.0.1:{unavailable_public},"
+                        f"http://127.0.0.1:{unavailable_peer}"
+                    ),
+                ],
+                "ls06-unreachable-replacement",
+                timeout=20,
+            ),
+            "LS06 unreachable replacement",
+        )
+        aborted = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[control_follower]["endpoint"],
+                    deadline_ms=15000,
+                )
+                + [
+                    "cluster",
+                    "abort",
+                    "--cluster-id",
+                    cluster,
+                    "--request-id",
+                    abort_request,
+                ],
+                "ls06-abort-replacement",
+                timeout=20,
+            ),
+            "LS06 abort replacement",
+        )
+        if (
+            aborted["operation"]["lifecycle"] != "aborted"
+            or aborted["operation"]["topology_revision"] != 5
+        ):
+            raise VerificationError("replacement abort did not reach a terminal state")
+        post_abort_membership = wait_exact_membership(
+            (1, 2, 4), "ls06-post-abort-membership"
+        )
+        for node_id in (1, 2, 4):
+            nodes[node_id]["server"].stop()
+        for node_id in (1, 2, 4):
+            start_node(node_id, "full-restart", administration_delay_ms=0)
+        restarted_memberships = wait_exact_membership(
+            (1, 2, 4), "ls06-restarted-membership"
+        )
+        result.update(
+            {
+                "replacement_begin": replacement["operation"],
+                "replacement_complete": replacement_complete,
+                "final_membership": memberships,
+                "transfer_begin": transfer["operation"],
+                "transfer_complete": transfer_complete,
+                "transferred_data_leader": transferred,
+                "removed_node_refusal": removed,
+                "unreachable_replacement": unreachable["operation"],
+                "aborted_replacement": aborted["operation"],
+                "post_abort_membership": post_abort_membership,
+                "restarted_membership": restarted_memberships,
+                "verdict": "PASS",
+            }
+        )
+        write_json(artifacts / "ls06" / "membership-recovery.json", result)
+    finally:
+        for node in nodes.values():
+            try:
+                node["server"].stop()
+            except VerificationError:
+                pass
+
+
 def run_selected(args, artifacts, runner, binaries, revision, profile):
     if args.phase == "LS06" or args.suite == "ls06-e2e":
         runner.run(
@@ -6290,15 +6681,20 @@ def run_selected(args, artifacts, runner, binaries, revision, profile):
             "ls06-targeted-tests",
             timeout=900,
         )
-        run_ls06_scenario(
-            artifacts,
-            runner,
-            binaries,
-            revision,
-            profile,
-            args.seed,
-            b7_snapshot=args.scenario == "b7-snapshot",
-        )
+        if args.scenario == "membership":
+            run_ls06_membership_scenario(
+                artifacts, runner, binaries, revision, profile, args.seed
+            )
+        else:
+            run_ls06_scenario(
+                artifacts,
+                runner,
+                binaries,
+                revision,
+                profile,
+                args.seed,
+                b7_snapshot=args.scenario == "b7-snapshot",
+            )
         return
     if args.phase == "LS05" or args.suite == "ls05-e2e":
         runner.run(

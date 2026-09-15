@@ -341,14 +341,14 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Files.**
 
-- [x] Edit Raft transport, per-peer replication progress, snapshot storage/transfer, and recovery diagnostics. Membership administration remains.
+- [x] Edit Raft transport, per-peer replication progress, snapshot storage/transfer, membership administration, and recovery diagnostics.
 
 **Build.**
 
 - [x] Replace every POC-style permanent peer exclusion with independent replication progress and bounded catch-up from durable history.
 - [x] Implement log-suffix and snapshot catch-up with complete retained group state and included log identity. The 1 GiB file-backed fixture passes.
 - [x] Stage and verify snapshots before installation. Preserve newer local term and vote state.
-- [ ] Implement learner admission, safe voter changes, leader transfer, and recovery from interrupted operations.
+- [x] Implement learner admission, safe voter changes, leader transfer, cancellation, retirement, and recovery from interrupted operations.
 
 **You see.**
 
@@ -356,7 +356,7 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Extend Raft conformance, snapshot integrity, membership, fencing, and cancellation tests. Snapshot integrity, bank migration, recovery, and B7 tests pass; membership tests remain.
+- [x] Extend Raft conformance, snapshot integrity, membership, fencing, and cancellation tests. Run targeted storage, server, client, and testkit tests.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten independent lanes at the PR head.
 
@@ -367,8 +367,8 @@ Do not manufacture browser screenshots for a service with no browser UI.
 - [x] Lane 5. Restore a follower beyond the purge frontier. Save `ls06/snapshot-recovery.json`. Pass when E08 restores retained payloads and metadata.
 - [ ] Lane 6. Crash halfway through snapshot installation. Save `l06.json`. Pass when restart selects a valid state without partial publication.
 - [ ] Lane 7. Send a corrupt or wrong-cluster snapshot. Save `l07.json`. Pass when E19 rejects it without overwriting valid state.
-- [ ] Lane 8. Replace a voter through a learner. Save `l08.json`. Pass when E20 changes membership only after catch-up.
-- [ ] Lane 9. Fail a leader during membership change. Save `l09.json`. Pass when recovery converges without forced stale promotion.
+- [x] Lane 8. Replace a voter through a learner. Save `ls06/membership-recovery.json`. Pass when E20 changes membership only after catch-up.
+- [x] Lane 9. Fail a leader during membership change. Save `ls06/membership-recovery.json`. Pass when recovery converges without forced stale promotion.
 - [ ] Lane 10. Catch up a group while another is busy. Save `l10.json`. Pass when resource limits hold and unrelated groups remain usable.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.

@@ -31,15 +31,18 @@ pub use cursor::{
 };
 pub use error::{DomainError, ErrorCode};
 pub use identity::{
-    BookmarkId, BookmarkName, BookmarkPublicationSequence, CatalogRequestId, ClusterId, ConsumerId,
-    GroupId, MutationSessionId, NodeId, PartitionId, PrincipalId, ProducerSessionId, ReplayLeaseId,
-    RequestSequence, StreamId, StreamName,
+    AdministrationRequestId, BookmarkId, BookmarkName, BookmarkPublicationSequence,
+    CatalogRequestId, ClusterId, ConsumerId, GroupId, MutationSessionId, NodeId, PartitionId,
+    PrincipalId, ProducerSessionId, ReplayLeaseId, RequestSequence, StreamId, StreamName,
 };
 pub use publish::{
     MAX_PUBLISH_BYTES, MAX_RECORD_BYTES, MAX_RECORDS_PER_PUBLISH, ProducerRequestId, PublishBatch,
     PublishProbe, PublishReceipt,
 };
-pub use recovery::OperationalProof;
+pub use recovery::{
+    AdministrationIntent, AdministrationLifecycle, AdministrationOperation, ClusterTopology,
+    OperationalProof,
+};
 pub use replay::{
     AmbiguousRequest, ByteCount, ByteLimit, LeaseDeadline, LeaseDuration, LeaseGeneration,
     LeaseRelease, LeaseRenewal, MutationRequestId, ProtectedFetchRequest, ReplayAvailability,

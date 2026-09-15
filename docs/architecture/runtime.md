@@ -174,7 +174,17 @@ Openraft, the snapshot sender, and receiver installation exchange an immutable `
 
 Snapshot construction streams ordered state and payload records into `LSNP0003`. Installation streams records into the inactive `ls_v2_state_a` or `ls_v2_state_b` column family with byte-bounded RocksDB batches. One synchronous metadata batch publishes the new bank and snapshot descriptor. Readers select one bank through the storage boundary. Legacy state migrates to bank A before normal startup.
 
-The local B7 run retained exactly 1 GiB, built a 1,075,598,548-byte artifact, interrupted transfer at 64 MiB, resumed and installed 1,026 chunks, and verified 1,025 records from the stopped repaired node. The repaired-node RSS delta was 138,264,576 bytes under a locked 178,274,304-byte budget. Independent-host capacity remains blocked. Learner replacement and durable leader-transfer administration remain pending.
+The local B7 run retained exactly 1 GiB, built a 1,075,598,548-byte artifact, interrupted transfer at 64 MiB, resumed and installed 1,026 chunks, and verified 1,025 records from the stopped repaired node. The repaired-node RSS delta was 138,264,576 bytes under a locked 178,274,304-byte budget. Independent-host capacity remains blocked.
+
+## LS06 administration
+
+The control group stores a validated `ClusterTopology` and one durable administration operation. The topology separates authorized nodes from desired voters. Replacement first authorizes both the incoming learner and the outgoing voter, then commits a final topology that removes the retired node.
+
+Every node runs an awaited administration reconciler unless its manifest is `retired`. Group leaders prepare the incoming node, add it as a learner, transfer leadership away from the outgoing voter to a surviving effective voter, and call native Openraft membership change. The control leader completes the operation only after every group reports the exact uniform target membership and the outgoing node durably records `retired`.
+
+Administration request IDs are idempotent. Reuse with another body fails. Only one operation is active. Abort restores the prior topology and keeps the slot occupied until every group removes a learner that raced with cancellation. The public client follows control-leader hints and rotates seeds within one deadline.
+
+Node manifest version 4 persists the topology. Version 3 manifests and bootstrap log entries migrate without rewriting the manifest before storage recovery succeeds. Committed control topology is authoritative when the manifest write lags or fails.
 
 ## Rejected combinations
 

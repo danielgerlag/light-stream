@@ -1,0 +1,339 @@
+{
+  "catch_up": {
+    "follower": {
+      "cache_budget_bytes": 134217728,
+      "cluster_committed_index": 12,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 1,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 12,
+      "last_log_index": 12,
+      "local_committed_index": 12,
+      "local_role": "follower",
+      "purged_index": 12,
+      "replication": [],
+      "slot": 0,
+      "snapshot_index": 12,
+      "write_buffer_budget_bytes": 67108864
+    },
+    "leader": {
+      "cache_budget_bytes": 134217728,
+      "cluster_committed_index": 12,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 1,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 12,
+      "last_log_index": 12,
+      "local_committed_index": 12,
+      "local_role": "leader",
+      "purged_index": 12,
+      "replication": [
+        {
+          "matched_log_index": 12,
+          "target_node_id": 1
+        },
+        {
+          "matched_log_index": 12,
+          "target_node_id": 2
+        },
+        {
+          "matched_log_index": 12,
+          "target_node_id": 3
+        }
+      ],
+      "slot": 0,
+      "snapshot_index": 12,
+      "write_buffer_budget_bytes": 67108864
+    },
+    "leader_id": 1,
+    "target_node_id": 2,
+    "target_replication": {
+      "matched_log_index": 12,
+      "target_node_id": 2
+    }
+  },
+  "cluster_id": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+  "incoming_files_after_success": [],
+  "interrupted_durable_offset": 1048576,
+  "lagging_follower_node_id": 2,
+  "leader_node_id": 1,
+  "membership": [
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 3
+    }
+  ],
+  "offline_follower_records": [
+    {
+      "bytes": 5,
+      "offset": 0,
+      "sha256": "b24d6d33736ecd5604a4b17bc9c6481039fac362bb7df044ef1c10a2bfd21db6"
+    },
+    {
+      "bytes": 1048576,
+      "offset": 1,
+      "sha256": "ce5e2a1e862e099d7e6d9be33b47ba93e44a69aec586a60462044fd9e62a413c"
+    },
+    {
+      "bytes": 1048576,
+      "offset": 2,
+      "sha256": "42f24b8a8629c6faf5e021154bc0fc3c04ecf57f4872637026ce962b34a9a6bc"
+    },
+    {
+      "bytes": 1048576,
+      "offset": 3,
+      "sha256": "d8b14a768e174b032a3c73d29505954e6633aac7ec52ea9526c8b600d4de28bf"
+    },
+    {
+      "bytes": 1048576,
+      "offset": 4,
+      "sha256": "f42d57941ceb806fef43b9fe1ed51e4b51cceb3a0835324acd3b7082ba21f8ac"
+    }
+  ],
+  "payload_bytes": 4194304,
+  "payload_sha256": [
+    "ce5e2a1e862e099d7e6d9be33b47ba93e44a69aec586a60462044fd9e62a413c",
+    "42f24b8a8629c6faf5e021154bc0fc3c04ecf57f4872637026ce962b34a9a6bc",
+    "d8b14a768e174b032a3c73d29505954e6633aac7ec52ea9526c8b600d4de28bf",
+    "f42d57941ceb806fef43b9fe1ed51e4b51cceb3a0835324acd3b7082ba21f8ac"
+  ],
+  "publish_receipts": [
+    {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 1,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls06-10101",
+        "sequence": 2,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    },
+    {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 2,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls06-10101",
+        "sequence": 3,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    },
+    {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 3,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls06-10101",
+        "sequence": 4,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    },
+    {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 4,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "verify-ls06-10101",
+        "sequence": 5,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  ],
+  "retained_records_verified": 5,
+  "revision": "d31a78454dc05281246591ef125a5e4ef8c7650d50374f4b93754c803ae72dee",
+  "scenario": "snapshot-recovery",
+  "snapshot": {
+    "group_id": 2,
+    "purged_index": 12,
+    "snapshot_index": 12
+  },
+  "snapshot_install": {
+    "byte_len": 4206399,
+    "chunk_count": 5,
+    "event": "snapshot_install_completed",
+    "group_id": 2,
+    "sender_node_id": 1,
+    "target_node_id": 2,
+    "transfer_id": "0aa7d63caf6732a2659b82d70f1f4d8e52df2755816559b0e1dd3d9373835025"
+  },
+  "snapshot_resume": [
+    {
+      "durable_offset": 1048576,
+      "event": "snapshot_transfer_began",
+      "group_id": 2,
+      "sender_node_id": 1,
+      "target_node_id": 2,
+      "transfer_id": "0aa7d63caf6732a2659b82d70f1f4d8e52df2755816559b0e1dd3d9373835025"
+    }
+  ],
+  "stream_id": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+  "verdict": "PASS"
+}

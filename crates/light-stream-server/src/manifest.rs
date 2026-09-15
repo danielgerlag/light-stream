@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 
 use light_stream_core::{
-    BootstrapSpec, ClusterId, DEFAULT_MAX_DATA_GROUPS, DEFAULT_MAX_PARTITIONS_PER_STREAM,
-    DEFAULT_MAX_STREAMS, DomainError, GroupId, MAX_DATA_GROUPS, MIN_DATA_GROUPS, NodeDescriptor,
-    NodeId,
+    BootstrapSpec, ClusterId, ClusterTopology, DEFAULT_MAX_DATA_GROUPS,
+    DEFAULT_MAX_PARTITIONS_PER_STREAM, DEFAULT_MAX_STREAMS, DomainError, GroupId, MAX_DATA_GROUPS,
+    MIN_DATA_GROUPS, NodeDescriptor, NodeId,
 };
 use serde::{Deserialize, Serialize};
 use tonic::transport::Endpoint;
@@ -13,7 +13,8 @@ use light_stream_storage::{
     MIN_GROUP_WRITE_BUFFER_BYTES, STORAGE_FORMAT_VERSION,
 };
 
-pub const NODE_MANIFEST_VERSION: u32 = 3;
+pub const LEGACY_NODE_MANIFEST_VERSION: u32 = 3;
+pub const NODE_MANIFEST_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GroupPoolConfig {
@@ -189,6 +190,7 @@ pub enum PersistedNodeState {
     Joining,
     Forming,
     Active,
+    Retired,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -196,17 +198,50 @@ pub struct NodeManifestV2 {
     pub format_version: u32,
     pub local_node_id: NodeId,
     pub formation: FormationSpec,
+    pub topology: ClusterTopology,
     pub state: PersistedNodeState,
 }
 
 impl NodeManifestV2 {
-    pub fn new(local_node_id: NodeId, formation: FormationSpec, state: PersistedNodeState) -> Self {
-        Self {
+    pub fn new(
+        local_node_id: NodeId,
+        formation: FormationSpec,
+        state: PersistedNodeState,
+    ) -> Result<Self, DomainError> {
+        let topology = ClusterTopology::try_new(
+            1,
+            formation.members.clone(),
+            formation.members.iter().map(|member| member.node_id()),
+        )?;
+        Self::with_topology(local_node_id, formation, topology, state)
+    }
+
+    pub fn with_topology(
+        local_node_id: NodeId,
+        formation: FormationSpec,
+        topology: ClusterTopology,
+        state: PersistedNodeState,
+    ) -> Result<Self, DomainError> {
+        let manifest = Self {
             format_version: NODE_MANIFEST_VERSION,
             local_node_id,
             formation,
+            topology,
             state,
-        }
+        };
+        let configured =
+            manifest
+                .topology
+                .node(local_node_id)
+                .ok_or_else(|| DomainError::IdentityMismatch {
+                    reason: "manifest local node is absent from its topology".to_owned(),
+                })?;
+        manifest.validate_local(configured)?;
+        Ok(manifest)
+    }
+
+    pub fn from_legacy(legacy: LegacyNodeManifestV3) -> Result<Self, DomainError> {
+        Self::new(legacy.local_node_id, legacy.formation, legacy.state)
     }
 
     pub fn validate_local(&self, configured: &NodeDescriptor) -> Result<(), DomainError> {
@@ -227,18 +262,63 @@ impl NodeManifestV2 {
                     .to_owned(),
             });
         }
-        let stored = self.formation.local(self.local_node_id).ok_or_else(|| {
-            DomainError::IdentityMismatch {
+        let stored = self
+            .topology
+            .node(self.local_node_id)
+            .or_else(|| {
+                (self.state == PersistedNodeState::Retired)
+                    .then(|| self.formation.local(self.local_node_id))
+                    .flatten()
+            })
+            .ok_or_else(|| DomainError::IdentityMismatch {
                 reason: "manifest local node is absent from its topology".to_owned(),
-            }
-        })?;
+            })?;
         if stored != configured {
             return Err(DomainError::IdentityMismatch {
                 reason: "configured node descriptor conflicts with the durable manifest".to_owned(),
             });
         }
+        for node in self.topology.authorized_nodes().values() {
+            validate_uri("public URI", node.public_uri())?;
+            validate_uri("peer URI", node.peer_uri())?;
+            if node.public_uri() == node.peer_uri() {
+                return Err(DomainError::InvalidName {
+                    kind: "node descriptor".to_owned(),
+                    reason: "public and peer URIs must differ".to_owned(),
+                });
+            }
+        }
+        let nodes = self.topology.authorized_nodes().values();
+        let public_uris = nodes
+            .clone()
+            .map(|node| node.public_uri())
+            .collect::<BTreeSet<_>>();
+        let peer_uris = nodes
+            .clone()
+            .map(|node| node.peer_uri())
+            .collect::<BTreeSet<_>>();
+        let all_uris = nodes
+            .flat_map(|node| [node.public_uri(), node.peer_uri()])
+            .collect::<BTreeSet<_>>();
+        let node_count = self.topology.authorized_nodes().len();
+        if public_uris.len() != node_count
+            || peer_uris.len() != node_count
+            || all_uris.len() != node_count * 2
+        {
+            return Err(DomainError::IdentityMismatch {
+                reason: "durable topology endpoints must be unique".to_owned(),
+            });
+        }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LegacyNodeManifestV3 {
+    pub format_version: u32,
+    pub local_node_id: NodeId,
+    pub formation: FormationSpec,
+    pub state: PersistedNodeState,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -361,7 +441,8 @@ mod tests {
             NodeId::new(1).unwrap(),
             formation,
             PersistedNodeState::Active,
-        );
+        )
+        .unwrap();
         let changed = NodeDescriptor::new(
             NodeId::new(1).unwrap(),
             "http://127.0.0.1:7199",

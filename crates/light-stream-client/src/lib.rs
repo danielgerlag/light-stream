@@ -20,11 +20,11 @@ use light_stream_proto::{
     replay_lease_from_wire, retention_result_from_wire, retention_status_from_response,
     route_from_wire, security_mode_from_wire, stream_bookmark_from_wire, stream_from_wire,
     v1::{
-        self, advance_retention_response, bookmark_response, bootstrap_response, fetch_response,
-        light_stream_client::LightStreamClient, list_bookmarks_response,
-        list_stream_bookmarks_response, list_streams_response, publish_response, receipt_response,
-        replay_lease_response, retention_status_response, route_response, snapshot_group_response,
-        stream_bookmark_response, stream_response,
+        self, administration_response, advance_retention_response, bookmark_response,
+        bootstrap_response, fetch_response, light_stream_client::LightStreamClient,
+        list_bookmarks_response, list_stream_bookmarks_response, list_streams_response,
+        publish_response, receipt_response, replay_lease_response, retention_status_response,
+        route_response, snapshot_group_response, stream_bookmark_response, stream_response,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,20 @@ enum ReplayMutationCall {
     Admit(v1::AdmitReplayLeaseRequest),
     Renew(v1::RenewReplayLeaseRequest),
     Release(v1::ReleaseReplayLeaseRequest),
+}
+
+#[derive(Clone)]
+enum AdministrationCall {
+    Replace(v1::ReplaceVoterRequest),
+    Transfer(v1::TransferLeadershipRequest),
+    Status(v1::AdministrationStatusRequest),
+    Abort(v1::AbortAdministrationRequest),
+}
+
+impl AdministrationCall {
+    const fn is_mutation(&self) -> bool {
+        !matches!(self, Self::Status(_))
+    }
 }
 
 impl ReplayMutationCall {
@@ -241,6 +255,18 @@ pub struct SnapshotGroupResult {
     pub group_id: u64,
     pub snapshot_index: u64,
     pub purged_index: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AdministrationStatus {
+    pub request_id: String,
+    pub kind: String,
+    pub lifecycle: String,
+    pub topology_revision: u64,
+    pub remove_node_id: Option<u64>,
+    pub add_node: Option<NodeDescriptor>,
+    pub group_id: Option<u64>,
+    pub target_node_id: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -2197,6 +2223,146 @@ impl Client {
         }
     }
 
+    pub async fn replace_voter(
+        &self,
+        cluster: ClusterId,
+        request_id: &str,
+        expected_topology_revision: u64,
+        remove_node_id: u64,
+        add_node: &NodeDescriptor,
+    ) -> Result<AdministrationStatus, ClientError> {
+        self.administration_call(AdministrationCall::Replace(v1::ReplaceVoterRequest {
+            cluster_id: cluster.to_string(),
+            request_id: request_id.to_owned(),
+            expected_topology_revision,
+            remove_node_id,
+            add_node: Some(v1::NodeDescriptor {
+                node_id: add_node.node_id().get(),
+                public_uri: add_node.public_uri().to_owned(),
+                peer_uri: add_node.peer_uri().to_owned(),
+            }),
+        }))
+        .await
+    }
+
+    pub async fn transfer_leadership(
+        &self,
+        cluster: ClusterId,
+        request_id: &str,
+        group_id: u64,
+        target_node_id: u64,
+    ) -> Result<AdministrationStatus, ClientError> {
+        self.administration_call(AdministrationCall::Transfer(
+            v1::TransferLeadershipRequest {
+                cluster_id: cluster.to_string(),
+                request_id: request_id.to_owned(),
+                group_id,
+                target_node_id,
+            },
+        ))
+        .await
+    }
+
+    pub async fn administration_status(
+        &self,
+        cluster: ClusterId,
+        request_id: &str,
+    ) -> Result<AdministrationStatus, ClientError> {
+        self.administration_call(AdministrationCall::Status(
+            v1::AdministrationStatusRequest {
+                cluster_id: cluster.to_string(),
+                request_id: request_id.to_owned(),
+            },
+        ))
+        .await
+    }
+
+    pub async fn abort_administration(
+        &self,
+        cluster: ClusterId,
+        request_id: &str,
+    ) -> Result<AdministrationStatus, ClientError> {
+        self.administration_call(AdministrationCall::Abort(v1::AbortAdministrationRequest {
+            cluster_id: cluster.to_string(),
+            request_id: request_id.to_owned(),
+        }))
+        .await
+    }
+
+    async fn administration_call(
+        &self,
+        call: AdministrationCall,
+    ) -> Result<AdministrationStatus, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mutation = call.is_mutation();
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .administration_once(&endpoint, call.clone(), deadline)
+                .await
+            {
+                Ok(status) => return Ok(status),
+                Err(AttemptError::Deadline) => {
+                    return Err(ClientError::Domain(DomainError::QuorumUnavailable {
+                        group: ConsensusGroup::Control,
+                        outcome: if mutation {
+                            RequestOutcome::AmbiguousCommit
+                        } else {
+                            RequestOutcome::NotApplicable
+                        },
+                        request: None,
+                    }));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) if self.retry => {
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Connection(_) | ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| non_write_deadline_error())?;
+            index = next_index;
+        }
+    }
+
+    async fn administration_once(
+        &self,
+        endpoint: &str,
+        call: AdministrationCall,
+        deadline: Deadline,
+    ) -> Result<AdministrationStatus, AttemptError> {
+        let mut client = connect_client(endpoint, deadline).await?;
+        let response = match call {
+            AdministrationCall::Replace(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.replace_voter(request)).await?
+            }
+            AdministrationCall::Transfer(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.transfer_leadership(request)).await?
+            }
+            AdministrationCall::Status(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.get_administration(request)).await?
+            }
+            AdministrationCall::Abort(request) => {
+                let (request, timeout) = timed_request(deadline, request)?;
+                await_rpc(deadline, timeout, client.abort_administration(request)).await?
+            }
+        };
+        administration_status_from_wire(response).map_err(AttemptError::Client)
+    }
+
     async fn publish_once(
         &self,
         endpoint: &str,
@@ -2368,6 +2534,36 @@ fn request_id_to_wire(request: &ProducerRequestId) -> v1::ProducerRequestId {
         principal_id: request.principal().to_string(),
         producer_session_id: request.session().to_string(),
         sequence: request.sequence().get(),
+    }
+}
+
+fn administration_status_from_wire(
+    response: v1::AdministrationResponse,
+) -> Result<AdministrationStatus, ClientError> {
+    match response.result {
+        Some(administration_response::Result::Operation(operation)) => Ok(AdministrationStatus {
+            request_id: operation.request_id,
+            kind: operation.kind,
+            lifecycle: operation.lifecycle,
+            topology_revision: operation.topology_revision,
+            remove_node_id: (operation.remove_node_id != 0).then_some(operation.remove_node_id),
+            add_node: match operation.add_node {
+                Some(node) => Some(NodeDescriptor::new(
+                    light_stream_core::NodeId::new(node.node_id).map_err(ClientError::from)?,
+                    node.public_uri,
+                    node.peer_uri,
+                )),
+                None => None,
+            },
+            group_id: (operation.group_id != 0).then_some(operation.group_id),
+            target_node_id: (operation.target_node_id != 0).then_some(operation.target_node_id),
+        }),
+        Some(administration_response::Result::Error(error)) => {
+            Err(domain_error_from_wire(error)?.into())
+        }
+        None => Err(ClientError::Protocol(
+            "administration response omitted its typed result".to_owned(),
+        )),
     }
 }
 

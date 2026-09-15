@@ -1,0 +1,399 @@
+{
+  "empty_learners": true,
+  "exact_voters": [
+    1,
+    2,
+    3
+  ],
+  "observed_memberships": [
+    {
+      "nodes": [
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 1
+        },
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 2
+        },
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 3
+        }
+      ],
+      "stage": "initial"
+    },
+    {
+      "nodes": [
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 1
+        },
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 2
+        },
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 3
+        }
+      ],
+      "stage": "after_quorum_restart"
+    },
+    {
+      "nodes": [
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 1
+        },
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 2
+        },
+        {
+          "groups": {
+            "control": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 1
+            },
+            "data-2": {
+              "committed_learners": [],
+              "committed_uniform": true,
+              "committed_voters": [
+                1,
+                2,
+                3
+              ],
+              "effective_learners": [],
+              "effective_uniform": true,
+              "effective_voters": [
+                1,
+                2,
+                3
+              ],
+              "group_id": 2
+            }
+          },
+          "lifecycle": "active",
+          "node_id": 3
+        }
+      ],
+      "stage": "full_restart"
+    }
+  ],
+  "record_count": 10,
+  "typed_data_leader_hints": [
+    {
+      "group": "data",
+      "node_id": 1,
+      "public_uri": "http://127.0.0.1:53940"
+    },
+    {
+      "group": "data",
+      "node_id": 1,
+      "public_uri": "http://127.0.0.1:53940"
+    }
+  ],
+  "verdict": "PASS"
+}

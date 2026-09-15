@@ -477,6 +477,49 @@ message SnapshotGroupResponse {
   }
 }
 
+message ReplaceVoterRequest {
+    string cluster_id = 1;
+    string request_id = 2;
+    uint64 expected_topology_revision = 3;
+    uint64 remove_node_id = 4;
+    NodeDescriptor add_node = 5;
+}
+
+message TransferLeadershipRequest {
+    string cluster_id = 1;
+    string request_id = 2;
+    uint64 group_id = 3;
+    uint64 target_node_id = 4;
+}
+
+message AdministrationStatusRequest {
+    string cluster_id = 1;
+    string request_id = 2;
+}
+
+message AbortAdministrationRequest {
+  string cluster_id = 1;
+  string request_id = 2;
+}
+
+message AdministrationOperation {
+    string request_id = 1;
+    string kind = 2;
+    string lifecycle = 3;
+    uint64 topology_revision = 4;
+    uint64 remove_node_id = 5;
+    NodeDescriptor add_node = 6;
+    uint64 group_id = 7;
+    uint64 target_node_id = 8;
+}
+
+message AdministrationResponse {
+  oneof result {
+    AdministrationOperation operation = 1;
+    ErrorResult error = 2;
+  }
+}
+
 message ReplicationProgress {
   uint64 target_node_id = 1;
   bool has_matched_log = 2;
@@ -587,4 +630,8 @@ service LightStream {
   rpc FetchProtected(FetchProtectedRequest) returns (FetchResponse);
   rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
   rpc SnapshotGroup(SnapshotGroupRequest) returns (SnapshotGroupResponse);
+  rpc ReplaceVoter(ReplaceVoterRequest) returns (AdministrationResponse);
+  rpc TransferLeadership(TransferLeadershipRequest) returns (AdministrationResponse);
+  rpc GetAdministration(AdministrationStatusRequest) returns (AdministrationResponse);
+  rpc AbortAdministration(AbortAdministrationRequest) returns (AdministrationResponse);
 }

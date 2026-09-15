@@ -1,0 +1,292 @@
+{
+  "before": {
+    "cache_budget_bytes": 134217728,
+    "cluster_committed_index": 15,
+    "committed_learners": [],
+    "committed_uniform": true,
+    "committed_voters": [
+      1,
+      2,
+      3
+    ],
+    "current_leader": 2,
+    "effective_learners": [],
+    "effective_uniform": true,
+    "effective_voters": [
+      1,
+      2,
+      3
+    ],
+    "group": "data",
+    "group_id": 2,
+    "last_applied_index": 15,
+    "last_log_index": 15,
+    "local_committed_index": 15,
+    "local_role": "follower",
+    "purged_index": null,
+    "replication": [],
+    "slot": 0,
+    "snapshot_index": null,
+    "write_buffer_budget_bytes": 67108864
+  },
+  "catch_up": {
+    "follower": {
+      "cache_budget_bytes": 134217728,
+      "cluster_committed_index": 18,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 18,
+      "last_log_index": 18,
+      "local_committed_index": 18,
+      "local_role": "follower",
+      "purged_index": null,
+      "replication": [],
+      "slot": 0,
+      "snapshot_index": null,
+      "write_buffer_budget_bytes": 67108864
+    },
+    "leader": {
+      "cache_budget_bytes": 134217728,
+      "cluster_committed_index": 18,
+      "committed_learners": [],
+      "committed_uniform": true,
+      "committed_voters": [
+        1,
+        2,
+        3
+      ],
+      "current_leader": 2,
+      "effective_learners": [],
+      "effective_uniform": true,
+      "effective_voters": [
+        1,
+        2,
+        3
+      ],
+      "group": "data",
+      "group_id": 2,
+      "last_applied_index": 18,
+      "last_log_index": 18,
+      "local_committed_index": 18,
+      "local_role": "leader",
+      "purged_index": null,
+      "replication": [
+        {
+          "matched_log_index": 18,
+          "target_node_id": 1
+        },
+        {
+          "matched_log_index": 18,
+          "target_node_id": 2
+        },
+        {
+          "matched_log_index": 18,
+          "target_node_id": 3
+        }
+      ],
+      "slot": 0,
+      "snapshot_index": null,
+      "write_buffer_budget_bytes": 67108864
+    },
+    "leader_id": 2,
+    "target_node_id": 1,
+    "target_replication": {
+      "matched_log_index": 18,
+      "target_node_id": 1
+    }
+  },
+  "delay_ms": 1500,
+  "delayed_links": [
+    {
+      "counters": {
+        "accepted_connections": 83,
+        "client_to_upstream_bytes": 73133,
+        "delayed_chunks": 1,
+        "dropped_bytes": 0,
+        "mode_changes": 1,
+        "upstream_to_client_bytes": 16184
+      },
+      "delay_ms": 1500,
+      "endpoint": "http://127.0.0.1:53946",
+      "mode": "delay",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53943"
+    },
+    {
+      "counters": {
+        "accepted_connections": 20,
+        "client_to_upstream_bytes": 29291,
+        "delayed_chunks": 0,
+        "dropped_bytes": 0,
+        "mode_changes": 1,
+        "upstream_to_client_bytes": 3923
+      },
+      "delay_ms": 1500,
+      "endpoint": "http://127.0.0.1:53948",
+      "mode": "delay",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53941"
+    },
+    {
+      "counters": {
+        "accepted_connections": 85,
+        "client_to_upstream_bytes": 81386,
+        "delayed_chunks": 0,
+        "dropped_bytes": 15343,
+        "mode_changes": 3,
+        "upstream_to_client_bytes": 14145
+      },
+      "delay_ms": 1500,
+      "endpoint": "http://127.0.0.1:53947",
+      "mode": "delay",
+      "source_node_id": 1,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53945"
+    },
+    {
+      "counters": {
+        "accepted_connections": 104,
+        "client_to_upstream_bytes": 49979,
+        "delayed_chunks": 0,
+        "dropped_bytes": 18584,
+        "mode_changes": 3,
+        "upstream_to_client_bytes": 5993
+      },
+      "delay_ms": 1500,
+      "endpoint": "http://127.0.0.1:53950",
+      "mode": "delay",
+      "source_node_id": 3,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53941"
+    }
+  ],
+  "follower_node_id": 1,
+  "healed_links": [
+    {
+      "counters": {
+        "accepted_connections": 131,
+        "client_to_upstream_bytes": 97563,
+        "delayed_chunks": 157,
+        "dropped_bytes": 0,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 19150
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:53946",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 2,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53943"
+    },
+    {
+      "counters": {
+        "accepted_connections": 98,
+        "client_to_upstream_bytes": 102136,
+        "delayed_chunks": 212,
+        "dropped_bytes": 0,
+        "mode_changes": 2,
+        "upstream_to_client_bytes": 7789
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:53948",
+      "mode": "pass",
+      "source_node_id": 2,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53941"
+    },
+    {
+      "counters": {
+        "accepted_connections": 136,
+        "client_to_upstream_bytes": 107311,
+        "delayed_chunks": 162,
+        "dropped_bytes": 15343,
+        "mode_changes": 4,
+        "upstream_to_client_bytes": 18000
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:53947",
+      "mode": "pass",
+      "source_node_id": 1,
+      "target_node_id": 3,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53945"
+    },
+    {
+      "counters": {
+        "accepted_connections": 104,
+        "client_to_upstream_bytes": 49979,
+        "delayed_chunks": 0,
+        "dropped_bytes": 18584,
+        "mode_changes": 4,
+        "upstream_to_client_bytes": 5993
+      },
+      "delay_ms": 0,
+      "endpoint": "http://127.0.0.1:53950",
+      "mode": "pass",
+      "source_node_id": 3,
+      "target_node_id": 1,
+      "thread_alive": true,
+      "upstream": "http://127.0.0.1:53941"
+    }
+  ],
+  "lagging": {
+    "cache_budget_bytes": 134217728,
+    "cluster_committed_index": 15,
+    "committed_learners": [],
+    "committed_uniform": true,
+    "committed_voters": [
+      1,
+      2,
+      3
+    ],
+    "current_leader": 2,
+    "effective_learners": [],
+    "effective_uniform": true,
+    "effective_voters": [
+      1,
+      2,
+      3
+    ],
+    "group": "data",
+    "group_id": 2,
+    "last_applied_index": 15,
+    "last_log_index": 15,
+    "local_committed_index": 15,
+    "local_role": "follower",
+    "purged_index": null,
+    "replication": [],
+    "slot": 0,
+    "snapshot_index": null,
+    "write_buffer_budget_bytes": 67108864
+  },
+  "publish_deadline_ms": 5000,
+  "publish_durations_seconds": [
+    2.680775457999996,
+    0.04945629200000212,
+    0.051431833000002314
+  ],
+  "verdict": "PASS"
+}
