@@ -4,6 +4,7 @@ mod openraft_boundary;
 mod peer;
 mod publish_scheduler;
 mod runtime;
+mod security;
 mod service;
 
 use std::{
@@ -25,7 +26,7 @@ use tonic::transport::Server;
 
 pub use config::{ServerArgs, ServerConfig};
 use peer::PeerApi;
-use runtime::ClusterManager;
+use runtime::{ClusterManager, ClusterManagerConfig};
 use service::PublicApi;
 
 pub const BUILD_REVISION: &str = match option_env!("LIGHT_STREAM_BUILD_REVISION") {
@@ -37,8 +38,6 @@ pub const BUILD_REVISION: &str = match option_env!("LIGHT_STREAM_BUILD_REVISION"
 pub enum StartupError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
-    #[error("secured mode is not implemented until LS08")]
-    SecuredModeUnsupported,
     #[error("data directory is already owned by another light-streamd process: {0}")]
     DataDirectoryLocked(String),
     #[error("failed to prepare data directory {path}: {source}")]
@@ -103,6 +102,11 @@ impl DataDirectoryLock {
 
 pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
     openraft_boundary::assert_compile_boundary();
+    let security = config.security().clone();
+    let scheme = match security.mode() {
+        SecurityMode::LocalInsecure => "http",
+        SecurityMode::Secured => "https",
+    };
     let _data_lock = DataDirectoryLock::acquire(config.data_dir())?;
     let public_listener = TcpListener::bind(config.public_listen())
         .await
@@ -135,11 +139,12 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
     let advertised_public_uri = config
         .advertise_public_uri()
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("http://{public_address}"));
+        .unwrap_or_else(|| format!("{scheme}://{public_address}"));
     let advertised_peer_uri = config
         .advertise_peer_uri()
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("http://{peer_address}"));
+        .unwrap_or_else(|| format!("{scheme}://{peer_address}"));
+    security.validate_advertised_uris(&advertised_public_uri, &advertised_peer_uri)?;
     let local = NodeDescriptor::new(
         NodeId::new(config.node_id()).map_err(StartupError::Cluster)?,
         advertised_public_uri.clone(),
@@ -150,31 +155,55 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
         ClusterManager::open(
             config.data_dir().to_path_buf(),
             local,
-            config.receipt_window(),
-            config.peer_routes().clone(),
-            config.group_pool().clone(),
-            config.publish_scheduler(),
-            (
-                config.verification_delay(),
-                config.verification_response_delay(),
-            ),
+            ClusterManagerConfig {
+                receipt_window: config.receipt_window(),
+                peer_routes: config.peer_routes().clone(),
+                group_pool: config.group_pool().clone(),
+                publish_scheduler: config.publish_scheduler(),
+                verification_delays: (
+                    config.verification_delay(),
+                    config.verification_response_delay(),
+                ),
+                security: security.clone(),
+            },
         )
         .await?,
     );
     let public_api = PublicApi::new(
         cluster.clone(),
-        config.security_mode(),
+        security.clone(),
         advertised_public_uri.clone(),
         advertised_peer_uri.clone(),
     );
     let peer_api = PeerApi::new(cluster.clone());
+    let security_refresh = (security.mode() == SecurityMode::Secured).then(|| {
+        let cluster = cluster.clone();
+        let security = security.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                if let Ok(policy) = cluster.confirmed_security_policy().await {
+                    let _ = security.renew_policy(policy);
+                }
+            }
+        })
+    });
+    let mut public_builder = Server::builder();
+    if let Some(tls) = security.public_tls() {
+        public_builder = public_builder.tls_config(tls)?;
+    }
+    let mut peer_builder = Server::builder();
+    if let Some(tls) = security.peer_tls() {
+        peer_builder = peer_builder.tls_config(tls)?;
+    }
 
     println!(
         "{}",
         serde_json::to_string(&ReadyAnnouncement {
             ready: true,
             revision: BUILD_REVISION.to_owned(),
-            security_mode: SecurityMode::LocalInsecure.to_string(),
+            security_mode: security.mode().to_string(),
             public_address: public_address.to_string(),
             peer_address: peer_address.to_string(),
             advertised_public_uri,
@@ -193,7 +222,7 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let public_shutdown = shutdown_rx.clone();
     let peer_shutdown = shutdown_rx;
-    let public_server = Server::builder()
+    let public_server = public_builder
         .add_service(
             LightStreamServer::new(public_api)
                 .max_decoding_message_size(MAX_PUBLIC_MESSAGE_BYTES)
@@ -203,7 +232,7 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             TcpListenerStream::new(public_listener),
             wait_for_shutdown(public_shutdown),
         );
-    let peer_server = Server::builder()
+    let peer_server = peer_builder
         .add_service(
             peer::wire::peer_service_server::PeerServiceServer::new(peer_api)
                 .max_decoding_message_size(peer::MAX_PEER_MESSAGE_BYTES)
@@ -230,6 +259,10 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             }
         }
     };
+    if let Some(task) = security_refresh {
+        task.abort();
+        let _ = task.await;
+    }
     cluster.shutdown().await?;
     serve_result?;
     Ok(())

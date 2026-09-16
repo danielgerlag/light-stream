@@ -1,6 +1,6 @@
 # Light Stream API invariants
 
-Status: implemented through LS07.
+Status: implemented through LS08.
 
 ## Identities
 
@@ -84,6 +84,15 @@ Status: implemented through LS07.
 ## Security
 
 - `local-insecure` binds loopback by default and reports its mode.
-- `secured` requires TLS, authenticated client principals, stream permissions, and peer mutual TLS.
+- `secured` requires public TLS, bearer-token authentication, permission checks, and peer mutual TLS.
 - A client identity is not a node identity.
 - Security configuration errors fail startup and never enable a fallback mode.
+- The control group stores grants, token verifier digests, peer certificate fingerprints, and policy revisions. It never stores raw tokens or private keys.
+- Every public RPC has one registered permission and authenticates before request conversion or runtime access.
+- Name-based stream reads require `StreamDiscover`, then reauthorize the resolved immutable `StreamId`.
+- Producer receipts, replay leases, checkpoints, and security mutations remain bound to their authenticated principal.
+- Peer certificates bind the cluster and node in one URI SAN. The certificate identity must match the peer envelope and an active policy fingerprint before payload decoding.
+- Public work requires a policy lease no older than `maximum_policy_staleness_ms`. Expired leases fail with `security_policy_stale`.
+- Token and peer certificate generations only increase. Rotation adds the new generation before revoking the old generation.
+- Manifest version 5 records either `local-insecure` or `secured`. Startup flags cannot downgrade a secured manifest.
+- `ActivateSecuredTransport` commits the HTTPS topology and initial policy in one idempotent control-group command.

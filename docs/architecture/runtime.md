@@ -1,6 +1,6 @@
 # Production runtime architecture
 
-Status: implemented through LS07.
+Status: implemented through LS08.
 
 The arena result is preserved in `artifacts/LS02b/design/synthesis.md`.
 The independent judge scored the selected design 28/30 and preferred its auditable payload ownership and exact Openraft 0.10 API mapping.
@@ -86,6 +86,7 @@ Current reads require Openraft's linearizable read barrier.
 6. LS05 adds retention, replay leases, reclamation, and bounded reads.
 7. LS06 adds snapshots, suffix and snapshot catch-up, learners, membership changes, and leader transfer.
 8. LS07 adds bounded group commit, explicit publish admission, client cancellation and receipt resolution, and mutable consumer checkpoints.
+9. LS08 adds public TLS, peer mutual TLS, replicated authorization policy, bounded policy freshness, credential rotation, and an explicit secured-transport transition.
 
 Every stage leaves runnable release binaries and evidence from the independent oracle.
 
@@ -203,6 +204,20 @@ Checkpoint updates cannot exceed the committed tail or move behind the current c
 
 The client uses one absolute deadline for publish and checkpoint route resolution, retries, and RPCs. Publish accepts a cancellation token and can resolve an ambiguous transport result through the durable receipt. `SIGINT` prints a machine-readable certainty result before `light-streamctl` exits with code 130.
 
+## LS08 security
+
+The control group is the only cluster authorization authority. Its state stores grants, SHA-256 token verifier digests, active and revoked credential generations, peer certificate fingerprints, and policy revisions. Raw tokens and private keys remain in protected local files.
+
+The public listener uses TLS. Each request authenticates one bearer token, resolves one permission and resource scope, and receives a typed permit before the service converts the request or calls the runtime. Name-based operations first require discovery permission, then check the resolved immutable stream ID.
+
+The peer listener requires mutual TLS. A peer certificate carries one Light Stream URI identity with the cluster ID and node ID. The server checks that identity against the envelope, the durable topology, and an active fingerprint before it decodes the Raft payload. Outbound connections verify the hostname from the durable peer URI even when an operator route changes the dial address.
+
+Each secured node keeps a bounded policy lease. The control leader renews its lease through a linearizable policy read. Followers renew their lease when they apply accepted control-group traffic. Public work fails with `security_policy_stale` after the configured limit. Recovery exceptions apply only to control-group traffic and pristine formation.
+
+Token rotation keeps the principal stable while credential generations change. Peer certificate rotation requires the new fingerprint to reach the target node before the node restarts with the new certificate. The operator then revokes the old generation.
+
+Manifest version 5 records the durable security profile. `ActivateSecuredTransport` atomically commits an HTTPS topology and the initial policy for an existing version 4 or local-insecure cluster. The operator then stops all voters and restarts them in secured mode. The manifest rejects a later plaintext downgrade.
+
 ## Rejected combinations
 
 Do not combine the 0.10 adapter with 0.9 method signatures or snapshot semantics.
@@ -212,4 +227,4 @@ Do not store a second permanent payload value during apply.
 Do not derive payload object identity only from the producer request.
 Do not put one RocksDB instance or Raft group behind every logical stream.
 Do not route heartbeats, votes, or snapshot data through the public application mailbox.
-Do not add security internals before LS08, but keep public and peer transport-security boundaries separate from LS01.
+Do not merge the public and peer listeners. They have different authentication and authorization rules.

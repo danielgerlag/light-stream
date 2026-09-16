@@ -15,6 +15,7 @@ pub enum Capability {
     Retention,
     ProtectedReplay,
     ConsumerCheckpoints,
+    Security,
 }
 
 impl Capability {
@@ -30,6 +31,7 @@ impl Capability {
             Self::Retention => "retention",
             Self::ProtectedReplay => "protected_replay",
             Self::ConsumerCheckpoints => "consumer_checkpoints",
+            Self::Security => "security",
         }
     }
 
@@ -45,6 +47,7 @@ impl Capability {
             "retention" => Some(Self::Retention),
             "protected_replay" => Some(Self::ProtectedReplay),
             "consumer_checkpoints" => Some(Self::ConsumerCheckpoints),
+            "security" => Some(Self::Security),
             _ => None,
         }
     }

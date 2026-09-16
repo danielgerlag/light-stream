@@ -1,0 +1,156 @@
+{
+  "bootstrap": {
+    "cluster": {
+      "cluster": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+      "control_group": 1,
+      "data_group": 2,
+      "stream": "e84655e0-06fd-fa9e-d3ce-f65f00e95794",
+      "stream_name": "bootstrap"
+    },
+    "command": "cluster-bootstrap",
+    "endpoint": "https://127.0.0.1:54731",
+    "ok": true
+  },
+  "fetch_verified": true,
+  "memberships": [
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 3
+    }
+  ],
+  "new_leader": 3,
+  "old_leader": 1,
+  "publish": {
+    "bookmark": null,
+    "range": {
+      "count": 1,
+      "first": 0,
+      "partition": {
+        "partition": 0,
+        "stream": "e84655e0-06fd-fa9e-d3ce-f65f00e95794"
+      }
+    },
+    "request": {
+      "principal": "ls08-admin",
+      "sequence": 1,
+      "session": "6222b080-d109-b6f2-605d-74b00efc641c"
+    }
+  },
+  "verdict": "PASS"
+}

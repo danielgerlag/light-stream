@@ -1,6 +1,6 @@
 ---
 name: verify-light-stream
-description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS05, including retention and protected replay.
+description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS08, including secured migration, rotation, and fail-closed authorization.
 ---
 
 # Verify Light Stream
@@ -124,6 +124,16 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS07/final-4
 ```
 
+For LS08 secured transport, authorization, rotation, and migration, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS08 \
+  --profile local \
+  --security all \
+  --artifacts artifacts/LS08/skill-security
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -150,4 +160,8 @@ For LS07, inspect `l01.json` through `l10.json`, `ls07/client-workflows.json`, a
 
 For B4, inspect `artifacts/LS07/perf-7/result.json`. Confirm publish throughput is at least 90% of the LS06 baseline and publish and fetch p99 ratios are at most 1.20.
 
-Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report secured mode as `UNSUPPORTED_LS08`. Report independent-host verification as `BLOCKED`.
+For LS08, inspect `l01.json` through `l10.json`, `ls08/security-journey.json`, `ls08/security-migration.json`, and `ls08/secured-performance.json`. Confirm HTTPS public traffic, mutual-TLS peer traffic, authorization before side effects, immutable stream-scope checks, token rotation, rolling peer-certificate rotation, five-second public-policy expiry, rogue-peer rejection, plaintext-to-secured migration, and raw plus encoded secret-canary scans. Confirm that runtime diagnostics no longer report `secured_mode:UNSUPPORTED_LS08`.
+
+For the LS08 B4 gate, run `scripts/compare_ls05_perf.py` against the LS07 release binaries and the current release binaries. Confirm publish throughput is at least 90% of the LS07 baseline and publish and fetch p99 ratios are at most 1.20.
+
+Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report the optional independent security review as `NOT_REQUESTED` unless the execution manifest selected it. Report independent-host verification as `BLOCKED`.

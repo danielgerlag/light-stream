@@ -42,6 +42,10 @@ pub enum ErrorCode {
     LeaseClockUnavailable,
     PublishOverloaded,
     ResourceLimit,
+    SecurityAuthenticationFailed,
+    SecurityPermissionDenied,
+    SecurityPolicyConflict,
+    SecurityPolicyStale,
     StaleRoute,
     UnsupportedOperation,
 }
@@ -82,6 +86,10 @@ impl ErrorCode {
             Self::LeaseClockUnavailable => "lease_clock_unavailable",
             Self::PublishOverloaded => "publish_overloaded",
             Self::ResourceLimit => "resource_limit",
+            Self::SecurityAuthenticationFailed => "security_authentication_failed",
+            Self::SecurityPermissionDenied => "security_permission_denied",
+            Self::SecurityPolicyConflict => "security_policy_conflict",
+            Self::SecurityPolicyStale => "security_policy_stale",
             Self::StaleRoute => "stale_route",
             Self::UnsupportedOperation => "unsupported_operation",
         }
@@ -176,6 +184,14 @@ pub enum DomainError {
     PublishOverloaded { resource: String, limit: u64 },
     #[error("{resource} limit {limit} was exceeded")]
     ResourceLimit { resource: String, limit: u64 },
+    #[error("client authentication failed")]
+    SecurityAuthenticationFailed,
+    #[error("the authenticated principal is not authorized for this operation")]
+    SecurityPermissionDenied,
+    #[error("the security policy mutation conflicts with committed policy")]
+    SecurityPolicyConflict,
+    #[error("the local security policy is too stale to authorize work")]
+    SecurityPolicyStale,
     #[error("routing metadata is stale")]
     StaleRoute,
     #[error("{operation} is not supported until {available_phase}")]
@@ -221,6 +237,10 @@ impl DomainError {
             Self::LeaseClockUnavailable => ErrorCode::LeaseClockUnavailable,
             Self::PublishOverloaded { .. } => ErrorCode::PublishOverloaded,
             Self::ResourceLimit { .. } => ErrorCode::ResourceLimit,
+            Self::SecurityAuthenticationFailed => ErrorCode::SecurityAuthenticationFailed,
+            Self::SecurityPermissionDenied => ErrorCode::SecurityPermissionDenied,
+            Self::SecurityPolicyConflict => ErrorCode::SecurityPolicyConflict,
+            Self::SecurityPolicyStale => ErrorCode::SecurityPolicyStale,
             Self::StaleRoute => ErrorCode::StaleRoute,
             Self::UnsupportedOperation { .. } => ErrorCode::UnsupportedOperation,
         }

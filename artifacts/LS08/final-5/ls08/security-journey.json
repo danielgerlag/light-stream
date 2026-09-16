@@ -1,0 +1,11 @@
+{
+  "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+  "invalid_token_denied": true,
+  "new_leader": 3,
+  "old_leader": 1,
+  "revision": "07ed07c509c1b21f3803e3946b715350ce678bc73c85981907621031e1561feb",
+  "secret_canaries_absent": true,
+  "security_mode": "secured",
+  "valid_workflow": true,
+  "verdict": "PASS"
+}

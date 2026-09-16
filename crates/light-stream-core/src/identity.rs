@@ -7,7 +7,9 @@ use crate::DomainError;
 
 macro_rules! uuid_id {
     ($name:ident, $kind:literal) => {
-        #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+        #[derive(
+            Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+        )]
         pub struct $name(Uuid);
 
         impl $name {

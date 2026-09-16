@@ -1,0 +1,14 @@
+{
+  "invalid_token": {
+    "command": "request",
+    "error": {
+      "code": "security_authentication_failed",
+      "detail": {
+        "code": "security_authentication_failed"
+      },
+      "message": "client authentication failed"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

@@ -1294,7 +1294,11 @@ pub fn domain_error_from_wire(value: v1::ErrorResult) -> Result<DomainError, Dom
         | "mutation_receipt_expired"
         | "lease_clock_unavailable"
         | "publish_overloaded"
-        | "resource_limit" => decode_domain_error_detail(&value.detail_json, &value.code),
+        | "resource_limit"
+        | "security_authentication_failed"
+        | "security_permission_denied"
+        | "security_policy_conflict"
+        | "security_policy_stale" => decode_domain_error_detail(&value.detail_json, &value.code),
         "stale_route" => Ok(DomainError::StaleRoute),
         "unsupported_operation" => Ok(DomainError::UnsupportedOperation {
             operation: "remote operation".to_owned(),
@@ -1472,12 +1476,12 @@ pub fn mutation_request_id_to_wire(value: &MutationRequestId) -> v1::MutationReq
 }
 
 fn validate_uri(kind: &str, value: &str) -> Result<(), DomainError> {
-    if !value.starts_with("http://")
+    if !(value.starts_with("http://") || value.starts_with("https://"))
         || tonic::transport::Endpoint::from_shared(value.to_owned()).is_err()
     {
         return Err(DomainError::InvalidName {
             kind: kind.to_owned(),
-            reason: "expected a valid http:// URI".to_owned(),
+            reason: "expected a valid http:// or https:// URI".to_owned(),
         });
     }
     Ok(())

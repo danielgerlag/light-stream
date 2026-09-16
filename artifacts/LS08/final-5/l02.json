@@ -1,0 +1,121 @@
+{
+  "bootstrap": {
+    "cluster": {
+      "cluster": "e71f2179-3cb5-c6c0-ea5f-716fbf8fa223",
+      "control_group": 1,
+      "data_group": 2,
+      "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485",
+      "stream_name": "bootstrap"
+    },
+    "command": "cluster-bootstrap",
+    "endpoint": "http://127.0.0.1:54617",
+    "ok": true
+  },
+  "credentials_required": false,
+  "health": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "diagnostics",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bookmarks",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "retention",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "protected-replay",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "consumer-checkpoints",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "security",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "http://127.0.0.1:54617",
+    "health": {
+      "bootstrapped": false,
+      "cluster_id": null,
+      "peer_address": "http://127.0.0.1:54618",
+      "public_address": "http://127.0.0.1:54617",
+      "status": {
+        "ready": true,
+        "revision": "07ed07c509c1b21f3803e3946b715350ce678bc73c85981907621031e1561feb",
+        "security_mode": "local-insecure"
+      }
+    },
+    "ok": true
+  },
+  "publish": {
+    "command": "publish",
+    "endpoint": "http://127.0.0.1:54617",
+    "ok": true,
+    "receipt": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 0,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "ls08-local",
+        "sequence": 1,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    }
+  },
+  "verdict": "PASS"
+}

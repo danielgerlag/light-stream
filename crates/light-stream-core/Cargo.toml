@@ -7,6 +7,8 @@ publish.workspace = true
 [dependencies]
 http.workspace = true
 serde.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 

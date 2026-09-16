@@ -60,6 +60,10 @@
     "batching-client-checkpoints": {
       "command": "python3 scripts/verify.py --phase LS07 --profile local --security local-insecure --artifacts artifacts/LS07/final-4",
       "evidence": ["l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "ls07/client-workflows.json", "ls07/checkpoint-failover.json", "result.json", "cleanup.json"]
+    },
+    "secured-runtime": {
+      "command": "python3 scripts/verify.py --phase LS08 --profile local --security all --artifacts artifacts/LS08/skill-security",
+      "evidence": ["l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "ls08/security-journey.json", "ls08/security-migration.json", "ls08/secured-performance.json", "result.json", "cleanup.json"]
     }
   }
 }

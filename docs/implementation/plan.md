@@ -442,42 +442,42 @@ Do not manufacture browser screenshots for a service with no browser UI.
 
 **Files.**
 
-- [ ] Edit server transport/security modules, centralized authorization policy, credential configuration, client/CLI credential handling, and security fixtures.
+- [x] Edit server transport/security modules, centralized authorization policy, credential configuration, client/CLI credential handling, and security fixtures.
 
 **Build.**
 
-- [ ] Implement `local-insecure` and `secured` profiles as specified in the security contract. Reject invalid secure configuration and unintended insecure remote exposure.
-- [ ] Add verified client TLS, high-entropy token authentication, stream-scoped permissions, and peer mutual TLS tied to cluster membership.
-- [ ] Bind producer sessions and receipts to principals. Cover every existing unary, streaming, peer, and administrative route.
-- [ ] Implement bounded revocation, credential rotation, secret redaction, and security events without adding a password system or identity-provider service.
+- [x] Implement `local-insecure` and `secured` profiles as specified in the security contract. Reject invalid secure configuration and unintended insecure remote exposure.
+- [x] Add verified client TLS, high-entropy token authentication, stream-scoped permissions, and peer mutual TLS tied to cluster membership.
+- [x] Bind producer sessions and receipts to principals. Cover every existing unary, streaming, peer, and administrative route.
+- [x] Implement bounded revocation, credential rotation, secret redaction, and security events without adding a password system or identity-provider service.
 
 **You see.**
 
-- [ ] The complete application workflow works in both selected modes; denied requests have no committed effects, and secure startup never falls back. Save `security-journey.json`.
+- [x] The complete application workflow works in both selected modes; denied requests have no committed effects, and secure startup never falls back. Save `security-journey.json`.
 
 **Verify, unit.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
-- [ ] Add mode parsing, policy coverage, identity binding, redaction, certificate, and revocation-bound tests. Run targeted server/client/CLI tests.
+- [x] Add mode parsing, policy coverage, identity binding, redaction, certificate, and revocation-bound tests. Run targeted server/client/CLI tests.
 
 **Verify, live.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked. Ten independent lanes at the PR head.
 
-- [ ] Lane 1. Regression lane against trunk. Preserve the approved local workflow and record secured mode absent on base. Save `l01.json`. Pass when head supports both without silent mode changes.
-- [ ] Lane 2. Run E22 on loopback. Save `l02.json`. Pass when no-credential work succeeds and the mode is explicit.
-- [ ] Lane 3. Attempt unintended insecure remote binding. Save `l03.json`. Pass when startup refuses it before serving traffic.
-- [ ] Lane 4. Run E23 with valid client and peer identities. Save `l04.json`. Pass when secured publication, replay, and failover preserve the ledger.
-- [ ] Lane 5. Use missing or invalid client credentials. Save `l05.json`. Pass when access is denied and state is unchanged.
-- [ ] Lane 6. Use a valid principal against unauthorized streams and receipts. Save `l06.json`. Pass when every route enforces its scope.
-- [ ] Lane 7. Present invalid server or peer certificates. Save `l07.json`. Pass when trust, hostname, cluster, and membership checks reject them without fallback.
-- [ ] Lane 8. Rotate and revoke credentials during traffic. Save `l08.json`. Pass when E24 honors the declared overlap and revocation bound.
-- [ ] Lane 9. Stop authorization refresh and restart secured nodes. Save `l09.json`. Pass when expired policy or missing trust material fails closed.
-- [ ] Lane 10. Search captured artifacts for synthetic secret canaries. Save `l10.json`. Pass when logs, manifests, command capture, and snapshots contain no secret material.
+- [x] Lane 1. Regression lane against trunk. Preserve the approved local workflow and record secured mode absent on base. Save `l01.json`. Pass when head supports both without silent mode changes.
+- [x] Lane 2. Run E22 on loopback. Save `l02.json`. Pass when no-credential work succeeds and the mode is explicit.
+- [x] Lane 3. Attempt unintended insecure remote binding. Save `l03.json`. Pass when startup refuses it before serving traffic.
+- [x] Lane 4. Run E23 with valid client and peer identities. Save `l04.json`. Pass when secured publication, replay, and failover preserve the ledger.
+- [x] Lane 5. Use missing or invalid client credentials. Save `l05.json`. Pass when access is denied and state is unchanged.
+- [x] Lane 6. Use a valid principal against unauthorized streams and receipts. Save `l06.json`. Pass when every route enforces its scope.
+- [x] Lane 7. Present invalid server or peer certificates. Save `l07.json`. Pass when trust, hostname, cluster, and membership checks reject them without fallback.
+- [x] Lane 8. Rotate and revoke credentials during traffic. Save `l08.json`. Pass when E24 honors the declared overlap and revocation bound.
+- [x] Lane 9. Stop authorization refresh and restart secured nodes. Save `l09.json`. Pass when expired policy or missing trust material fails closed.
+- [x] Lane 10. Search captured artifacts for synthetic secret canaries. Save `l10.json`. Pass when logs, manifests, command capture, and snapshots contain no secret material.
 
 **Verify, perf.** Tests alone are not sufficient verification. A PR is verified only when its unit, live, and perf boxes are all checked.
 
 - [ ] Metric. Compare insecure-local traffic on both revisions and measure secured steady-state latency, connection setup, CPU, and memory separately.
-- [ ] Probe. Interleave same-mode controls. Run TLS/auth workloads with pinned certificate, token, connection-reuse, and authorization settings.
-- [ ] Baseline. Record the insecure base first; label secured behavior absent rather than claiming a security speedup.
-- [ ] Rule. Apply B4 to equivalent local traffic and B1 to secured low-load operations. Require the declared revocation bound and zero authorization bypasses.
+- [x] Probe. Interleave same-mode controls. Run TLS and authorization workloads with pinned certificate, token, and connection-reuse settings.
+- [x] Baseline. Record the insecure base first; label secured behavior absent rather than claiming a security speedup.
+- [x] Rule. Apply B4 to equivalent local traffic and B1 to secured low-load operations. Require the declared revocation bound and zero authorization bypasses.
 
 **Review gate.** The operator reviews security defaults and exposure before merge.
 

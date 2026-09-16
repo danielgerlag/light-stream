@@ -516,6 +516,36 @@ message CompareAndSetCheckpointResponse {
   }
 }
 
+message GetSecurityPolicyRequest {
+  string cluster_id = 1;
+}
+
+message ApplySecurityMutationRequest {
+  string cluster_id = 1;
+  string mutation_json = 2;
+}
+
+message ActivateSecuredTransportRequest {
+  string cluster_id = 1;
+  MutationRequestId request_id = 2;
+  uint64 expected_topology_revision = 3;
+  repeated NodeDescriptor nodes = 4;
+  string policy_json = 5;
+}
+
+message SecurityPolicySummary {
+  string cluster_id = 1;
+  uint64 policy_revision = 2;
+  uint64 revocation_revision = 3;
+}
+
+message SecurityPolicyResponse {
+  oneof result {
+    SecurityPolicySummary policy = 1;
+    ErrorResult error = 2;
+  }
+}
+
 message DiagnosticsRequest {}
 
 message SnapshotGroupRequest {
@@ -691,6 +721,9 @@ service LightStream {
   rpc FetchProtected(FetchProtectedRequest) returns (FetchResponse);
   rpc GetCheckpoint(GetCheckpointRequest) returns (GetCheckpointResponse);
   rpc CompareAndSetCheckpoint(CompareAndSetCheckpointRequest) returns (CompareAndSetCheckpointResponse);
+  rpc GetSecurityPolicy(GetSecurityPolicyRequest) returns (SecurityPolicyResponse);
+  rpc ApplySecurityMutation(ApplySecurityMutationRequest) returns (SecurityPolicyResponse);
+  rpc ActivateSecuredTransport(ActivateSecuredTransportRequest) returns (SecurityPolicyResponse);
   rpc Diagnostics(DiagnosticsRequest) returns (DiagnosticsResponse);
   rpc SnapshotGroup(SnapshotGroupRequest) returns (SnapshotGroupResponse);
   rpc ReplaceVoter(ReplaceVoterRequest) returns (AdministrationResponse);

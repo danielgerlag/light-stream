@@ -12,15 +12,19 @@ name = "light-streamd"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 clap.workspace = true
 crc32fast.workspace = true
 fs2.workspace = true
 futures-util.workspace = true
+http.workspace = true
 light-stream-core = { path = "../light-stream-core" }
 light-stream-proto = { path = "../light-stream-proto" }
 light-stream-storage = { path = "../light-stream-storage" }
+libc = "0.2"
 openraft.workspace = true
 prost.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -30,6 +34,8 @@ tokio-stream.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 uuid.workspace = true
+x509-parser.workspace = true
+zeroize.workspace = true
 
 [build-dependencies]
 prost-build = "0.14"

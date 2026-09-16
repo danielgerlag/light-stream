@@ -1,0 +1,16 @@
+{
+  "insecure_fallback": false,
+  "missing_trust_startup_exit": 1,
+  "stale_policy": {
+    "command": "request",
+    "error": {
+      "code": "security_policy_stale",
+      "detail": {
+        "code": "security_policy_stale"
+      },
+      "message": "the local security policy is too stale to authorize work"
+    },
+    "ok": false
+  },
+  "verdict": "PASS"
+}

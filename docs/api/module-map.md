@@ -98,7 +98,7 @@ Creating an LS01 Raft node would make the Openraft dependency more visible, but 
 ## Open questions and risks
 
 - The exact Openraft version is a prerelease. An upgrade requires a storage and network adapter review.
-- LS08 must replace the local security adapter without changing core commands or public result types.
+- Secured mode now depends on rustls and a replicated policy. An upgrade must preserve manifest, policy, and peer-certificate compatibility.
 - The build revision is a source fingerprint when the verifier builds the binaries. Manual builds report `UNVERSIONED`.
 
 ## LS02b implementation

@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use light_stream_core::{
     BootstrapSpec, ClusterId, ClusterTopology, DEFAULT_MAX_DATA_GROUPS,
     DEFAULT_MAX_PARTITIONS_PER_STREAM, DEFAULT_MAX_STREAMS, DomainError, GroupId, MAX_DATA_GROUPS,
-    MIN_DATA_GROUPS, NodeDescriptor, NodeId,
+    MIN_DATA_GROUPS, NodeDescriptor, NodeId, PolicyRevision,
 };
 use serde::{Deserialize, Serialize};
 use tonic::transport::Endpoint;
@@ -14,7 +14,19 @@ use light_stream_storage::{
 };
 
 pub const LEGACY_NODE_MANIFEST_VERSION: u32 = 3;
-pub const NODE_MANIFEST_VERSION: u32 = 4;
+pub const PREVIOUS_NODE_MANIFEST_VERSION: u32 = 4;
+pub const NODE_MANIFEST_VERSION: u32 = 5;
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum DurableSecurityProfile {
+    #[default]
+    LocalInsecure,
+    Secured {
+        bootstrap_policy_digest: [u8; 32],
+        minimum_policy_revision: PolicyRevision,
+    },
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GroupPoolConfig {
@@ -200,6 +212,8 @@ pub struct NodeManifestV2 {
     pub formation: FormationSpec,
     pub topology: ClusterTopology,
     pub state: PersistedNodeState,
+    #[serde(default)]
+    pub security: DurableSecurityProfile,
 }
 
 impl NodeManifestV2 {
@@ -208,19 +222,34 @@ impl NodeManifestV2 {
         formation: FormationSpec,
         state: PersistedNodeState,
     ) -> Result<Self, DomainError> {
+        Self::new_with_security(
+            local_node_id,
+            formation,
+            state,
+            DurableSecurityProfile::LocalInsecure,
+        )
+    }
+
+    pub fn new_with_security(
+        local_node_id: NodeId,
+        formation: FormationSpec,
+        state: PersistedNodeState,
+        security: DurableSecurityProfile,
+    ) -> Result<Self, DomainError> {
         let topology = ClusterTopology::try_new(
             1,
             formation.members.clone(),
             formation.members.iter().map(|member| member.node_id()),
         )?;
-        Self::with_topology(local_node_id, formation, topology, state)
+        Self::with_topology_and_security(local_node_id, formation, topology, state, security)
     }
 
-    pub fn with_topology(
+    pub fn with_topology_and_security(
         local_node_id: NodeId,
         formation: FormationSpec,
         topology: ClusterTopology,
         state: PersistedNodeState,
+        security: DurableSecurityProfile,
     ) -> Result<Self, DomainError> {
         let manifest = Self {
             format_version: NODE_MANIFEST_VERSION,
@@ -228,6 +257,7 @@ impl NodeManifestV2 {
             formation,
             topology,
             state,
+            security,
         };
         let configured =
             manifest
@@ -281,6 +311,18 @@ impl NodeManifestV2 {
         for node in self.topology.authorized_nodes().values() {
             validate_uri("public URI", node.public_uri())?;
             validate_uri("peer URI", node.peer_uri())?;
+            let expected_scheme = match &self.security {
+                DurableSecurityProfile::LocalInsecure => "http://",
+                DurableSecurityProfile::Secured { .. } => "https://",
+            };
+            if !node.public_uri().starts_with(expected_scheme)
+                || !node.peer_uri().starts_with(expected_scheme)
+            {
+                return Err(DomainError::IdentityMismatch {
+                    reason: "durable topology endpoint scheme conflicts with security profile"
+                        .to_owned(),
+                });
+            }
             if node.public_uri() == node.peer_uri() {
                 return Err(DomainError::InvalidName {
                     kind: "node descriptor".to_owned(),
@@ -364,10 +406,10 @@ impl NodeManifestV1 {
 }
 
 fn validate_uri(kind: &str, value: &str) -> Result<(), DomainError> {
-    if !value.starts_with("http://") {
+    if !(value.starts_with("http://") || value.starts_with("https://")) {
         return Err(DomainError::InvalidName {
             kind: kind.to_owned(),
-            reason: "local-insecure endpoints must use http://".to_owned(),
+            reason: "endpoint must use http:// or https://".to_owned(),
         });
     }
     Endpoint::from_shared(value.to_owned()).map_err(|error| DomainError::InvalidName {

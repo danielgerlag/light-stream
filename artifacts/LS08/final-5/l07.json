@@ -1,0 +1,13 @@
+{
+  "inbound_rogue_peer_status": "UNAUTHENTICATED",
+  "plaintext_fallback": false,
+  "rogue_peer_exit": 1,
+  "verdict": "PASS",
+  "wrong_ca": {
+    "error": {
+      "code": "client_error",
+      "message": "request failed: health deadline expired"
+    },
+    "ok": false
+  }
+}

@@ -1,0 +1,219 @@
+{
+  "health": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "diagnostics",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bookmarks",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "retention",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "protected-replay",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "consumer-checkpoints",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "security",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "https://127.0.0.1:54627",
+    "health": {
+      "bootstrapped": true,
+      "cluster_id": "831af6a2-243c-f61a-40b4-0462617739a8",
+      "peer_address": "https://127.0.0.1:54628",
+      "public_address": "https://127.0.0.1:54627",
+      "status": {
+        "ready": true,
+        "revision": "07ed07c509c1b21f3803e3946b715350ce678bc73c85981907621031e1561feb",
+        "security_mode": "secured"
+      }
+    },
+    "ok": true
+  },
+  "memberships": [
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 1
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 2
+    },
+    {
+      "groups": {
+        "control": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 1
+        },
+        "data-2": {
+          "committed_learners": [],
+          "committed_uniform": true,
+          "committed_voters": [
+            1,
+            2,
+            3
+          ],
+          "effective_learners": [],
+          "effective_uniform": true,
+          "effective_voters": [
+            1,
+            2,
+            3
+          ],
+          "group_id": 2
+        }
+      },
+      "lifecycle": "active",
+      "node_id": 3
+    }
+  ],
+  "transition": {
+    "command": "security-activate-transport",
+    "endpoint": "http://127.0.0.1:54627",
+    "ok": true,
+    "policy": {
+      "cluster_id": "831af6a2-243c-f61a-40b4-0462617739a8",
+      "policy_revision": 1,
+      "revocation_revision": 0
+    }
+  },
+  "verdict": "PASS"
+}

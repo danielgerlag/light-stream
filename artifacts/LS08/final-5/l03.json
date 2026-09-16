@@ -1,0 +1,5 @@
+{
+  "error": "invalid configuration: local-insecure listeners must bind loopback unless --allow-insecure-non-loopback is set",
+  "listener_started": false,
+  "verdict": "PASS"
+}

@@ -1,5 +1,9 @@
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, fs::OpenOptions, io::Write, path::PathBuf, time::Duration};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use light_stream_client::{
     Cancellation, Client, ClientError, Interruption, PublishOptions, default_probe,
@@ -7,12 +11,13 @@ use light_stream_client::{
 use light_stream_core::{
     BookmarkId, BookmarkName, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapSpec,
     ByteLimit, CatalogRequestId, CheckpointExpectation, CheckpointKey, CheckpointMutation,
-    CheckpointRevision, ClusterId, CommittedCursor, ConsumerId, CreateStreamSpec, DomainError,
-    GroupId, LeaseDuration, LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId,
-    NodeDescriptor, NodeId, PartitionId, PartitionKey, PrincipalId, ProducerRequestId,
-    ProducerSessionId, PublishBatch, RecordOffset, ReplayLeaseId, ReplayLeaseRequest, ReplayRange,
-    RequestSequence, RetentionRequest, StreamBookmarkPageRequest, StreamCursorVector, StreamId,
-    StreamName,
+    CheckpointRevision, ClusterId, CommittedCursor, ConsumerId, CreateStreamSpec,
+    CredentialGeneration, CredentialId, CredentialRef, DomainError, GroupId, LeaseDuration,
+    LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId, NodeDescriptor, NodeId,
+    PartitionId, PartitionKey, PrincipalId, ProducerRequestId, ProducerSessionId, PublishBatch,
+    RecordOffset, ReplayLeaseId, ReplayLeaseRequest, ReplayRange, RequestSequence,
+    RetentionRequest, StreamBookmarkPageRequest, StreamCursorVector, StreamId, StreamName,
+    TokenVerifier, TokenVerifierDigest,
 };
 use serde_json::json;
 
@@ -31,6 +36,8 @@ struct Args {
     deadline_ms: u64,
     #[arg(long)]
     no_retry: bool,
+    #[arg(long)]
+    security_config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -67,6 +74,10 @@ enum Command {
     Checkpoint {
         #[command(subcommand)]
         command: CheckpointCommand,
+    },
+    Security {
+        #[command(subcommand)]
+        command: SecurityCommand,
     },
     Publish(PublishArgs),
     Fetch(FetchArgs),
@@ -373,6 +384,44 @@ enum CheckpointCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum SecurityCommand {
+    GenerateToken {
+        #[arg(long)]
+        principal: String,
+        #[arg(long)]
+        credential_id: String,
+        #[arg(long, default_value_t = 1)]
+        generation: u64,
+        #[arg(long)]
+        credential_file: PathBuf,
+        #[arg(long)]
+        verifier_file: PathBuf,
+    },
+    Status {
+        #[arg(long)]
+        cluster_id: String,
+    },
+    Apply {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long)]
+        mutation_file: PathBuf,
+    },
+    ActivateTransport {
+        #[arg(long)]
+        cluster_id: String,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        expected_topology_revision: u64,
+        #[arg(long = "node")]
+        nodes: Vec<String>,
+        #[arg(long)]
+        policy_file: PathBuf,
+    },
+}
+
 #[derive(Debug, ClapArgs)]
 struct TargetArgs {
     #[arg(long)]
@@ -495,10 +544,17 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
     let seeds = args.seeds.clone();
     let deadline = Duration::from_millis(args.deadline_ms);
     let retry = !args.no_retry;
+    let security_config = args.security_config;
     match args.command {
         Command::Health => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let health = client.health().await?;
             let capabilities = client.capabilities().await?;
             Ok(json!({
@@ -510,8 +566,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }))
         }
         Command::Capabilities => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let capabilities = client.capabilities().await?;
             Ok(json!({
                 "command": "capabilities",
@@ -521,8 +583,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }))
         }
         Command::Diagnostics => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let diagnostics = client.diagnostics().await?;
             Ok(json!({
                 "command": "diagnostics",
@@ -539,8 +607,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
                     purge,
                 },
         } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let snapshot = client
                 .snapshot_group(cluster_id.parse::<ClusterId>()?, group_id, purge)
                 .await?;
@@ -552,8 +626,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }))
         }
         Command::Cluster { command } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             match command {
                 ClusterCommand::Bootstrap {
                     cluster_id,
@@ -671,8 +751,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }
         }
         Command::Stream { command } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             match command {
                 StreamCommand::Create {
                     cluster_id,
@@ -750,8 +836,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }
         }
         Command::Bookmark { command } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             match command {
                 BookmarkCommand::Create {
                     target,
@@ -911,8 +1003,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }
         }
         Command::Retention { command } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             match command {
                 RetentionCommand::Advance {
                     target,
@@ -946,8 +1044,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }
         }
         Command::Replay { command } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             match command {
                 ReplayCommand::Admit {
                     target,
@@ -1075,8 +1179,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             }
         }
         Command::Checkpoint { command } => {
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             match command {
                 CheckpointCommand::Get { target, consumer } => {
                     let key = CheckpointKey::new(
@@ -1150,6 +1260,162 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
                 }
             }
         }
+        Command::Security { command } => match command {
+            SecurityCommand::GenerateToken {
+                principal,
+                credential_id,
+                generation,
+                credential_file,
+                verifier_file,
+            } => {
+                let principal = PrincipalId::parse(principal)?;
+                let credential = CredentialRef::new(
+                    CredentialId::parse(credential_id)?,
+                    CredentialGeneration::new(generation)?,
+                );
+                let mut secret = [0_u8; 32];
+                getrandom::fill(&mut secret).map_err(|error| {
+                    ClientError::Domain(DomainError::Storage {
+                        reason: format!("secure token generation failed: {error}"),
+                    })
+                })?;
+                let token = format!(
+                    "ls1.{}.{}.{}",
+                    credential.id(),
+                    credential.generation().get(),
+                    URL_SAFE_NO_PAD.encode(secret)
+                );
+                let verifier = TokenVerifier::new(
+                    credential.clone(),
+                    principal.clone(),
+                    TokenVerifierDigest::from_token_bytes(token.as_bytes()),
+                );
+                write_secret_json(
+                    &credential_file,
+                    &json!({
+                        "version": 1,
+                        "credential_id": credential.id(),
+                        "generation": credential.generation().get(),
+                        "token": token,
+                    }),
+                )?;
+                write_new_json(&verifier_file, &verifier)?;
+                Ok(json!({
+                    "command": "security-generate-token",
+                    "ok": true,
+                    "principal": principal,
+                    "credential": credential,
+                    "credential_file": credential_file,
+                    "verifier_file": verifier_file,
+                }))
+            }
+            SecurityCommand::Status { cluster_id } => {
+                let client = connect_client(
+                    endpoint.clone(),
+                    seeds,
+                    deadline,
+                    retry,
+                    security_config.as_deref(),
+                )
+                .await?;
+                let policy = client.security_policy(cluster_id.parse()?).await?;
+                Ok(json!({
+                    "command": "security-status",
+                    "ok": true,
+                    "endpoint": endpoint,
+                    "policy": policy,
+                }))
+            }
+            SecurityCommand::Apply {
+                cluster_id,
+                mutation_file,
+            } => {
+                let client = connect_client(
+                    endpoint.clone(),
+                    seeds,
+                    deadline,
+                    retry,
+                    security_config.as_deref(),
+                )
+                .await?;
+                let bytes = fs::read(&mutation_file).map_err(|error| {
+                    ClientError::Domain(DomainError::InvalidPayload {
+                        reason: format!(
+                            "security mutation file {} could not be read: {error}",
+                            mutation_file.display()
+                        ),
+                    })
+                })?;
+                let mutation = serde_json::from_slice(&bytes).map_err(|error| {
+                    ClientError::Domain(DomainError::InvalidPayload {
+                        reason: format!(
+                            "security mutation file {} is invalid: {error}",
+                            mutation_file.display()
+                        ),
+                    })
+                })?;
+                let policy = client
+                    .apply_security_mutation(cluster_id.parse()?, mutation)
+                    .await?;
+                Ok(json!({
+                    "command": "security-apply",
+                    "ok": true,
+                    "endpoint": endpoint,
+                    "policy": policy,
+                }))
+            }
+            SecurityCommand::ActivateTransport {
+                cluster_id,
+                mutation,
+                expected_topology_revision,
+                nodes,
+                policy_file,
+            } => {
+                let client = connect_client(
+                    endpoint.clone(),
+                    seeds,
+                    deadline,
+                    retry,
+                    security_config.as_deref(),
+                )
+                .await?;
+                let policy = serde_json::from_slice(&fs::read(&policy_file).map_err(|error| {
+                    ClientError::Domain(DomainError::InvalidPayload {
+                        reason: format!(
+                            "security policy file {} could not be read: {error}",
+                            policy_file.display()
+                        ),
+                    })
+                })?)
+                .map_err(|error| {
+                    ClientError::Domain(DomainError::InvalidPayload {
+                        reason: format!(
+                            "security policy file {} is invalid: {error}",
+                            policy_file.display()
+                        ),
+                    })
+                })?;
+                let nodes = nodes
+                    .into_iter()
+                    .map(|node| parse_member(&node))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let policy = client
+                    .activate_secured_transport(
+                        cluster_id.parse()?,
+                        parse_mutation(&mutation)?,
+                        expected_topology_revision,
+                        nodes,
+                        policy,
+                    )
+                    .await?;
+                Ok(json!({
+                    "command": "security-activate-transport",
+                    "ok": true,
+                    "endpoint": endpoint,
+                    "policy": policy,
+                }))
+            }
+        },
         Command::Publish(value) => {
             let partition = parse_target(&value.target)?;
             let request = parse_producer(&value.producer)?;
@@ -1182,8 +1448,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             if let Some(bookmark) = value.bookmark {
                 batch = batch.with_bookmark(BookmarkName::parse(bookmark)?);
             }
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let receipt = match (value.route_group_id, value.route_revision) {
                 (Some(group), Some(revision)) => {
                     client
@@ -1219,8 +1491,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
         Command::Fetch(value) => {
             let cluster = value.target.cluster_id.parse::<ClusterId>()?;
             let partition = parse_target(&value.target)?;
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let page = match (value.route_group_id, value.route_revision) {
                 (Some(group), Some(revision)) => {
                     client
@@ -1257,8 +1535,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
             let cluster = value.target.cluster_id.parse::<ClusterId>()?;
             let partition = parse_target(&value.target)?;
             let request = parse_producer(&value.producer)?;
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let receipt = match (value.route_group_id, value.route_revision) {
                 (Some(group), Some(revision)) => {
                     client
@@ -1283,8 +1567,14 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
         }
         Command::PublishProbe { payload } => {
             let probe = default_probe(payload.into_bytes())?;
-            let client =
-                Client::connect_with_options(endpoint.clone(), seeds, deadline, retry).await?;
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
             let receipt = client.publish_probe(probe).await?;
             Ok(json!({
                 "command": "publish-probe",
@@ -1293,6 +1583,113 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
                 "receipt": receipt,
             }))
         }
+    }
+}
+
+fn write_secret_json(
+    path: &std::path::Path,
+    value: &impl serde::Serialize,
+) -> Result<(), ClientError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "credential file {} could not be created: {error}",
+                path.display()
+            ),
+        })
+    })?;
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        ClientError::Domain(DomainError::InvalidPayload {
+            reason: error.to_string(),
+        })
+    })?;
+    file.write_all(&bytes).map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "credential file {} could not be written: {error}",
+                path.display()
+            ),
+        })
+    })?;
+    file.write_all(b"\n").map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "credential file {} could not be written: {error}",
+                path.display()
+            ),
+        })
+    })?;
+    file.sync_all().map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "credential file {} could not be synced: {error}",
+                path.display()
+            ),
+        })
+    })
+}
+
+fn write_new_json(
+    path: &std::path::Path,
+    value: &impl serde::Serialize,
+) -> Result<(), ClientError> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            ClientError::Domain(DomainError::Storage {
+                reason: format!(
+                    "output file {} could not be created: {error}",
+                    path.display()
+                ),
+            })
+        })?;
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        ClientError::Domain(DomainError::InvalidPayload {
+            reason: error.to_string(),
+        })
+    })?;
+    file.write_all(&bytes).map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "output file {} could not be written: {error}",
+                path.display()
+            ),
+        })
+    })?;
+    file.write_all(b"\n").map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "output file {} could not be written: {error}",
+                path.display()
+            ),
+        })
+    })?;
+    file.sync_all().map_err(|error| {
+        ClientError::Domain(DomainError::Storage {
+            reason: format!(
+                "output file {} could not be synced: {error}",
+                path.display()
+            ),
+        })
+    })
+}
+
+async fn connect_client(
+    endpoint: String,
+    seeds: Vec<String>,
+    deadline: Duration,
+    retry: bool,
+    security_config: Option<&std::path::Path>,
+) -> Result<Client, ClientError> {
+    match security_config {
+        Some(path) => Client::connect_secured(endpoint, seeds, deadline, retry, path).await,
+        None => Client::connect_with_options(endpoint, seeds, deadline, retry).await,
     }
 }
 
@@ -1412,6 +1809,13 @@ fn error_json(error: &ClientError) -> serde_json::Value {
             "ok": false,
             "error": {
                 "code": "invalid_endpoint",
+                "message": error.to_string(),
+            }
+        }),
+        ClientError::SecurityConfiguration(_) => json!({
+            "ok": false,
+            "error": {
+                "code": "security_configuration",
                 "message": error.to_string(),
             }
         }),

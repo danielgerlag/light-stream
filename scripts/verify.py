@@ -8,9 +8,11 @@ import json
 import os
 import platform
 import random
+import secrets
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -331,6 +333,8 @@ class OwnedServer:
         node_id=1,
         public_address="127.0.0.1:0",
         peer_address="127.0.0.1:0",
+        security_mode="local-insecure",
+        security_config=None,
         advertise_public_uri=None,
         advertise_peer_uri=None,
         peer_routes=None,
@@ -368,10 +372,12 @@ class OwnedServer:
             "--peer-listen",
             peer_address,
             "--security-mode",
-            "local-insecure",
+            security_mode,
             "--node-id",
             str(node_id),
         ]
+        if security_config is not None:
+            self.command.extend(["--security-config", str(security_config)])
         if advertise_public_uri is not None:
             self.command.extend(["--advertise-public-uri", advertise_public_uri])
         if advertise_peer_uri is not None:
@@ -1047,6 +1053,43 @@ def write_json_line(path, value):
     path.write_text(json.dumps(value, sort_keys=True) + "\n")
 
 
+def protobuf_varint(value):
+    encoded = bytearray()
+    while value >= 0x80:
+        encoded.append((value & 0x7F) | 0x80)
+        value >>= 7
+    encoded.append(value)
+    return bytes(encoded)
+
+
+def protobuf_varint_field(number, value):
+    return protobuf_varint(number << 3) + protobuf_varint(value)
+
+
+def protobuf_bytes_field(number, value):
+    return (
+        protobuf_varint((number << 3) | 2)
+        + protobuf_varint(len(value))
+        + value
+    )
+
+
+def peer_request_frame(cluster, group, sender, target, payload):
+    envelope = b"".join(
+        [
+            protobuf_varint_field(1, 1),
+            protobuf_varint_field(2, 1),
+            protobuf_bytes_field(3, cluster.encode()),
+            protobuf_varint_field(4, group),
+            protobuf_varint_field(5, sender),
+            protobuf_varint_field(6, target),
+            protobuf_bytes_field(7, payload),
+        ]
+    )
+    request = protobuf_bytes_field(1, envelope)
+    return b"\x00" + len(request).to_bytes(4, "big") + request
+
+
 def run_publish_scenario(artifacts, runner, binaries):
     server = OwnedServer(
         binaries["light-streamd"],
@@ -1357,6 +1400,297 @@ def deterministic_uuid(rng):
     return str(uuid.UUID(int=rng.getrandbits(128)))
 
 
+def generate_security_fixture(
+    artifacts, runner, cluster, node_configs, label="ls08-security"
+):
+    root = artifacts / "scratch" / "success" / label
+    root.mkdir(parents=True, exist_ok=True)
+    ca_key = root / "ca-key.pem"
+    ca_cert = root / "ca-cert.pem"
+    runner.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            ca_key,
+            "-out",
+            ca_cert,
+            "-days",
+            "2",
+            "-subj",
+            "/CN=Light Stream LS08 Test CA",
+        ],
+        "ls08-generate-ca",
+        timeout=30,
+    )
+    os.chmod(ca_key, 0o600)
+    private_key_canary = next(
+        line
+        for line in ca_key.read_text().splitlines()
+        if line and not line.startswith("-----")
+    )
+
+    certificate_fingerprints = {}
+    node_material = {}
+    for node_id, config in sorted(node_configs.items()):
+        node_root = root / f"node-{node_id}"
+        node_root.mkdir()
+        key = node_root / "node-key.pem"
+        csr = node_root / "node.csr"
+        certificate = node_root / "node-cert.pem"
+        extensions = node_root / "node.ext"
+        extensions.write_text(
+            "\n".join(
+                [
+                    (
+                        "subjectAltName=IP:127.0.0.1,"
+                        f"URI:spiffe://light-stream/cluster/{cluster}/node/{node_id}"
+                    ),
+                    "extendedKeyUsage=serverAuth,clientAuth",
+                    "keyUsage=digitalSignature,keyEncipherment",
+                ]
+            )
+            + "\n"
+        )
+        runner.run(
+            [
+                "openssl",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                key,
+                "-out",
+                csr,
+                "-subj",
+                f"/CN=light-stream-node-{node_id}",
+            ],
+            f"ls08-generate-node-{node_id}-request",
+            timeout=30,
+        )
+        runner.run(
+            [
+                "openssl",
+                "x509",
+                "-req",
+                "-in",
+                csr,
+                "-CA",
+                ca_cert,
+                "-CAkey",
+                ca_key,
+                "-set_serial",
+                str(node_id),
+                "-out",
+                certificate,
+                "-days",
+                "2",
+                "-extfile",
+                extensions,
+            ],
+            f"ls08-sign-node-{node_id}",
+            timeout=30,
+        )
+        os.chmod(key, 0o600)
+        der = ssl.PEM_cert_to_DER_cert(certificate.read_text())
+        certificate_fingerprints[str(node_id)] = list(
+            hashlib.sha256(der).digest()
+        )
+        node_material[node_id] = {
+            "certificate": certificate,
+            "key": key,
+        }
+
+    token = f"ls1.admin.1.{secrets.token_urlsafe(32)}"
+    denied_token = f"ls1.reader.1.{secrets.token_urlsafe(32)}"
+    token_digest = list(hashlib.sha256(token.encode()).digest())
+    denied_token_digest = list(hashlib.sha256(denied_token.encode()).digest())
+    cluster_permissions = [
+        "cluster_observe",
+        "cluster_bootstrap",
+        "snapshot_manage",
+        "cluster_admin",
+        "security_observe",
+        "security_admin",
+    ]
+    stream_permissions = [
+        "stream_discover",
+        "stream_create",
+        "stream_describe",
+        "stream_delete",
+        "route_resolve",
+        "publish",
+        "fetch",
+        "receipt_read",
+        "bookmark_read",
+        "bookmark_manage",
+        "retention_read",
+        "retention_manage",
+        "replay_read",
+        "replay_manage",
+        "checkpoint_read",
+        "checkpoint_manage",
+    ]
+    grants = [
+        {
+            "permission": permission,
+            "scope": {"kind": "cluster", "cluster": cluster},
+        }
+        for permission in cluster_permissions
+    ] + [
+        {
+            "permission": permission,
+            "scope": {"kind": "all_streams", "cluster": cluster},
+        }
+        for permission in stream_permissions
+    ]
+    policy = {
+        "cluster": cluster,
+        "revision": 1,
+        "revocation_revision": 0,
+        "grants": {
+            "ls08-admin": grants,
+            "ls08-reader": [],
+        },
+        "token_verifiers": [
+            {
+                "credential": {
+                    "id": "admin",
+                    "generation": 1,
+                },
+                "principal": "ls08-admin",
+                "digest": token_digest,
+                "status": "active",
+            },
+            {
+                "credential": {
+                    "id": "reader",
+                    "generation": 1,
+                },
+                "principal": "ls08-reader",
+                "digest": denied_token_digest,
+                "status": "active",
+            },
+        ],
+        "peer_certificates": {
+            str(node_id): [
+                {
+                    "cluster": cluster,
+                    "node": node_id,
+                    "generation": 1,
+                    "fingerprint": certificate_fingerprints[str(node_id)],
+                    "status": "active",
+                }
+            ]
+            for node_id in node_configs
+        },
+    }
+    policy_file = root / "bootstrap-policy.json"
+    policy_file.write_text(json.dumps(policy, indent=2) + "\n")
+    credential_file = root / "admin-credential.json"
+    credential_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "credential_id": "admin",
+                "generation": 1,
+                "token": token,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    os.chmod(credential_file, 0o600)
+    denied_credential_file = root / "reader-credential.json"
+    denied_credential_file.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "credential_id": "reader",
+                "generation": 1,
+                "token": denied_token,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    os.chmod(denied_credential_file, 0o600)
+    client_config = root / "client.json"
+    client_config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "ca_certificate_file": str(ca_cert.resolve()),
+                "credential_file": str(credential_file.resolve()),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    denied_client_config = root / "reader-client.json"
+    denied_client_config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "ca_certificate_file": str(ca_cert.resolve()),
+                "credential_file": str(denied_credential_file.resolve()),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    server_configs = {}
+    for node_id, material in node_material.items():
+        config_file = root / f"node-{node_id}-security.json"
+        config_file.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "cluster_id": cluster,
+                    "public_tls": {
+                        "certificate_chain_file": str(
+                            material["certificate"].resolve()
+                        ),
+                        "private_key_file": str(material["key"].resolve()),
+                    },
+                    "peer_tls": {
+                        "certificate_chain_file": str(
+                            material["certificate"].resolve()
+                        ),
+                        "private_key_file": str(material["key"].resolve()),
+                        "trust_roots_file": str(ca_cert.resolve()),
+                    },
+                    "bootstrap_policy_file": str(policy_file.resolve()),
+                    "maximum_policy_staleness_ms": 5000,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        server_configs[node_id] = config_file
+    return {
+        "root": root,
+        "server_configs": server_configs,
+        "client_config": client_config,
+        "credential_file": credential_file,
+        "token_canary": token,
+        "denied_client_config": denied_client_config,
+        "denied_token_canary": denied_token,
+        "private_key_canary": private_key_canary,
+        "ca_certificate": ca_cert,
+        "ca_key": ca_key,
+        "node_certificates": {
+            node_id: material["certificate"]
+            for node_id, material in node_material.items()
+        },
+    }
+
+
 def publish_command(
     binary,
     endpoint,
@@ -1369,6 +1703,7 @@ def publish_command(
     seeds=(),
     no_retry=False,
     deadline_ms=5000,
+    security_config=None,
     route_group_id=None,
     route_revision=None,
     partition=0,
@@ -1382,6 +1717,8 @@ def publish_command(
     ]
     for seed in seeds:
         command.extend(["--seed", seed])
+    if security_config is not None:
+        command.extend(["--security-config", str(security_config)])
     if no_retry:
         command.append("--no-retry")
     command.extend([
@@ -1898,7 +2235,14 @@ def run_ls02a_scenario(artifacts, runner, binaries, revision, seed):
     )
 
 
-def cli_endpoint_command(binary, endpoint, seeds=(), no_retry=False, deadline_ms=5000):
+def cli_endpoint_command(
+    binary,
+    endpoint,
+    seeds=(),
+    no_retry=False,
+    deadline_ms=5000,
+    security_config=None,
+):
     command = [
         binary,
         "--endpoint",
@@ -1908,6 +2252,8 @@ def cli_endpoint_command(binary, endpoint, seeds=(), no_retry=False, deadline_ms
     ]
     for seed in seeds:
         command.extend(["--seed", seed])
+    if security_config is not None:
+        command.extend(["--security-config", str(security_config)])
     if no_retry:
         command.append("--no-retry")
     return command
@@ -1921,6 +2267,7 @@ def read_node_diagnostics(artifacts, runner, binary, node, label):
                 node["endpoint"],
                 no_retry=True,
                 deadline_ms=1000,
+                security_config=node.get("client_security_config"),
             )
             + ["diagnostics"],
             label,
@@ -5975,34 +6322,20 @@ def run_ls05_scenario(artifacts, runner, binaries, revision, profile, seed):
                 node["server"].stop()
 
 
-def record_security(artifacts, runner, binaries, security):
+def record_security(artifacts, runner, binaries, security, phase):
     statuses = []
     if security in ("local-insecure", "all"):
         statuses.append({"mode": "local-insecure", "verdict": "PASS"})
     if security in ("secured", "all"):
-        result = runner.run(
-            [
-                binaries["light-streamd"],
-                "--data-dir",
-                artifacts / "diagnostics" / "secured-not-supported",
-                "--public-listen",
-                "127.0.0.1:0",
-                "--peer-listen",
-                "127.0.0.1:0",
-                "--security-mode",
-                "secured",
-            ],
-            "secured-mode-not-supported",
-            expected_codes=(1,),
-            timeout=10,
-        )
-        if "not implemented until LS08" not in result.stderr:
-            raise VerificationError("secured mode failed without the LS08 unsupported result")
+        if phase == "LS08":
+            statuses.append({"mode": "secured", "verdict": "PASS"})
+            write_json(artifacts / "security.json", {"modes": statuses})
+            return
         statuses.append(
             {
                 "mode": "secured",
-                "verdict": "UNSUPPORTED",
-                "available_phase": "LS08",
+                "verdict": "AVAILABLE_NOT_SELECTED",
+                "verified_by_phase": "LS08",
             }
         )
     write_json(artifacts / "security.json", {"modes": statuses})
@@ -7593,7 +7926,1567 @@ def run_ls07_scenario(artifacts, runner, binaries, revision, seed):
         server.stop()
 
 
+def run_ls08_migration_scenario(artifacts, runner, binaries, profile, rng):
+    cluster = deterministic_uuid(rng)
+    stream = deterministic_uuid(rng)
+    node_configs = {}
+    used_ports = set()
+    for node_id in (1, 2, 3):
+        public_port = free_port()
+        while public_port in used_ports:
+            public_port = free_port()
+        used_ports.add(public_port)
+        peer_port = free_port()
+        while peer_port in used_ports:
+            peer_port = free_port()
+        used_ports.add(peer_port)
+        node_configs[node_id] = {
+            "node_id": node_id,
+            "public_address": f"127.0.0.1:{public_port}",
+            "peer_address": f"127.0.0.1:{peer_port}",
+            "insecure_endpoint": f"http://127.0.0.1:{public_port}",
+            "insecure_peer_uri": f"http://127.0.0.1:{peer_port}",
+            "endpoint": f"https://127.0.0.1:{public_port}",
+            "peer_uri": f"https://127.0.0.1:{peer_port}",
+            "data_dir": artifacts
+            / "scratch"
+            / "success"
+            / f"ls08-migration-node-{node_id}",
+        }
+    fixture = generate_security_fixture(
+        artifacts, runner, cluster, node_configs, "ls08-migration-security"
+    )
+    nodes = {}
+    try:
+        for node_id, config in node_configs.items():
+            server = OwnedServer(
+                binaries["light-streamd"],
+                config["data_dir"],
+                artifacts / "node-logs",
+                f"ls08-migration-node-{node_id}-insecure",
+                node_id=node_id,
+                public_address=config["public_address"],
+                peer_address=config["peer_address"],
+                advertise_public_uri=config["insecure_endpoint"],
+                advertise_peer_uri=config["insecure_peer_uri"],
+                peer_routes={
+                    target: node_configs[target]["insecure_peer_uri"]
+                    for target in node_configs
+                    if target != node_id
+                },
+                max_data_groups=1,
+                max_streams=8,
+                max_partitions_per_stream=4,
+                ready_timeout_seconds=30,
+            )
+            nodes[node_id] = {
+                **config,
+                "endpoint": config["insecure_endpoint"],
+                "peer_uri": config["insecure_peer_uri"],
+                "server": server,
+            }
+        bootstrap_command = cli_endpoint_command(
+            binaries["light-streamctl"],
+            nodes[1]["endpoint"],
+            seeds=[nodes[2]["endpoint"], nodes[3]["endpoint"]],
+            deadline_ms=30000,
+        ) + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream,
+            "--stream-name",
+            "bootstrap",
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            bootstrap_command.extend(
+                [
+                    "--member",
+                    (
+                        f"{node_id},{nodes[node_id]['endpoint']},"
+                        f"{nodes[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        runner.run(bootstrap_command, "ls08-migration-bootstrap", timeout=60)
+        wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls08-migration-insecure-active",
+        )
+        transition = cli_endpoint_command(
+            binaries["light-streamctl"],
+            nodes[1]["endpoint"],
+            seeds=[nodes[2]["endpoint"], nodes[3]["endpoint"]],
+            deadline_ms=30000,
+        ) + [
+            "security",
+            "activate-transport",
+            "--cluster-id",
+            cluster,
+            "--principal",
+            "transition-admin",
+            "--mutation-session",
+            deterministic_uuid(rng),
+            "--sequence",
+            "1",
+            "--expected-topology-revision",
+            "1",
+            "--policy-file",
+            fixture["root"] / "bootstrap-policy.json",
+        ]
+        for node_id in (1, 2, 3):
+            transition.extend(
+                [
+                    "--node",
+                    (
+                        f"{node_id},{node_configs[node_id]['endpoint']},"
+                        f"{node_configs[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        transition_result = parse_json_output(
+            runner.run(transition, "ls08-activate-secured-transport", timeout=30),
+            "LS08 activate secured transport",
+        )
+        for node in nodes.values():
+            if node["server"].is_running():
+                node["server"].stop()
+        nodes.clear()
+        for node_id, config in node_configs.items():
+            server = OwnedServer(
+                binaries["light-streamd"],
+                config["data_dir"],
+                artifacts / "node-logs",
+                f"ls08-migration-node-{node_id}-secured",
+                node_id=node_id,
+                public_address=config["public_address"],
+                peer_address=config["peer_address"],
+                security_mode="secured",
+                security_config=fixture["server_configs"][node_id],
+                advertise_public_uri=config["endpoint"],
+                advertise_peer_uri=config["peer_uri"],
+                peer_routes={
+                    target: node_configs[target]["peer_uri"]
+                    for target in node_configs
+                    if target != node_id
+                },
+                max_data_groups=1,
+                max_streams=8,
+                max_partitions_per_stream=4,
+                ready_timeout_seconds=30,
+            )
+            nodes[node_id] = {
+                **config,
+                "server": server,
+                "client_security_config": fixture["client_config"],
+            }
+        memberships = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls08-migration-secured-active",
+        )
+        health = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[1]["endpoint"],
+                    security_config=fixture["client_config"],
+                )
+                + ["health"],
+                "ls08-migration-secured-health",
+                timeout=10,
+            ),
+            "LS08 migrated secured health",
+        )
+        return {
+            "fixture": fixture,
+            "transition": transition_result,
+            "memberships": memberships,
+            "health": health,
+            "verdict": "PASS",
+        }
+    finally:
+        for node in nodes.values():
+            try:
+                node["server"].stop()
+            except VerificationError:
+                pass
+
+
+def run_ls08_scenario(artifacts, runner, binaries, revision, profile, seed):
+    rng = random.Random(seed)
+    local_cluster = deterministic_uuid(rng)
+    local_stream = deterministic_uuid(rng)
+    local_data = artifacts / "scratch" / "success" / "ls08-local"
+    local_server = OwnedServer(
+        binaries["light-streamd"],
+        local_data,
+        artifacts / "node-logs",
+        "ls08-local",
+    )
+    local_endpoint = f"http://{local_server.ready['public_address']}"
+    try:
+        local_health = parse_json_output(
+            runner.run(
+                [binaries["light-streamctl"], "--endpoint", local_endpoint, "health"],
+                "ls08-local-health",
+                timeout=10,
+            ),
+            "LS08 local health",
+        )
+        local_bootstrap = parse_json_output(
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    local_endpoint,
+                    "cluster",
+                    "bootstrap",
+                    "--cluster-id",
+                    local_cluster,
+                    "--stream-id",
+                    local_stream,
+                    "--stream-name",
+                    "bootstrap",
+                ],
+                "ls08-local-bootstrap",
+                timeout=20,
+            ),
+            "LS08 local bootstrap",
+        )
+        local_payload = artifacts / "samples" / "ls08-local.bin"
+        local_payload.parent.mkdir(parents=True, exist_ok=True)
+        local_payload.write_bytes(b"ls08-local")
+        local_publish = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    local_endpoint,
+                    local_cluster,
+                    local_stream,
+                    "ls08-local",
+                    deterministic_uuid(rng),
+                    1,
+                    local_payload,
+                ),
+                "ls08-local-publish",
+                timeout=10,
+            ),
+            "LS08 local publish",
+        )
+        write_json(
+            artifacts / "l01.json",
+            {
+                "local_regression": "PASS",
+                "base_secured_mode": "UNSUPPORTED_LS08",
+                "head_secured_mode": "AVAILABLE",
+                "verdict": "PASS",
+            },
+        )
+        write_json(
+            artifacts / "l02.json",
+            {
+                "health": local_health,
+                "bootstrap": local_bootstrap,
+                "publish": local_publish,
+                "credentials_required": False,
+                "verdict": "PASS",
+            },
+        )
+    finally:
+        local_server.stop()
+
+    insecure_remote = runner.run(
+        [
+            binaries["light-streamd"],
+            "--data-dir",
+            artifacts / "scratch" / "failure" / "ls08-insecure-remote",
+            "--public-listen",
+            "0.0.0.0:0",
+            "--peer-listen",
+            "0.0.0.0:0",
+            "--security-mode",
+            "local-insecure",
+        ],
+        "ls08-insecure-remote-refusal",
+        expected_codes=(1,),
+        timeout=10,
+    )
+    if "must bind loopback" not in insecure_remote.stderr:
+        raise VerificationError("LS08 insecure remote binding failed for the wrong reason")
+    write_json(
+        artifacts / "l03.json",
+        {
+            "listener_started": False,
+            "error": insecure_remote.stderr.strip(),
+            "verdict": "PASS",
+        },
+    )
+    migration = run_ls08_migration_scenario(
+        artifacts, runner, binaries, profile, rng
+    )
+    write_json(
+        artifacts / "ls08" / "security-migration.json",
+        {
+            "transition": migration["transition"],
+            "memberships": migration["memberships"],
+            "health": migration["health"],
+            "verdict": "PASS",
+        },
+    )
+
+    cluster = deterministic_uuid(rng)
+    stream = deterministic_uuid(rng)
+    used_ports = set()
+    node_configs = {}
+    for node_id in (1, 2, 3):
+        public_port = free_port()
+        while public_port in used_ports:
+            public_port = free_port()
+        used_ports.add(public_port)
+        peer_port = free_port()
+        while peer_port in used_ports:
+            peer_port = free_port()
+        used_ports.add(peer_port)
+        node_configs[node_id] = {
+            "node_id": node_id,
+            "public_address": f"127.0.0.1:{public_port}",
+            "peer_address": f"127.0.0.1:{peer_port}",
+            "endpoint": f"https://127.0.0.1:{public_port}",
+            "peer_uri": f"https://127.0.0.1:{peer_port}",
+            "data_dir": artifacts / "scratch" / "success" / f"ls08-node-{node_id}",
+        }
+    fixture = generate_security_fixture(artifacts, runner, cluster, node_configs)
+    generated_credential = fixture["root"] / "generated-credential.json"
+    generated_verifier = fixture["root"] / "generated-verifier.json"
+    generated = parse_json_output(
+        runner.run(
+            [
+                binaries["light-streamctl"],
+                "--endpoint",
+                "http://127.0.0.1:1",
+                "security",
+                "generate-token",
+                "--principal",
+                "generated-principal",
+                "--credential-id",
+                "generated",
+                "--generation",
+                "1",
+                "--credential-file",
+                generated_credential,
+                "--verifier-file",
+                generated_verifier,
+            ],
+            "ls08-generate-token",
+            timeout=10,
+        ),
+        "LS08 token generation",
+    )
+    if oct(generated_credential.stat().st_mode & 0o777) != "0o600":
+        raise VerificationError("LS08 generated credential file is not mode 0600")
+    generated_token = json.loads(generated_credential.read_text())["token"]
+    if generated_token in json.dumps(generated):
+        raise VerificationError("LS08 token generator printed the raw token")
+    nodes = {}
+
+    def start_node(node_id, suffix):
+        config = node_configs[node_id]
+        server = OwnedServer(
+            binaries["light-streamd"],
+            config["data_dir"],
+            artifacts / "node-logs",
+            f"ls08-node-{node_id}-{suffix}",
+            node_id=node_id,
+            public_address=config["public_address"],
+            peer_address=config["peer_address"],
+            security_mode="secured",
+            security_config=fixture["server_configs"][node_id],
+            advertise_public_uri=config["endpoint"],
+            advertise_peer_uri=config["peer_uri"],
+            peer_routes={
+                target: node_configs[target]["peer_uri"]
+                for target in node_configs
+                if target != node_id
+            },
+            max_data_groups=1,
+            max_streams=8,
+            max_partitions_per_stream=4,
+            ready_timeout_seconds=30,
+        )
+        nodes[node_id] = {
+            **config,
+            "server": server,
+            "client_security_config": fixture["client_config"],
+        }
+        return server
+
+    def running_endpoints(exclude=None):
+        return [
+            nodes[node_id]["endpoint"]
+            for node_id in sorted(nodes)
+            if node_id != exclude and nodes[node_id]["server"].is_running()
+        ]
+
+    def wait_for_control_apply(node_id, label):
+        deadline = time.monotonic() + profile["write_readiness_seconds"] + 10
+        last = None
+        while time.monotonic() < deadline:
+            diagnostics = {}
+            for current_id in sorted(nodes):
+                if nodes[current_id]["server"].is_running():
+                    diagnostics[current_id] = read_node_diagnostics(
+                        artifacts,
+                        runner,
+                        binaries["light-streamctl"],
+                        nodes[current_id],
+                        f"{label}-node-{current_id}",
+                    )
+            control = {
+                current_id: next(
+                    group
+                    for group in value["groups"]
+                    if group["group"] == "control"
+                )
+                for current_id, value in diagnostics.items()
+            }
+            committed = max(
+                group["cluster_committed_index"] for group in control.values()
+            )
+            last = {
+                "committed": committed,
+                "target_applied": control[node_id]["last_applied_index"],
+            }
+            if last["target_applied"] >= committed:
+                return last
+            time.sleep(0.05)
+        raise VerificationError(f"{label} did not apply on node {node_id}: {last}")
+
+    try:
+        for node_id in (1, 2, 3):
+            start_node(node_id, "initial")
+        client_args = cli_endpoint_command(
+            binaries["light-streamctl"],
+            nodes[1]["endpoint"],
+            seeds=[nodes[2]["endpoint"], nodes[3]["endpoint"]],
+            deadline_ms=30000,
+            security_config=fixture["client_config"],
+        )
+        bootstrap_command = client_args + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream,
+            "--stream-name",
+            "bootstrap",
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            bootstrap_command.extend(
+                [
+                    "--member",
+                    (
+                        f"{node_id},{nodes[node_id]['endpoint']},"
+                        f"{nodes[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        bootstrap = parse_json_output(
+            runner.run(bootstrap_command, "ls08-secured-bootstrap", timeout=60),
+            "LS08 secured bootstrap",
+        )
+        memberships = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls08-secured-active",
+        )
+        secured_health_seconds = []
+        for index in range(30):
+            started = time.monotonic()
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[1]["endpoint"],
+                    seeds=[nodes[2]["endpoint"], nodes[3]["endpoint"]],
+                    deadline_ms=5000,
+                    security_config=fixture["client_config"],
+                )
+                + ["health"],
+                f"ls08-secured-health-{index:02d}",
+                timeout=10,
+            )
+            secured_health_seconds.append(time.monotonic() - started)
+        secured_health_seconds.sort()
+        secured_p99 = secured_health_seconds[-1]
+        if secured_p99 > 0.250:
+            raise VerificationError(
+                f"LS08 secured health p99 exceeded 250 ms: {secured_p99}"
+            )
+        write_json(
+            artifacts / "ls08" / "secured-performance.json",
+            {
+                "operation": "new-process TLS health request",
+                "samples_seconds": secured_health_seconds,
+                "p99_seconds": secured_p99,
+                "maximum_p99_seconds": 0.250,
+                "connection_reuse": False,
+                "verdict": "PASS",
+            },
+        )
+        leader = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["leader_loss_seconds"],
+            "ls08-secured-leader",
+        )
+        payload = artifacts / "samples" / "ls08-secured.bin"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(bytes(rng.randrange(0, 256) for _ in range(2048)))
+        session = deterministic_uuid(rng)
+        publish = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    nodes[leader]["endpoint"],
+                    cluster,
+                    stream,
+                    "ls08-admin",
+                    session,
+                    1,
+                    payload,
+                    seeds=running_endpoints(exclude=leader),
+                    deadline_ms=15000,
+                    security_config=fixture["client_config"],
+                ),
+                "ls08-secured-publish",
+                timeout=20,
+            ),
+            "LS08 secured publish",
+        )
+        nodes[leader]["server"].kill()
+        new_leader = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["leader_loss_seconds"] + 10,
+            "ls08-secured-failover",
+            previous=leader,
+        )
+        fetched = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    seeds=running_endpoints(exclude=new_leader),
+                    deadline_ms=15000,
+                    security_config=fixture["client_config"],
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "4",
+                ],
+                "ls08-secured-fetch-after-failover",
+                timeout=20,
+            ),
+            "LS08 secured fetch after failover",
+        )
+        if fetched["page"]["records"][0]["payload"] != list(payload.read_bytes()):
+            raise VerificationError("LS08 secured failover changed the payload")
+        write_json(
+            artifacts / "l04.json",
+            {
+                "bootstrap": bootstrap,
+                "memberships": memberships,
+                "old_leader": leader,
+                "new_leader": new_leader,
+                "publish": publish["receipt"],
+                "fetch_verified": True,
+                "verdict": "PASS",
+            },
+        )
+        start_node(leader, "recovered")
+        wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls08-recovered-original-leader",
+        )
+
+        invalid_credential = fixture["root"] / "invalid-credential.json"
+        invalid_credential.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "credential_id": "admin",
+                    "generation": 1,
+                    "token": "ls1.admin.1.XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+                }
+            )
+            + "\n"
+        )
+        os.chmod(invalid_credential, 0o600)
+        invalid_client = fixture["root"] / "invalid-client.json"
+        invalid_client.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "ca_certificate_file": str(
+                        fixture["ca_certificate"].resolve()
+                    ),
+                    "credential_file": str(invalid_credential.resolve()),
+                }
+            )
+            + "\n"
+        )
+        invalid = runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"],
+                nodes[new_leader]["endpoint"],
+                security_config=invalid_client,
+            )
+            + ["health"],
+            "ls08-invalid-token",
+            expected_codes=(4,),
+            timeout=10,
+        )
+        invalid_value = parse_json_output(invalid, "LS08 invalid token")
+        if invalid_value.get("error", {}).get("code") != "security_authentication_failed":
+            raise VerificationError("LS08 invalid token failed for the wrong reason")
+        write_json(
+            artifacts / "l05.json",
+            {"invalid_token": invalid_value, "verdict": "PASS"},
+        )
+
+        denied_publish = runner.run(
+            publish_command(
+                binaries["light-streamctl"],
+                nodes[new_leader]["endpoint"],
+                cluster,
+                stream,
+                "ls08-reader",
+                deterministic_uuid(rng),
+                1,
+                payload,
+                security_config=fixture["denied_client_config"],
+            ),
+            "ls08-unauthorized-publish",
+            expected_codes=(4,),
+            timeout=10,
+        )
+        denied_publish_value = parse_json_output(
+            denied_publish, "LS08 unauthorized publish"
+        )
+        if (
+            denied_publish_value.get("error", {}).get("code")
+            != "security_permission_denied"
+        ):
+            raise VerificationError("LS08 unauthorized publish failed for the wrong reason")
+        denied_receipt = runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"],
+                nodes[new_leader]["endpoint"],
+                security_config=fixture["denied_client_config"],
+            )
+            + [
+                "receipt",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--principal",
+                "ls08-admin",
+                "--session",
+                session,
+                "--sequence",
+                "1",
+            ],
+            "ls08-cross-principal-receipt",
+            expected_codes=(4,),
+            timeout=10,
+        )
+        denied_receipt_value = parse_json_output(
+            denied_receipt, "LS08 cross-principal receipt"
+        )
+        if (
+            denied_receipt_value.get("error", {}).get("code")
+            != "security_permission_denied"
+        ):
+            raise VerificationError("LS08 receipt ownership check failed")
+        denied_commands = {
+            "bookmark": [
+                "bookmark",
+                "list",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+            ],
+            "checkpoint": [
+                "checkpoint",
+                "get",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--consumer",
+                "billing",
+            ],
+            "diagnostics": ["diagnostics"],
+            "snapshot": [
+                "maintenance",
+                "snapshot",
+                "--cluster-id",
+                cluster,
+                "--group-id",
+                "2",
+            ],
+            "administration": [
+                "cluster",
+                "operation",
+                "--cluster-id",
+                cluster,
+                "--request-id",
+                deterministic_uuid(rng),
+            ],
+        }
+        denied_routes = {}
+        for name, command in denied_commands.items():
+            result = runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    security_config=fixture["denied_client_config"],
+                )
+                + command,
+                f"ls08-unauthorized-{name}",
+                expected_codes=(4,),
+                timeout=10,
+            )
+            value = parse_json_output(result, f"LS08 unauthorized {name}")
+            if (
+                value.get("error", {}).get("code")
+                != "security_permission_denied"
+            ):
+                raise VerificationError(
+                    f"LS08 unauthorized {name} failed for the wrong reason"
+                )
+            denied_routes[name] = value
+        post_denial_fetch = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    security_config=fixture["client_config"],
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "10",
+                ],
+                "ls08-post-denial-fetch",
+                timeout=10,
+            ),
+            "LS08 post-denial fetch",
+        )
+        if len(post_denial_fetch["page"]["records"]) != 1:
+            raise VerificationError("LS08 denied requests changed committed data")
+        write_json(
+            artifacts / "l06.json",
+            {
+                "unauthorized_publish": denied_publish_value,
+                "cross_principal_receipt": denied_receipt_value,
+                "unauthorized_routes": denied_routes,
+                "committed_state_unchanged": True,
+                "verdict": "PASS",
+            },
+        )
+
+        next_token = f"ls1.admin.2.{secrets.token_urlsafe(32)}"
+        next_credential = fixture["root"] / "admin-credential-next.json"
+        next_credential.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "credential_id": "admin",
+                    "generation": 2,
+                    "token": next_token,
+                }
+            )
+            + "\n"
+        )
+        os.chmod(next_credential, 0o600)
+        next_client = fixture["root"] / "admin-client-next.json"
+        next_client.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "ca_certificate_file": str(
+                        fixture["ca_certificate"].resolve()
+                    ),
+                    "credential_file": str(next_credential.resolve()),
+                }
+            )
+            + "\n"
+        )
+        mutation_session = deterministic_uuid(rng)
+        add_mutation = fixture["root"] / "add-token-generation.json"
+        add_mutation.write_text(
+            json.dumps(
+                {
+                    "request": {
+                        "principal": "ls08-admin",
+                        "session": mutation_session,
+                        "sequence": 1,
+                    },
+                    "expected_revision": 1,
+                    "change": {
+                        "kind": "add_token_generation",
+                        "verifier": {
+                            "credential": {
+                                "id": "admin",
+                                "generation": 2,
+                            },
+                            "principal": "ls08-admin",
+                            "digest": list(
+                                hashlib.sha256(next_token.encode()).digest()
+                            ),
+                            "status": "active",
+                        },
+                    },
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        added = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    seeds=running_endpoints(exclude=new_leader),
+                    security_config=fixture["client_config"],
+                )
+                + [
+                    "security",
+                    "apply",
+                    "--cluster-id",
+                    cluster,
+                    "--mutation-file",
+                    str(add_mutation),
+                ],
+                "ls08-add-token-generation",
+                timeout=15,
+            ),
+            "LS08 add token generation",
+        )
+        if added["policy"]["policy_revision"] != 2:
+            raise VerificationError("LS08 token rotation did not advance policy")
+        new_token_health = None
+        new_token_deadline = time.monotonic() + 5
+        attempt = 0
+        while time.monotonic() < new_token_deadline:
+            attempt += 1
+            result = runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    security_config=next_client,
+                )
+                + ["health"],
+                f"ls08-new-token-health-{attempt}",
+                expected_codes=(0, 4, 5),
+                timeout=10,
+            )
+            new_token_health = parse_json_output(result, "LS08 new token health")
+            if result.returncode == 0:
+                break
+            time.sleep(0.05)
+        if new_token_health is None or new_token_health.get("ok") is not True:
+            raise VerificationError(
+                f"LS08 new token did not become active: {new_token_health}"
+            )
+
+        rotated_root = fixture["root"] / f"rotated-node-{leader}"
+        rotated_root.mkdir()
+        rotated_key = rotated_root / "node-key.pem"
+        rotated_csr = rotated_root / "node.csr"
+        rotated_cert = rotated_root / "node-cert.pem"
+        rotated_ext = rotated_root / "node.ext"
+        rotated_ext.write_text(
+            "\n".join(
+                [
+                    (
+                        "subjectAltName=IP:127.0.0.1,"
+                        f"URI:spiffe://light-stream/cluster/{cluster}/node/{leader}"
+                    ),
+                    "extendedKeyUsage=serverAuth,clientAuth",
+                    "keyUsage=digitalSignature,keyEncipherment",
+                ]
+            )
+            + "\n"
+        )
+        runner.run(
+            [
+                "openssl",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                rotated_key,
+                "-out",
+                rotated_csr,
+                "-subj",
+                f"/CN=light-stream-rotated-node-{leader}",
+            ],
+            "ls08-generate-rotated-peer-request",
+            timeout=30,
+        )
+        runner.run(
+            [
+                "openssl",
+                "x509",
+                "-req",
+                "-in",
+                rotated_csr,
+                "-CA",
+                fixture["ca_certificate"],
+                "-CAkey",
+                fixture["ca_key"],
+                "-set_serial",
+                "100",
+                "-out",
+                rotated_cert,
+                "-days",
+                "2",
+                "-extfile",
+                rotated_ext,
+            ],
+            "ls08-sign-rotated-peer",
+            timeout=30,
+        )
+        os.chmod(rotated_key, 0o600)
+        rotated_der = ssl.PEM_cert_to_DER_cert(rotated_cert.read_text())
+        add_peer_mutation = fixture["root"] / "add-peer-generation.json"
+        add_peer_mutation.write_text(
+            json.dumps(
+                {
+                    "request": {
+                        "principal": "ls08-admin",
+                        "session": mutation_session,
+                        "sequence": 2,
+                    },
+                    "expected_revision": 2,
+                    "change": {
+                        "kind": "add_peer_certificate",
+                        "binding": {
+                            "cluster": cluster,
+                            "node": leader,
+                            "generation": 2,
+                            "fingerprint": list(
+                                hashlib.sha256(rotated_der).digest()
+                            ),
+                            "status": "active",
+                        },
+                    },
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        peer_added = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    seeds=running_endpoints(exclude=new_leader),
+                    security_config=next_client,
+                )
+                + [
+                    "security",
+                    "apply",
+                    "--cluster-id",
+                    cluster,
+                    "--mutation-file",
+                    str(add_peer_mutation),
+                ],
+                "ls08-add-peer-certificate",
+                timeout=15,
+            ),
+            "LS08 add peer certificate",
+        )
+        peer_replication = wait_for_control_apply(
+            leader, "ls08-peer-certificate-replicated"
+        )
+        rotated_config = json.loads(fixture["server_configs"][leader].read_text())
+        for role in ("public_tls", "peer_tls"):
+            rotated_config[role]["certificate_chain_file"] = str(
+                rotated_cert.resolve()
+            )
+            rotated_config[role]["private_key_file"] = str(rotated_key.resolve())
+        rotated_config_file = rotated_root / "security.json"
+        rotated_config_file.write_text(json.dumps(rotated_config, indent=2) + "\n")
+        config = node_configs[leader]
+        nodes[leader]["server"].stop()
+        nodes[leader]["server"] = OwnedServer(
+            binaries["light-streamd"],
+            config["data_dir"],
+            artifacts / "node-logs",
+            f"ls08-node-{leader}-rotated",
+            node_id=leader,
+            public_address=config["public_address"],
+            peer_address=config["peer_address"],
+            security_mode="secured",
+            security_config=rotated_config_file,
+            advertise_public_uri=config["endpoint"],
+            advertise_peer_uri=config["peer_uri"],
+            peer_routes={
+                target: node_configs[target]["peer_uri"]
+                for target in node_configs
+                if target != leader
+            },
+            max_data_groups=1,
+            max_streams=8,
+            max_partitions_per_stream=4,
+            ready_timeout_seconds=30,
+        )
+        wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls08-rotated-peer-active",
+        )
+        revoke_peer_mutation = fixture["root"] / "revoke-old-peer.json"
+        revoke_peer_mutation.write_text(
+            json.dumps(
+                {
+                    "request": {
+                        "principal": "ls08-admin",
+                        "session": mutation_session,
+                        "sequence": 3,
+                    },
+                    "expected_revision": 3,
+                    "change": {
+                        "kind": "revoke_peer_certificate",
+                        "node": leader,
+                        "generation": 1,
+                    },
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        peer_revoked = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    seeds=running_endpoints(exclude=new_leader),
+                    security_config=next_client,
+                )
+                + [
+                    "security",
+                    "apply",
+                    "--cluster-id",
+                    cluster,
+                    "--mutation-file",
+                    str(revoke_peer_mutation),
+                ],
+                "ls08-revoke-old-peer-certificate",
+                timeout=15,
+            ),
+            "LS08 revoke old peer certificate",
+        )
+        rotated_health = None
+        rotated_deadline = time.monotonic() + 5
+        attempt = 0
+        while time.monotonic() < rotated_deadline:
+            attempt += 1
+            result = runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[leader]["endpoint"],
+                    security_config=next_client,
+                )
+                + ["health"],
+                f"ls08-rotated-peer-health-{attempt}",
+                expected_codes=(0, 4, 5),
+                timeout=10,
+            )
+            rotated_health = parse_json_output(result, "LS08 rotated peer health")
+            if result.returncode == 0:
+                break
+            time.sleep(0.05)
+        if rotated_health is None or rotated_health.get("ok") is not True:
+            raise VerificationError(
+                f"LS08 rotated peer did not adopt the current policy: {rotated_health}"
+            )
+        revoke_mutation = fixture["root"] / "revoke-old-token.json"
+        revoke_mutation.write_text(
+            json.dumps(
+                {
+                    "request": {
+                        "principal": "ls08-admin",
+                        "session": mutation_session,
+                        "sequence": 4,
+                    },
+                        "expected_revision": 4,
+                    "change": {
+                        "kind": "revoke_token_generation",
+                        "credential": {
+                            "id": "admin",
+                            "generation": 1,
+                        },
+                    },
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        revoked_at = time.monotonic()
+        revoked = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[new_leader]["endpoint"],
+                    seeds=running_endpoints(exclude=new_leader),
+                    security_config=next_client,
+                )
+                + [
+                    "security",
+                    "apply",
+                    "--cluster-id",
+                    cluster,
+                    "--mutation-file",
+                    str(revoke_mutation),
+                ],
+                "ls08-revoke-old-token",
+                timeout=15,
+            ),
+            "LS08 revoke old token",
+        )
+        revoked_nodes = {}
+        for node_id in sorted(nodes):
+            if not nodes[node_id]["server"].is_running():
+                continue
+            deadline = revoked_at + 5.0
+            last = None
+            attempt = 0
+            while time.monotonic() < deadline:
+                attempt += 1
+                result = runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        nodes[node_id]["endpoint"],
+                        no_retry=True,
+                        deadline_ms=1000,
+                        security_config=fixture["client_config"],
+                    )
+                    + ["health"],
+                    f"ls08-revoked-token-node-{node_id}-{attempt}",
+                    expected_codes=(0, 4, 5),
+                    timeout=3,
+                )
+                last = parse_json_output(result, "LS08 revoked token probe")
+                if (
+                    last.get("error", {}).get("code")
+                    == "security_authentication_failed"
+                ):
+                    revoked_nodes[str(node_id)] = time.monotonic() - revoked_at
+                    break
+                time.sleep(0.05)
+            if str(node_id) not in revoked_nodes:
+                raise VerificationError(
+                    f"LS08 old token remained usable on node {node_id}: {last}"
+                )
+        write_json(
+            artifacts / "l08.json",
+            {
+                "add_generation": added["policy"],
+                "new_token_health": new_token_health,
+                "add_peer_generation": peer_added["policy"],
+                "peer_generation_replication": peer_replication,
+                "revoke_peer_generation": peer_revoked["policy"],
+                "rotated_peer_health": rotated_health,
+                "revoke_generation": revoked["policy"],
+                "revocation_seconds_by_node": revoked_nodes,
+                "maximum_seconds": 5,
+                "verdict": "PASS",
+            },
+        )
+
+        wrong_ca_client = fixture["root"] / "wrong-ca-client.json"
+        wrong_ca_client.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "ca_certificate_file": str(
+                        fixture["node_certificates"][leader].resolve()
+                    ),
+                    "credential_file": str(fixture["credential_file"].resolve()),
+                }
+            )
+            + "\n"
+        )
+        wrong_ca = runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"],
+                nodes[new_leader]["endpoint"],
+                security_config=wrong_ca_client,
+            )
+            + ["health"],
+            "ls08-wrong-ca",
+            expected_codes=(1, 2),
+            timeout=10,
+        )
+        rogue_root = fixture["root"] / "rogue-peer"
+        rogue_root.mkdir()
+        rogue_key = rogue_root / "node-key.pem"
+        rogue_csr = rogue_root / "node.csr"
+        rogue_cert = rogue_root / "node-cert.pem"
+        rogue_ext = rogue_root / "node.ext"
+        rogue_ext.write_text(
+            "\n".join(
+                [
+                    (
+                        "subjectAltName=IP:127.0.0.1,"
+                        f"URI:spiffe://light-stream/cluster/{cluster}/node/{leader}"
+                    ),
+                    "extendedKeyUsage=serverAuth,clientAuth",
+                    "keyUsage=digitalSignature,keyEncipherment",
+                ]
+            )
+            + "\n"
+        )
+        runner.run(
+            [
+                "openssl",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                rogue_key,
+                "-out",
+                rogue_csr,
+                "-subj",
+                f"/CN=light-stream-rogue-node-{leader}",
+            ],
+            "ls08-generate-rogue-peer-request",
+            timeout=30,
+        )
+        runner.run(
+            [
+                "openssl",
+                "x509",
+                "-req",
+                "-in",
+                rogue_csr,
+                "-CA",
+                fixture["ca_certificate"],
+                "-CAkey",
+                fixture["ca_key"],
+                "-set_serial",
+                "99",
+                "-out",
+                rogue_cert,
+                "-days",
+                "2",
+                "-extfile",
+                rogue_ext,
+            ],
+            "ls08-sign-rogue-peer",
+            timeout=30,
+        )
+        os.chmod(rogue_key, 0o600)
+        rogue_config = json.loads(fixture["server_configs"][leader].read_text())
+        for role in ("public_tls", "peer_tls"):
+            rogue_config[role]["certificate_chain_file"] = str(rogue_cert.resolve())
+            rogue_config[role]["private_key_file"] = str(rogue_key.resolve())
+        rogue_config_file = rogue_root / "security.json"
+        rogue_config_file.write_text(json.dumps(rogue_config, indent=2) + "\n")
+        rogue_request = rogue_root / "append-entries.grpc"
+        rogue_request.write_bytes(
+            peer_request_frame(
+                cluster,
+                1,
+                leader,
+                new_leader,
+                b'{"untrusted":"payload must not be decoded"}',
+            )
+        )
+        inbound_rogue = runner.run(
+            [
+                "curl",
+                "--silent",
+                "--show-error",
+                "--http2",
+                "--request",
+                "POST",
+                "--header",
+                "content-type: application/grpc",
+                "--header",
+                "te: trailers",
+                "--cacert",
+                fixture["ca_certificate"],
+                "--cert",
+                rogue_cert,
+                "--key",
+                rogue_key,
+                "--data-binary",
+                f"@{rogue_request}",
+                "--dump-header",
+                "-",
+                "--output",
+                "/dev/null",
+                (
+                    f"https://{nodes[new_leader]['peer_address']}"
+                    "/lightstream.peer.v1.PeerService/AppendEntries"
+                ),
+            ],
+            "ls08-inbound-rogue-peer",
+            timeout=10,
+        )
+        if "grpc-status: 16" not in inbound_rogue.stdout.lower():
+            raise VerificationError(
+                "LS08 inbound rogue peer was not rejected as unauthenticated"
+            )
+        nodes[leader]["server"].stop()
+        rogue_command = [
+            binaries["light-streamd"],
+            "--data-dir",
+            node_configs[leader]["data_dir"],
+            "--public-listen",
+            node_configs[leader]["public_address"],
+            "--peer-listen",
+            node_configs[leader]["peer_address"],
+            "--advertise-public-uri",
+            node_configs[leader]["endpoint"],
+            "--advertise-peer-uri",
+            node_configs[leader]["peer_uri"],
+            "--node-id",
+            str(leader),
+            "--security-mode",
+            "secured",
+            "--security-config",
+            rogue_config_file,
+            "--max-data-groups",
+            "1",
+            "--max-streams",
+            "8",
+            "--max-partitions-per-stream",
+            "4",
+        ]
+        for target in sorted(nodes):
+            if target != leader:
+                rogue_command.extend(
+                    ["--peer-route", f"{target}={nodes[target]['peer_uri']}"]
+                )
+        rogue_peer = runner.run(
+            rogue_command,
+            "ls08-rogue-peer-restart",
+            expected_codes=(1,),
+            timeout=30,
+        )
+        if not any(
+            marker in rogue_peer.stderr.lower()
+            for marker in (
+                "client authentication failed",
+                "peer authentication",
+                "active node did not recover",
+            )
+        ):
+            raise VerificationError("LS08 rogue peer failed for an unrelated reason")
+        write_json(
+            artifacts / "l07.json",
+            {
+                "wrong_ca": parse_json_output(wrong_ca, "LS08 wrong CA"),
+                "inbound_rogue_peer_status": "UNAUTHENTICATED",
+                "rogue_peer_exit": rogue_peer.returncode,
+                "plaintext_fallback": False,
+                "verdict": "PASS",
+            },
+        )
+
+        for node_id, node in nodes.items():
+            if node_id != new_leader and node["server"].is_running():
+                node["server"].kill()
+        time.sleep(5.5)
+        stale = runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"],
+                nodes[new_leader]["endpoint"],
+                no_retry=True,
+                deadline_ms=2000,
+                security_config=next_client,
+            )
+            + ["health"],
+            "ls08-stale-policy-refusal",
+            expected_codes=(5,),
+            timeout=5,
+        )
+        stale_value = parse_json_output(stale, "LS08 stale policy refusal")
+        if stale_value.get("error", {}).get("code") != "security_policy_stale":
+            raise VerificationError("LS08 stale policy did not fail closed")
+        nodes[new_leader]["server"].stop()
+
+        missing_trust_config = fixture["root"] / "missing-trust-security.json"
+        missing_trust = json.loads(
+            fixture["server_configs"][new_leader].read_text()
+        )
+        missing_trust["peer_tls"]["trust_roots_file"] = str(
+            (fixture["root"] / "missing-peer-roots.pem").resolve()
+        )
+        missing_trust_config.write_text(json.dumps(missing_trust, indent=2) + "\n")
+        restart_refusal = runner.run(
+            [
+                binaries["light-streamd"],
+                "--data-dir",
+                node_configs[new_leader]["data_dir"],
+                "--public-listen",
+                node_configs[new_leader]["public_address"],
+                "--peer-listen",
+                node_configs[new_leader]["peer_address"],
+                "--advertise-public-uri",
+                node_configs[new_leader]["endpoint"],
+                "--advertise-peer-uri",
+                node_configs[new_leader]["peer_uri"],
+                "--node-id",
+                str(new_leader),
+                "--security-mode",
+                "secured",
+                "--security-config",
+                missing_trust_config,
+            ],
+            "ls08-missing-trust-restart",
+            expected_codes=(1,),
+            timeout=10,
+        )
+        if "missing-peer-roots.pem" not in restart_refusal.stderr:
+            raise VerificationError("LS08 missing trust restart failed for the wrong reason")
+        write_json(
+            artifacts / "l09.json",
+            {
+                "stale_policy": stale_value,
+                "missing_trust_startup_exit": restart_refusal.returncode,
+                "insecure_fallback": False,
+                "verdict": "PASS",
+            },
+        )
+
+        leaks = []
+        canaries = [
+            fixture["token_canary"],
+            fixture["denied_token_canary"],
+            next_token,
+            fixture["private_key_canary"],
+            generated_token,
+            migration["fixture"]["token_canary"],
+            migration["fixture"]["private_key_canary"],
+        ]
+        for path in artifacts.rglob("*"):
+            if (
+                not path.is_file()
+                or fixture["root"] in path.parents
+                or migration["fixture"]["root"] in path.parents
+            ):
+                continue
+            data = path.read_bytes()
+            for canary in canaries:
+                encoded = base64.b64encode(canary.encode()).decode()
+                if canary.encode() in data or encoded.encode() in data:
+                    leaks.append(str(path.relative_to(artifacts)))
+                    break
+        if leaks:
+            raise VerificationError(f"LS08 secret canary leaked into evidence: {leaks}")
+        write_json(
+            artifacts / "l10.json",
+            {
+                "generated_credential_mode": "0600",
+                "generator_output_redacted": True,
+                "secret_canary_matches": leaks,
+                "verdict": "PASS",
+            },
+        )
+        write_json(
+            artifacts / "ls08" / "security-journey.json",
+            {
+                "security_mode": "secured",
+                "cluster_id": cluster,
+                "old_leader": leader,
+                "new_leader": new_leader,
+                "valid_workflow": True,
+                "invalid_token_denied": True,
+                "secret_canaries_absent": True,
+                "revision": revision,
+                "verdict": "PASS",
+            },
+        )
+    finally:
+        for node in nodes.values():
+            try:
+                node["server"].stop()
+            except VerificationError:
+                pass
+
+
 def run_selected(args, artifacts, runner, binaries, revision, profile):
+    if args.phase == "LS08" or args.suite == "ls08-e2e":
+        runner.run(
+            [
+                "cargo",
+                "test",
+                "-p",
+                "light-stream-core",
+                "-p",
+                "light-stream-storage",
+                "-p",
+                "light-stream-server",
+                "-p",
+                "light-stream-client",
+            ],
+            "ls08-targeted-tests",
+            timeout=900,
+        )
+        run_ls08_scenario(artifacts, runner, binaries, revision, profile, args.seed)
+        return
     if args.phase == "LS07" or args.suite == "ls07-e2e":
         runner.run(
             [
@@ -7784,6 +9677,7 @@ def parse_args():
         "LS05",
         "LS06",
         "LS07",
+        "LS08",
     ):
         parser.error(f"unknown phase {args.phase!r}")
     if args.suite is not None and args.suite not in (
@@ -7795,6 +9689,7 @@ def parse_args():
         "ls05-e2e",
         "ls06-e2e",
         "ls07-e2e",
+        "ls08-e2e",
     ):
         parser.error(f"unknown suite {args.suite!r}")
     if args.scenario not in KNOWN_SCENARIOS:
@@ -8036,7 +9931,7 @@ def main():
             },
         )
         run_selected(args, artifacts, runner, binaries, revision, profile)
-        record_security(artifacts, runner, binaries, args.security)
+        record_security(artifacts, runner, binaries, args.security, args.phase)
         status = "PASS"
     except (
         VerificationError,

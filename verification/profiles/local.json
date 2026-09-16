@@ -18,7 +18,7 @@
     "local-insecure",
     "secured"
   ],
-  "implemented_phase": "LS05",
+  "implemented_phase": "LS08",
   "ls01": {
     "health_p99_ms": 100,
     "startup_seconds": 5,

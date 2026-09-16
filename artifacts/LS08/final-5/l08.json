@@ -1,0 +1,201 @@
+{
+  "add_generation": {
+    "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+    "policy_revision": 2,
+    "revocation_revision": 0
+  },
+  "add_peer_generation": {
+    "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+    "policy_revision": 3,
+    "revocation_revision": 0
+  },
+  "maximum_seconds": 5,
+  "new_token_health": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "diagnostics",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bookmarks",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "retention",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "protected-replay",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "consumer-checkpoints",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "security",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "https://127.0.0.1:54735",
+    "health": {
+      "bootstrapped": true,
+      "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+      "peer_address": "https://127.0.0.1:54736",
+      "public_address": "https://127.0.0.1:54735",
+      "status": {
+        "ready": true,
+        "revision": "07ed07c509c1b21f3803e3946b715350ce678bc73c85981907621031e1561feb",
+        "security_mode": "secured"
+      }
+    },
+    "ok": true
+  },
+  "peer_generation_replication": {
+    "committed": 11,
+    "target_applied": 11
+  },
+  "revocation_seconds_by_node": {
+    "1": 0.11917841700000054,
+    "2": 0.1282897920000039,
+    "3": 0.13897362500000554
+  },
+  "revoke_generation": {
+    "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+    "policy_revision": 5,
+    "revocation_revision": 2
+  },
+  "revoke_peer_generation": {
+    "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+    "policy_revision": 4,
+    "revocation_revision": 1
+  },
+  "rotated_peer_health": {
+    "capabilities": [
+      {
+        "capability": "health",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bootstrap",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "publish",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "fetch",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "receipt",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "diagnostics",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "bookmarks",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "retention",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "protected-replay",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "consumer-checkpoints",
+        "support": {
+          "status": "available"
+        }
+      },
+      {
+        "capability": "security",
+        "support": {
+          "status": "available"
+        }
+      }
+    ],
+    "command": "health",
+    "endpoint": "https://127.0.0.1:54731",
+    "health": {
+      "bootstrapped": true,
+      "cluster_id": "9409f7e6-6f5c-8014-2bf9-eb23befb7ff6",
+      "peer_address": "https://127.0.0.1:54732",
+      "public_address": "https://127.0.0.1:54731",
+      "status": {
+        "ready": true,
+        "revision": "07ed07c509c1b21f3803e3946b715350ce678bc73c85981907621031e1561feb",
+        "security_mode": "secured"
+      }
+    },
+    "ok": true
+  },
+  "verdict": "PASS"
+}

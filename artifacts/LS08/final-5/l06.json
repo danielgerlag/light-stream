@@ -1,0 +1,83 @@
+{
+  "committed_state_unchanged": true,
+  "cross_principal_receipt": {
+    "command": "request",
+    "error": {
+      "code": "security_permission_denied",
+      "detail": {
+        "code": "security_permission_denied"
+      },
+      "message": "the authenticated principal is not authorized for this operation"
+    },
+    "ok": false
+  },
+  "unauthorized_publish": {
+    "command": "request",
+    "error": {
+      "code": "security_permission_denied",
+      "detail": {
+        "code": "security_permission_denied"
+      },
+      "message": "the authenticated principal is not authorized for this operation"
+    },
+    "ok": false
+  },
+  "unauthorized_routes": {
+    "administration": {
+      "command": "request",
+      "error": {
+        "code": "security_permission_denied",
+        "detail": {
+          "code": "security_permission_denied"
+        },
+        "message": "the authenticated principal is not authorized for this operation"
+      },
+      "ok": false
+    },
+    "bookmark": {
+      "command": "request",
+      "error": {
+        "code": "security_permission_denied",
+        "detail": {
+          "code": "security_permission_denied"
+        },
+        "message": "the authenticated principal is not authorized for this operation"
+      },
+      "ok": false
+    },
+    "checkpoint": {
+      "command": "request",
+      "error": {
+        "code": "security_permission_denied",
+        "detail": {
+          "code": "security_permission_denied"
+        },
+        "message": "the authenticated principal is not authorized for this operation"
+      },
+      "ok": false
+    },
+    "diagnostics": {
+      "command": "request",
+      "error": {
+        "code": "security_permission_denied",
+        "detail": {
+          "code": "security_permission_denied"
+        },
+        "message": "the authenticated principal is not authorized for this operation"
+      },
+      "ok": false
+    },
+    "snapshot": {
+      "command": "request",
+      "error": {
+        "code": "security_permission_denied",
+        "detail": {
+          "code": "security_permission_denied"
+        },
+        "message": "the authenticated principal is not authorized for this operation"
+      },
+      "ok": false
+    }
+  },
+  "verdict": "PASS"
+}

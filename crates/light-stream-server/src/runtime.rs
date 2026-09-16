@@ -20,9 +20,9 @@ use light_stream_core::{
     LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, OperationalProof, PartitionId,
     PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest, PublishBatch,
     PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome,
-    RetentionRequest, RetentionResult, RetentionStatus, StreamBookmarkPage,
-    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
-    StreamName,
+    RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation, SecurityPolicy,
+    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
+    StreamLifecycle, StreamName,
 };
 use light_stream_storage::{
     ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
@@ -42,10 +42,12 @@ use crate::{
     config::PeerRoutes,
     manifest::{
         FormationSpec, GroupPoolConfig, LEGACY_NODE_MANIFEST_VERSION, LegacyNodeManifestV3,
-        NODE_MANIFEST_VERSION, NodeManifestV1, NodeManifestV2, PersistedNodeState,
+        NODE_MANIFEST_VERSION, NodeManifestV1, NodeManifestV2, PREVIOUS_NODE_MANIFEST_VERSION,
+        PersistedNodeState,
     },
     peer::{self, TonicNetworkFactory, wire},
     publish_scheduler::{PublishScheduler, PublishSchedulerConfig, PublishVerificationDelays},
+    security::{PeerRecoveryScope, RuntimeSecurityConfig},
 };
 
 pub(crate) type ControlRaft = Raft<ControlRaftConfig, RocksStateMachine<ControlRaftConfig>>;
@@ -116,6 +118,7 @@ struct ActiveCluster {
     administration_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     administration_delay: Option<Duration>,
     publish_leader_hints: Arc<StdRwLock<BTreeMap<u64, LeaderHint>>>,
+    security: RuntimeSecurityConfig,
     maintenance_shutdown: AtomicBool,
 }
 
@@ -203,19 +206,30 @@ pub struct ClusterManager {
     group_pool: GroupPoolConfig,
     publish_scheduler: PublishSchedulerConfig,
     verification_delays: VerificationDelayConfig,
+    security: RuntimeSecurityConfig,
     active: RwLock<Option<Arc<ActiveCluster>>>,
     bootstrap_lock: Mutex<()>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ClusterManagerConfig {
+    pub receipt_window: usize,
+    pub peer_routes: PeerRoutes,
+    pub group_pool: GroupPoolConfig,
+    pub publish_scheduler: PublishSchedulerConfig,
+    pub verification_delays: VerificationDelayConfig,
+    pub security: RuntimeSecurityConfig,
+}
+
 impl ClusterManager {
+    pub(crate) fn runtime_security(&self) -> &RuntimeSecurityConfig {
+        &self.security
+    }
+
     pub async fn open(
         data_dir: PathBuf,
         local: NodeDescriptor,
-        receipt_window: usize,
-        peer_routes: PeerRoutes,
-        group_pool: GroupPoolConfig,
-        publish_scheduler: PublishSchedulerConfig,
-        verification_delays: VerificationDelayConfig,
+        config: ClusterManagerConfig,
     ) -> Result<Self, DomainError> {
         let manifest = read_manifest(&data_dir)?;
         if manifest.is_none() && has_group_storage(&data_dir)? {
@@ -226,17 +240,21 @@ impl ClusterManager {
         let manager = Self {
             data_dir,
             local,
-            receipt_window,
-            peer_routes,
-            group_pool,
-            publish_scheduler,
-            verification_delays,
+            receipt_window: config.receipt_window,
+            peer_routes: config.peer_routes,
+            group_pool: config.group_pool,
+            publish_scheduler: config.publish_scheduler,
+            verification_delays: config.verification_delays,
+            security: config.security,
             active: RwLock::new(None),
             bootstrap_lock: Mutex::new(()),
         };
         if let Some(manifest) = manifest {
             let active = match manifest {
                 ActiveManifest::V1(manifest) => {
+                    manager.security.validate_durable_profile(
+                        &crate::manifest::DurableSecurityProfile::LocalInsecure,
+                    )?;
                     if !manager.peer_routes.is_empty() {
                         return Err(DomainError::InvalidName {
                             kind: "peer route".to_owned(),
@@ -245,7 +263,16 @@ impl ClusterManager {
                     }
                     manager.open_v1(manifest).await?
                 }
-                ActiveManifest::V2(manifest) => manager.open_v2(manifest).await?,
+                ActiveManifest::V2(manifest) => {
+                    let security_transition =
+                        manager.security.can_transition_from(&manifest.security);
+                    if !security_transition {
+                        manager
+                            .security
+                            .validate_durable_profile(&manifest.security)?;
+                    }
+                    manager.open_v2(manifest, security_transition).await?
+                }
             };
             let active = Arc::new(active);
             if let ActiveManifest::V2(manifest) = &*active.manifest.read().await {
@@ -264,9 +291,34 @@ impl ClusterManager {
         &self,
         command: BootstrapCommand,
     ) -> Result<BootstrapResult, DomainError> {
+        self.bootstrap_with_security(command, None).await
+    }
+
+    pub async fn bootstrap_secured(
+        &self,
+        command: BootstrapCommand,
+        policy: SecurityPolicy,
+    ) -> Result<BootstrapResult, DomainError> {
+        self.bootstrap_with_security(command, Some(policy)).await
+    }
+
+    async fn bootstrap_with_security(
+        &self,
+        command: BootstrapCommand,
+        security: Option<SecurityPolicy>,
+    ) -> Result<BootstrapResult, DomainError> {
         let _guard = self.bootstrap_lock.lock().await;
+        if let Some(policy) = &security {
+            self.security.validate_local_peer_policy(policy)?;
+        }
         match command.topology() {
             BootstrapTopology::Standalone => {
+                if security.is_some() {
+                    return Err(DomainError::UnsupportedOperation {
+                        operation: "secured standalone bootstrap".to_owned(),
+                        available_phase: "LS08 three-voter secured clusters".to_owned(),
+                    });
+                }
                 if !self.peer_routes.is_empty() {
                     return Err(DomainError::InvalidName {
                         kind: "peer route".to_owned(),
@@ -285,9 +337,10 @@ impl ClusterManager {
                     members.clone(),
                     self.group_pool.clone(),
                 )?;
+                self.security.validate_members(&formation.members)?;
                 self.peer_routes
                     .validate_topology(self.local.node_id(), &formation.members)?;
-                self.bootstrap_three_voter(formation).await
+                self.bootstrap_three_voter(formation, security).await
             }
         }
     }
@@ -330,6 +383,7 @@ impl ClusterManager {
     async fn bootstrap_three_voter(
         &self,
         formation: FormationSpec,
+        security: Option<SecurityPolicy>,
     ) -> Result<BootstrapResult, DomainError> {
         if formation.seed_node_id != self.local.node_id() {
             return Err(DomainError::BootstrapConflict {
@@ -362,10 +416,11 @@ impl ClusterManager {
             }
             active
         } else {
-            let manifest = NodeManifestV2::new(
+            let manifest = NodeManifestV2::new_with_security(
                 self.local.node_id(),
                 formation.clone(),
                 PersistedNodeState::Forming,
+                self.security.durable_profile(),
             )?;
             write_manifest(&self.data_dir, &manifest)?;
             let active = Arc::new(self.create_v2(manifest, true).await?);
@@ -378,10 +433,23 @@ impl ClusterManager {
         };
 
         if active.manifest.read().await.is_application_active() {
+            if security.as_ref().is_some_and(|expected| {
+                active
+                    .control_reader
+                    .security_policy()
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    != Some(expected)
+            }) {
+                return Err(DomainError::BootstrapConflict {
+                    reason: "security policy differs from the active cluster".to_owned(),
+                });
+            }
             self.activate_members(&formation).await?;
             return bootstrap_result(&formation.bootstrap);
         }
-        self.form_cluster(&active, &formation).await?;
+        self.form_cluster(&active, &formation, security).await?;
         bootstrap_result(&formation.bootstrap)
     }
 
@@ -389,6 +457,7 @@ impl ClusterManager {
         &self,
         active: &Arc<ActiveCluster>,
         formation: &FormationSpec,
+        security: Option<SecurityPolicy>,
     ) -> Result<(), DomainError> {
         let topology = topology_from_formation(formation)?;
         if prove_active(active, &formation.bootstrap, &topology)
@@ -400,7 +469,13 @@ impl ClusterManager {
         }
         for member in &formation.members {
             if member.node_id() != self.local.node_id() {
-                peer::prepare_remote(formation, self.local.node_id().get(), member).await?;
+                peer::prepare_remote(
+                    formation,
+                    self.local.node_id().get(),
+                    member,
+                    &self.security,
+                )
+                .await?;
             }
         }
 
@@ -433,6 +508,7 @@ impl ClusterManager {
                     formation.members.clone(),
                     formation.members.iter().map(|member| member.node_id()),
                 )?),
+                security,
                 data_groups: formation.group_pool.data_group_ids()?,
                 max_streams: formation.group_pool.max_streams,
                 max_partitions_per_stream: formation.group_pool.max_partitions_per_stream,
@@ -476,7 +552,14 @@ impl ClusterManager {
                 continue;
             }
             loop {
-                match peer::activate_remote(formation, self.local.node_id().get(), member).await {
+                match peer::activate_remote(
+                    formation,
+                    self.local.node_id().get(),
+                    member,
+                    &self.security,
+                )
+                .await
+                {
                     Ok(()) => break,
                     Err(error) if Instant::now() < deadline => {
                         let _ = error;
@@ -518,9 +601,13 @@ impl ClusterManager {
                 "group storage exists without a matching manifest",
             ));
         }
-        let manifest =
-            NodeManifestV2::new(self.local.node_id(), formation, PersistedNodeState::Joining)
-                .map_err(internal_status)?;
+        let manifest = NodeManifestV2::new_with_security(
+            self.local.node_id(),
+            formation,
+            PersistedNodeState::Joining,
+            self.security.durable_profile(),
+        )
+        .map_err(internal_status)?;
         write_manifest(&self.data_dir, &manifest).map_err(internal_status)?;
         let active = Arc::new(
             self.create_v2(manifest, true)
@@ -578,11 +665,12 @@ impl ClusterManager {
                 "group storage exists without a matching manifest",
             ));
         }
-        let manifest = NodeManifestV2::with_topology(
+        let manifest = NodeManifestV2::with_topology_and_security(
             self.local.node_id(),
             preparation.formation,
             preparation.topology,
             PersistedNodeState::Joining,
+            self.security.durable_profile(),
         )
         .map_err(internal_status)?;
         write_manifest(&self.data_dir, &manifest).map_err(internal_status)?;
@@ -1579,6 +1667,111 @@ impl ClusterManager {
             .then(|| manifest.cluster_id())
     }
 
+    pub(crate) fn peer_recovery_scope(&self, group_id: u64) -> PeerRecoveryScope {
+        if group_id == CONTROL_GROUP_ID {
+            PeerRecoveryScope::ControlGroup
+        } else {
+            PeerRecoveryScope::None
+        }
+    }
+
+    pub async fn security_policy(&self) -> Result<Option<SecurityPolicy>, DomainError> {
+        let active = self.active.read().await;
+        match active.as_ref() {
+            Some(active) => active.control_reader.security_policy(),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn confirmed_security_policy(&self) -> Result<SecurityPolicy, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_control(&active).await?;
+        active
+            .control_reader
+            .security_policy()?
+            .ok_or(DomainError::SecurityPolicyStale)
+    }
+
+    pub async fn apply_security_mutation(
+        &self,
+        mutation: SecurityMutation,
+    ) -> Result<SecurityPolicy, DomainError> {
+        let request = mutation.request().clone();
+        let active = self.application_cluster().await?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            active
+                .control
+                .client_write(GroupCommand::ApplySecurityMutation { mutation }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Control,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: Some(AmbiguousRequest::Mutation { request }),
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Control))?;
+        match response.data {
+            ApplyResult::SecurityPolicy(policy) => Ok(policy),
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected security policy apply result {other}"),
+            }),
+        }
+    }
+
+    pub async fn activate_secured_transport(
+        &self,
+        cluster: ClusterId,
+        request: light_stream_core::MutationRequestId,
+        expected_topology_revision: u64,
+        nodes: Vec<NodeDescriptor>,
+        policy: SecurityPolicy,
+    ) -> Result<SecurityPolicy, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_control(&active).await?;
+        validate_cluster(&active, cluster).await?;
+        let current =
+            active
+                .control_reader
+                .cluster_topology()?
+                .ok_or_else(|| DomainError::Storage {
+                    reason: "control topology is missing".to_owned(),
+                })?;
+        if current.revision() != expected_topology_revision {
+            return Err(DomainError::SecurityPolicyConflict);
+        }
+        let topology = ClusterTopology::try_new(
+            expected_topology_revision.saturating_add(1),
+            nodes,
+            current.desired_voters().iter().copied(),
+        )?;
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            active
+                .control
+                .client_write(GroupCommand::ActivateSecuredTransport {
+                    request,
+                    topology,
+                    policy,
+                }),
+        )
+        .await
+        .map_err(|_| DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Control,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request: None,
+        })?
+        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Control))?;
+        match response.data {
+            ApplyResult::SecurityPolicy(policy) => Ok(policy),
+            ApplyResult::Rejected(error) => Err(error),
+            other => Err(DomainError::Storage {
+                reason: format!("unexpected secured transport apply result {other}"),
+            }),
+        }
+    }
+
     pub async fn diagnostics(&self) -> NodeDiagnostic {
         let active = self.active.read().await.as_ref().cloned();
         let Some(active) = active else {
@@ -1889,6 +2082,7 @@ impl ClusterManager {
             administration_task: Mutex::new(None),
             administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
             publish_leader_hints,
+            security: self.security.clone(),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -1996,6 +2190,7 @@ impl ClusterManager {
                     [self.local.clone()],
                     [self.local.node_id()],
                 )?),
+                security: None,
                 data_groups: manifest.group_pool.data_group_ids()?,
                 max_streams: manifest.group_pool.max_streams,
                 max_partitions_per_stream: manifest.group_pool.max_partitions_per_stream,
@@ -2025,19 +2220,60 @@ impl ClusterManager {
             administration_task: Mutex::new(None),
             administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
             publish_leader_hints,
+            security: self.security.clone(),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
 
-    async fn open_v2(&self, manifest: NodeManifestV2) -> Result<ActiveCluster, DomainError> {
-        manifest.validate_local(&self.local)?;
+    async fn open_v2(
+        &self,
+        manifest: NodeManifestV2,
+        security_transition: bool,
+    ) -> Result<ActiveCluster, DomainError> {
+        if !security_transition {
+            manifest.validate_local(&self.local)?;
+        }
         let active = self
             .create_v2(
                 manifest.clone(),
                 manifest.state != PersistedNodeState::Active,
             )
             .await?;
+        if security_transition {
+            let policy = active
+                .control_reader
+                .security_policy()?
+                .ok_or(DomainError::SecurityPolicyStale)?;
+            if self.security.bootstrap_policy() != Some(&policy) {
+                return Err(DomainError::SecurityPolicyConflict);
+            }
+            self.security.validate_local_peer_policy(&policy)?;
+            self.security.renew_policy(policy)?;
+            let mut durable = active.manifest.write().await;
+            let ActiveManifest::V2(durable) = &mut *durable else {
+                return Err(DomainError::Storage {
+                    reason: "secured transition requires a replicated manifest".to_owned(),
+                });
+            };
+            durable.security = self.security.durable_profile();
+            durable.validate_local(&self.local)?;
+        }
         if manifest.state == PersistedNodeState::Active {
+            if let crate::manifest::DurableSecurityProfile::Secured {
+                minimum_policy_revision,
+                ..
+            } = manifest.security
+            {
+                let policy = active
+                    .control_reader
+                    .security_policy()?
+                    .ok_or(DomainError::SecurityPolicyStale)?;
+                if policy.revision() < minimum_policy_revision {
+                    return Err(DomainError::SecurityPolicyStale);
+                }
+                self.security.validate_local_peer_policy(&policy)?;
+                self.security.renew_policy(policy)?;
+            }
             wait_active_local_recovery(&active, &manifest.formation.bootstrap, &manifest.topology)
                 .await?;
         } else if manifest.state == PersistedNodeState::Forming
@@ -2117,6 +2353,7 @@ impl ClusterManager {
                 self.local.node_id().get(),
                 peer_topology.clone(),
                 self.peer_routes.clone(),
+                self.security.clone(),
             ),
             control_handles.log_store,
             control_handles.state_machine,
@@ -2156,6 +2393,7 @@ impl ClusterManager {
                     self.local.node_id().get(),
                     peer_topology.clone(),
                     self.peer_routes.clone(),
+                    self.security.clone(),
                 ),
                 handles.log_store,
                 handles.state_machine,
@@ -2202,6 +2440,7 @@ impl ClusterManager {
             administration_task: Mutex::new(None),
             administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
             publish_leader_hints,
+            security: self.security.clone(),
             maintenance_shutdown: AtomicBool::new(false),
         })
     }
@@ -2478,6 +2717,7 @@ async fn reconcile_administration(
                 },
                 control_metrics.id,
                 add,
+                &active.security,
             )
             .await?;
             let desired = topology
@@ -2524,6 +2764,7 @@ async fn reconcile_administration(
                         },
                         sender_node_id,
                         removed,
+                        &active.security,
                     )
                     .await?;
                 }
@@ -2534,6 +2775,7 @@ async fn reconcile_administration(
                     },
                     sender_node_id,
                     add,
+                    &active.security,
                 )
                 .await?;
                 control_administration_write(
@@ -3916,6 +4158,12 @@ fn read_manifest(data_dir: &Path) -> Result<Option<ActiveManifest>, DomainError>
             let manifest: NodeManifestV2 = serde_json::from_slice(&bytes).map_err(storage_error)?;
             Ok(Some(ActiveManifest::V2(manifest)))
         }
+        PREVIOUS_NODE_MANIFEST_VERSION => {
+            let mut manifest: NodeManifestV2 =
+                serde_json::from_slice(&bytes).map_err(storage_error)?;
+            manifest.format_version = NODE_MANIFEST_VERSION;
+            Ok(Some(ActiveManifest::V2(manifest)))
+        }
         LEGACY_NODE_MANIFEST_VERSION => {
             let legacy: LegacyNodeManifestV3 =
                 serde_json::from_slice(&bytes).map_err(storage_error)?;
@@ -3983,10 +4231,7 @@ fn validate_group_directories(data_dir: &Path, data_groups: &[GroupId]) -> Resul
 }
 
 fn unsupported_claims() -> Vec<String> {
-    vec![
-        "secured_mode:UNSUPPORTED_LS08".to_owned(),
-        "independent_hosts:BLOCKED".to_owned(),
-    ]
+    vec!["independent_hosts:BLOCKED".to_owned()]
 }
 
 fn raft_fatal(error: impl std::fmt::Display) -> DomainError {
@@ -4029,23 +4274,26 @@ mod tests {
         )
     }
 
+    fn manager_config() -> ClusterManagerConfig {
+        ClusterManagerConfig {
+            receipt_window: 8,
+            peer_routes: PeerRoutes::default(),
+            group_pool: GroupPoolConfig::default(),
+            publish_scheduler: PublishSchedulerConfig::default(),
+            verification_delays: (None, None),
+            security: RuntimeSecurityConfig::LocalInsecure,
+        }
+    }
+
     #[tokio::test]
     async fn bootstrap_is_explicit_and_idempotent() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/test-data/light-stream-server/bootstrap");
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
-        let manager = ClusterManager::open(
-            path.clone(),
-            local(1),
-            8,
-            PeerRoutes::default(),
-            GroupPoolConfig::default(),
-            PublishSchedulerConfig::default(),
-            (None, None),
-        )
-        .await
-        .unwrap();
+        let manager = ClusterManager::open(path.clone(), local(1), manager_config())
+            .await
+            .unwrap();
         assert!(manager.identity().await.is_none());
         let spec = BootstrapSpec::new(
             ClusterId::from_uuid(Uuid::new_v4()),
@@ -4063,17 +4311,9 @@ mod tests {
         assert_eq!(first, second);
         manager.shutdown().await.unwrap();
         drop(manager);
-        let reopened = ClusterManager::open(
-            path.clone(),
-            local(1),
-            8,
-            PeerRoutes::default(),
-            GroupPoolConfig::default(),
-            PublishSchedulerConfig::default(),
-            (None, None),
-        )
-        .await
-        .unwrap();
+        let reopened = ClusterManager::open(path.clone(), local(1), manager_config())
+            .await
+            .unwrap();
         assert!(reopened.identity().await.is_some());
         reopened.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(path);
@@ -4085,18 +4325,10 @@ mod tests {
             .join("../../target/test-data/light-stream-server/orphan-groups");
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(path.join("groups/1")).unwrap();
-        let error = ClusterManager::open(
-            path.clone(),
-            local(1),
-            8,
-            PeerRoutes::default(),
-            GroupPoolConfig::default(),
-            PublishSchedulerConfig::default(),
-            (None, None),
-        )
-        .await
-        .err()
-        .unwrap();
+        let error = ClusterManager::open(path.clone(), local(1), manager_config())
+            .await
+            .err()
+            .unwrap();
         assert!(matches!(error, DomainError::Storage { .. }));
         let _ = fs::remove_dir_all(path);
     }
@@ -4129,17 +4361,9 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let manager = ClusterManager::open(
-            path.clone(),
-            local(2),
-            8,
-            PeerRoutes::default(),
-            GroupPoolConfig::default(),
-            PublishSchedulerConfig::default(),
-            (None, None),
-        )
-        .await
-        .unwrap();
+        let manager = ClusterManager::open(path.clone(), local(2), manager_config())
+            .await
+            .unwrap();
         assert!(path.join("groups/1/rocksdb").is_dir());
         assert!(path.join("groups/2/rocksdb").is_dir());
         assert!(manager.identity().await.is_none());

@@ -1,0 +1,38 @@
+{
+  "checkpoint": "secured-runtime",
+  "verdict": "PASS",
+  "source_revision": "07ed07c509c1b21f3803e3946b715350ce678bc73c85981907621031e1561feb",
+  "functional": {
+    "evidence": "artifacts/LS08/final-5",
+    "security_mode": "secured",
+    "three_voter_failover": true,
+    "plaintext_to_secured_migration": true,
+    "token_rotation": true,
+    "peer_certificate_rotation": true,
+    "inbound_rogue_peer_status": "UNAUTHENTICATED",
+    "stale_policy_refused": true,
+    "secret_canaries_absent": true,
+    "maximum_revocation_seconds": 0.13897362500000554,
+    "secured_health_p99_seconds": 0.023985124999995833,
+    "success_data_removed": true
+  },
+  "performance": {
+    "evidence": "artifacts/LS08/perf-7",
+    "publish_throughput_ratio": 1.0187292469750724,
+    "publish_p99_ratio": 0.9966084246031325,
+    "fetch_p99_ratio": 1.0695956458408016,
+    "minimum_throughput_ratio": 0.9,
+    "maximum_p99_ratio": 1.2
+  },
+  "binary_fingerprints": {
+    "light-streamd": "e2d6fdee1b649ab127bba248fe1837c3a698bf3f70cfc0ac0ee34f2eb5343aed",
+    "light-streamctl": "53f94f89d54b309c6781d7486fade73cdd85c213630f8eeb8d83502799ab0249",
+    "light-stream-testkit": "bdf0f3f7374990ad7f10a69f8ce3627a039debe50e6895cf5a4ab372fee52862"
+  },
+  "independent_security_review": "NOT_REQUESTED",
+  "pending": [
+    "independent-host verification",
+    "secured CPU and memory measurement",
+    "operator review"
+  ]
+}

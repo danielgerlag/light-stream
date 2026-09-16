@@ -1,11 +1,16 @@
 use std::{
+    fs,
     future::Future,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use light_stream_core::{
     AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
@@ -17,8 +22,8 @@ use light_stream_core::{
     NodeDescriptor, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId,
     ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, ReplayLease,
     ReplayLeaseId, ReplayLeaseRequest, RequestOutcome, RequestSequence, RetentionRequest,
-    RetentionResult, RetentionStatus, SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamDescriptor, StreamId, StreamName,
+    RetentionResult, RetentionStatus, SecurityMode, SecurityMutation, StreamBookmarkPage,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamName,
 };
 use light_stream_proto::{
     bookmark_from_wire, checkpoint_cas_from_wire, checkpoint_from_wire, checkpoint_key_to_wire,
@@ -30,8 +35,8 @@ use light_stream_proto::{
         bootstrap_response, fetch_response, get_checkpoint_response,
         light_stream_client::LightStreamClient, list_bookmarks_response,
         list_stream_bookmarks_response, list_streams_response, publish_response, receipt_response,
-        replay_lease_response, retention_status_response, route_response, snapshot_group_response,
-        stream_bookmark_response, stream_response,
+        replay_lease_response, retention_status_response, route_response, security_policy_response,
+        snapshot_group_response, stream_bookmark_response, stream_response,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -39,10 +44,61 @@ use thiserror::Error;
 use tokio::sync::Notify;
 use tonic::{
     Code, Request, Response, Status,
-    transport::{Channel, Endpoint},
+    metadata::{Ascii, MetadataValue},
+    service::{Interceptor, interceptor::InterceptedService},
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
 };
+use zeroize::Zeroizing;
 
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
+const MAX_CLIENT_SECURITY_FILE_BYTES: u64 = 1024 * 1024;
+
+type ApiClient = LightStreamClient<InterceptedService<Channel, AuthInterceptor>>;
+
+#[derive(Clone)]
+enum ClientSecurity {
+    LocalInsecure,
+    Secured(Arc<SecuredClientSecurity>),
+}
+
+#[derive(Clone)]
+struct SecuredClientSecurity {
+    ca_certificate: Vec<u8>,
+    credential_file: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientSecurityFile {
+    version: u32,
+    ca_certificate_file: PathBuf,
+    credential_file: PathBuf,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClientCredentialFile {
+    version: u32,
+    credential_id: String,
+    generation: u64,
+    token: String,
+}
+
+#[derive(Clone)]
+struct AuthInterceptor {
+    authorization: Option<MetadataValue<Ascii>>,
+}
+
+impl Interceptor for AuthInterceptor {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        if let Some(authorization) = &self.authorization {
+            request
+                .metadata_mut()
+                .insert("authorization", authorization.clone());
+        }
+        Ok(request)
+    }
+}
 
 #[derive(Clone, Copy)]
 struct Deadline {
@@ -210,6 +266,8 @@ pub enum ClientError {
     Request(String),
     #[error("invalid server response: {0}")]
     Protocol(String),
+    #[error("invalid security configuration: {0}")]
+    SecurityConfiguration(String),
     #[error("request was interrupted by {reason:?} with outcome {outcome:?}")]
     Interrupted {
         reason: Interruption,
@@ -259,6 +317,9 @@ impl ClientError {
                 | DomainError::MutationReceiptExpired
                 | DomainError::PublishOverloaded { .. }
                 | DomainError::ResourceLimit { .. }
+                | DomainError::SecurityAuthenticationFailed
+                | DomainError::SecurityPermissionDenied
+                | DomainError::SecurityPolicyConflict
                 | DomainError::StaleRoute,
             ) => 4,
             Self::Domain(
@@ -267,9 +328,11 @@ impl ClientError {
                 | DomainError::NotLeader { .. }
                 | DomainError::QuorumUnavailable { .. }
                 | DomainError::ClusterForming
+                | DomainError::SecurityPolicyStale
                 | DomainError::LeaseClockUnavailable,
             ) => 5,
             Self::InvalidEndpoint { .. } => 2,
+            Self::SecurityConfiguration(_) => 2,
             _ => 1,
         }
     }
@@ -354,12 +417,20 @@ pub struct AdministrationStatus {
     pub target_node_id: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SecurityPolicyStatus {
+    pub cluster_id: ClusterId,
+    pub policy_revision: u64,
+    pub revocation_revision: u64,
+}
+
 #[derive(Clone)]
 pub struct Client {
     endpoint: String,
     seeds: Vec<String>,
     deadline: Duration,
     retry: bool,
+    security: ClientSecurity,
 }
 
 impl Client {
@@ -373,6 +444,34 @@ impl Client {
         deadline: Duration,
         retry: bool,
     ) -> Result<Self, ClientError> {
+        Self::connect_with_security(
+            endpoint,
+            seeds,
+            deadline,
+            retry,
+            ClientSecurity::LocalInsecure,
+        )
+        .await
+    }
+
+    pub async fn connect_secured(
+        endpoint: impl Into<String>,
+        seeds: Vec<String>,
+        deadline: Duration,
+        retry: bool,
+        security_config: impl AsRef<Path>,
+    ) -> Result<Self, ClientError> {
+        let security = load_client_security(security_config.as_ref())?;
+        Self::connect_with_security(endpoint, seeds, deadline, retry, security).await
+    }
+
+    async fn connect_with_security(
+        endpoint: impl Into<String>,
+        seeds: Vec<String>,
+        deadline: Duration,
+        retry: bool,
+        security: ClientSecurity,
+    ) -> Result<Self, ClientError> {
         let endpoint = endpoint.into();
         if deadline.is_zero() {
             return Err(ClientError::InvalidEndpoint {
@@ -380,9 +479,11 @@ impl Client {
                 reason: "deadline must be greater than zero".to_owned(),
             });
         }
+        validate_security_endpoint(&security, &endpoint)?;
         let mut all_seeds = vec![endpoint.clone()];
         for seed in seeds {
             validate_endpoint(&seed)?;
+            validate_security_endpoint(&security, &seed)?;
             if !all_seeds.contains(&seed) {
                 all_seeds.push(seed);
             }
@@ -393,6 +494,7 @@ impl Client {
             seeds: all_seeds,
             deadline,
             retry,
+            security,
         })
     }
 
@@ -400,14 +502,11 @@ impl Client {
         &self.endpoint
     }
 
-    async fn connect_initial(
-        &self,
-        deadline: Deadline,
-    ) -> Result<LightStreamClient<Channel>, AttemptError> {
+    async fn connect_initial(&self, deadline: Deadline) -> Result<ApiClient, AttemptError> {
         let mut index = 0usize;
         loop {
             let endpoint = &self.seeds[index % self.seeds.len()];
-            match connect_client(endpoint, deadline).await {
+            match connect_client(endpoint, deadline, &self.security).await {
                 Ok(client) => return Ok(client),
                 Err(AttemptError::Client(ClientError::Connection(_))) if self.retry => {}
                 Err(error) => return Err(error),
@@ -416,6 +515,7 @@ impl Client {
                 return Err(AttemptError::Deadline);
             }
             index = index.wrapping_add(1);
+            retry_sleep(deadline).await?;
         }
     }
 
@@ -618,7 +718,7 @@ impl Client {
         let mut index = 0usize;
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
-            let response = match connect_client(&endpoint, deadline).await {
+            let response = match connect_client(&endpoint, deadline, &self.security).await {
                 Ok(mut client) => {
                     execute_rpc(deadline, request.clone(), |value| {
                         client.create_stream(value)
@@ -786,7 +886,7 @@ impl Client {
         };
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
-            let result = match connect_client(&endpoint, deadline).await {
+            let result = match connect_client(&endpoint, deadline, &self.security).await {
                 Ok(mut client) => {
                     execute_rpc(deadline, request.clone(), |value| {
                         client.resolve_route(value)
@@ -1338,6 +1438,64 @@ impl Client {
             .map_err(|error| request_attempt_error("receipt", error))
     }
 
+    pub async fn security_policy(
+        &self,
+        cluster: ClusterId,
+    ) -> Result<SecurityPolicyStatus, ClientError> {
+        self.security_policy_operation(
+            v1::GetSecurityPolicyRequest {
+                cluster_id: cluster.to_string(),
+            },
+            None,
+        )
+        .await
+    }
+
+    pub async fn apply_security_mutation(
+        &self,
+        cluster: ClusterId,
+        mutation: SecurityMutation,
+    ) -> Result<SecurityPolicyStatus, ClientError> {
+        self.security_policy_operation(
+            v1::GetSecurityPolicyRequest {
+                cluster_id: cluster.to_string(),
+            },
+            Some((
+                serde_json::to_string(&mutation)
+                    .map_err(|error| ClientError::Protocol(error.to_string()))?,
+                mutation.request().clone(),
+            )),
+        )
+        .await
+    }
+
+    pub async fn activate_secured_transport(
+        &self,
+        cluster: ClusterId,
+        request_id: light_stream_core::MutationRequestId,
+        expected_topology_revision: u64,
+        nodes: Vec<NodeDescriptor>,
+        policy: light_stream_core::SecurityPolicy,
+    ) -> Result<SecurityPolicyStatus, ClientError> {
+        let request = v1::ActivateSecuredTransportRequest {
+            cluster_id: cluster.to_string(),
+            request_id: Some(mutation_request_id_to_wire(&request_id)),
+            expected_topology_revision,
+            nodes: nodes
+                .into_iter()
+                .map(|node| v1::NodeDescriptor {
+                    node_id: node.node_id().get(),
+                    public_uri: node.public_uri().to_owned(),
+                    peer_uri: node.peer_uri().to_owned(),
+                })
+                .collect(),
+            policy_json: serde_json::to_string(&policy)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?,
+        };
+        self.security_transition_operation(request, request_id)
+            .await
+    }
+
     pub async fn checkpoint(&self, key: CheckpointKey) -> Result<CommittedCheckpoint, ClientError> {
         let deadline = Deadline::after(self.deadline);
         let route = self
@@ -1358,6 +1516,7 @@ impl Client {
         if let Some(leader) = route.leader {
             add_hint(&mut endpoints, leader.public_uri())?;
         }
+
         let mut index = 0usize;
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
@@ -1671,7 +1830,7 @@ impl Client {
         let mut index = 0usize;
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
-            let mut client = connect_client(&endpoint, deadline)
+            let mut client = connect_client(&endpoint, deadline, &self.security)
                 .await
                 .map_err(|error| request_attempt_error("list bookmarks", error))?;
             let response = execute_rpc(deadline, wire_request.clone(), |request| {
@@ -1833,7 +1992,7 @@ impl Client {
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
             let mut next_index = index.wrapping_add(1);
-            let mut client = match connect_client(&endpoint, deadline).await {
+            let mut client = match connect_client(&endpoint, deadline, &self.security).await {
                 Ok(client) => client,
                 Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
                 Err(_) if self.retry => {
@@ -2193,7 +2352,7 @@ impl Client {
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
             let mut next_index = index.wrapping_add(1);
-            let mut client = match connect_client(&endpoint, deadline).await {
+            let mut client = match connect_client(&endpoint, deadline, &self.security).await {
                 Ok(client) => client,
                 Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
                 Err(_) if self.retry => {
@@ -2300,7 +2459,7 @@ impl Client {
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
             let mut next_index = index.wrapping_add(1);
-            let mut client = match connect_client(&endpoint, deadline).await {
+            let mut client = match connect_client(&endpoint, deadline, &self.security).await {
                 Ok(client) => client,
                 Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
                 Err(_) if self.retry => {
@@ -2464,7 +2623,7 @@ impl Client {
         let mut index = 0usize;
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
-            let mut client = connect_client(&endpoint, deadline)
+            let mut client = connect_client(&endpoint, deadline, &self.security)
                 .await
                 .map_err(|error| request_attempt_error("list stream bookmarks", error))?;
             let response = execute_rpc(deadline, wire_request.clone(), |request| {
@@ -2518,7 +2677,7 @@ impl Client {
         let mut index = 0usize;
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
-            let mut client = connect_client(&endpoint, deadline)
+            let mut client = connect_client(&endpoint, deadline, &self.security)
                 .await
                 .map_err(|error| request_attempt_error(operation, error))?;
             let response = match call.clone() {
@@ -2580,7 +2739,7 @@ impl Client {
         let mut index = 0usize;
         loop {
             let endpoint = endpoints[index % endpoints.len()].clone();
-            let mut client = connect_client(&endpoint, deadline)
+            let mut client = connect_client(&endpoint, deadline, &self.security)
                 .await
                 .map_err(|error| request_attempt_error(operation, error))?;
             let response = match call.clone() {
@@ -2795,7 +2954,7 @@ impl Client {
         call: AdministrationCall,
         deadline: Deadline,
     ) -> Result<AdministrationStatus, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let response = match call {
             AdministrationCall::Replace(request) => {
                 let (request, timeout) = timed_request(deadline, request)?;
@@ -2815,6 +2974,201 @@ impl Client {
             }
         };
         administration_status_from_wire(response).map_err(AttemptError::Client)
+    }
+
+    async fn security_policy_operation(
+        &self,
+        request: v1::GetSecurityPolicyRequest,
+        mutation: Option<(String, light_stream_core::MutationRequestId)>,
+    ) -> Result<SecurityPolicyStatus, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut client = match connect_client(&endpoint, deadline, &self.security).await {
+                Ok(client) => client,
+                Err(AttemptError::Deadline) => {
+                    return Err(match &mutation {
+                        Some((_, request)) => {
+                            mutation_deadline_error(request.clone(), request_may_have_reached)
+                        }
+                        None => non_write_deadline_error(),
+                    });
+                }
+                Err(AttemptError::Client(ClientError::Connection(_) | ClientError::Request(_)))
+                    if self.retry =>
+                {
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    index = index.wrapping_add(1);
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("security policy", error)),
+            };
+            let response = match &mutation {
+                Some((mutation_json, mutation_id)) => {
+                    let (request, timeout) = timed_request(
+                        deadline,
+                        v1::ApplySecurityMutationRequest {
+                            cluster_id: request.cluster_id.clone(),
+                            mutation_json: mutation_json.clone(),
+                        },
+                    )
+                    .map_err(|_| {
+                        mutation_deadline_error(mutation_id.clone(), request_may_have_reached)
+                    })?;
+                    request_may_have_reached = true;
+                    await_rpc(deadline, timeout, client.apply_security_mutation(request)).await
+                }
+                None => {
+                    execute_rpc(deadline, request.clone(), |request| {
+                        client.get_security_policy(request)
+                    })
+                    .await
+                }
+            };
+            let response = match response {
+                Ok(response) => response,
+                Err(AttemptError::Deadline) => {
+                    return Err(match &mutation {
+                        Some((_, request)) => {
+                            mutation_deadline_error(request.clone(), request_may_have_reached)
+                        }
+                        None => non_write_deadline_error(),
+                    });
+                }
+                Err(AttemptError::Client(ClientError::Connection(_) | ClientError::Request(_)))
+                    if self.retry =>
+                {
+                    retry_sleep(deadline)
+                        .await
+                        .map_err(|_| non_write_deadline_error())?;
+                    index = index.wrapping_add(1);
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("security policy", error)),
+            };
+            match response.result {
+                Some(security_policy_response::Result::Policy(policy)) => {
+                    return Ok(SecurityPolicyStatus {
+                        cluster_id: policy.cluster_id.parse()?,
+                        policy_revision: policy.policy_revision,
+                        revocation_revision: policy.revocation_revision,
+                    });
+                }
+                Some(security_policy_response::Result::Error(value)) => {
+                    let error = decode_domain_error(value)?;
+                    if let DomainError::NotLeader {
+                        leader: Some(leader),
+                        ..
+                    } = &error
+                        && self.retry
+                    {
+                        index = add_hint(&mut endpoints, leader.public_uri())?;
+                        retry_sleep(deadline)
+                            .await
+                            .map_err(|_| non_write_deadline_error())?;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                None => {
+                    return Err(ClientError::Protocol(
+                        "security policy response omitted its typed result".to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn security_transition_operation(
+        &self,
+        request: v1::ActivateSecuredTransportRequest,
+        request_id: light_stream_core::MutationRequestId,
+    ) -> Result<SecurityPolicyStatus, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut client = match connect_client(&endpoint, deadline, &self.security).await {
+                Ok(client) => client,
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(
+                        request_id,
+                        request_may_have_reached,
+                    ));
+                }
+                Err(AttemptError::Client(ClientError::Connection(_) | ClientError::Request(_)))
+                    if self.retry =>
+                {
+                    retry_sleep(deadline).await.map_err(|_| {
+                        mutation_deadline_error(request_id.clone(), request_may_have_reached)
+                    })?;
+                    index = index.wrapping_add(1);
+                    continue;
+                }
+                Err(error) => return Err(request_attempt_error("security transition", error)),
+            };
+            let (rpc, timeout) = timed_request(deadline, request.clone()).map_err(|_| {
+                mutation_deadline_error(request_id.clone(), request_may_have_reached)
+            })?;
+            request_may_have_reached = true;
+            let response =
+                match await_rpc(deadline, timeout, client.activate_secured_transport(rpc)).await {
+                    Ok(response) => response,
+                    Err(AttemptError::Deadline) => {
+                        return Err(mutation_deadline_error(
+                            request_id,
+                            request_may_have_reached,
+                        ));
+                    }
+                    Err(AttemptError::Client(
+                        ClientError::Connection(_) | ClientError::Request(_),
+                    )) if self.retry => {
+                        retry_sleep(deadline).await.map_err(|_| {
+                            mutation_deadline_error(request_id.clone(), request_may_have_reached)
+                        })?;
+                        index = index.wrapping_add(1);
+                        continue;
+                    }
+                    Err(error) => return Err(request_attempt_error("security transition", error)),
+                };
+            match response.result {
+                Some(security_policy_response::Result::Policy(policy)) => {
+                    return Ok(SecurityPolicyStatus {
+                        cluster_id: policy.cluster_id.parse()?,
+                        policy_revision: policy.policy_revision,
+                        revocation_revision: policy.revocation_revision,
+                    });
+                }
+                Some(security_policy_response::Result::Error(value)) => {
+                    let error = decode_domain_error(value)?;
+                    if let DomainError::NotLeader {
+                        leader: Some(leader),
+                        ..
+                    } = &error
+                        && self.retry
+                    {
+                        index = add_hint(&mut endpoints, leader.public_uri())?;
+                        retry_sleep(deadline).await.map_err(|_| {
+                            mutation_deadline_error(request_id.clone(), request_may_have_reached)
+                        })?;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                None => {
+                    return Err(ClientError::Protocol(
+                        "security transition response omitted its typed result".to_owned(),
+                    ));
+                }
+            }
+        }
     }
 
     async fn finish_interrupted_publish(
@@ -2930,7 +3284,7 @@ impl Client {
         deadline: Deadline,
         request_may_have_reached: &mut bool,
     ) -> Result<PublishReceipt, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let (request, timeout) = timed_request(deadline, request)?;
         *request_may_have_reached = true;
         let response = await_rpc(deadline, timeout, client.commit_publish(request)).await?;
@@ -2961,7 +3315,7 @@ impl Client {
         deadline: Deadline,
         request_may_have_reached: &mut bool,
     ) -> Result<RetentionResult, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let (request, timeout) = timed_request(deadline, request)?;
         *request_may_have_reached = true;
         let response = await_rpc(deadline, timeout, client.advance_retention(request)).await?;
@@ -2987,7 +3341,7 @@ impl Client {
         deadline: Deadline,
         request_may_have_reached: &mut bool,
     ) -> Result<ReplayLease, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         *request_may_have_reached = true;
         let response = match call {
             ReplayMutationCall::Admit(request) => {
@@ -3022,7 +3376,7 @@ impl Client {
         request: v1::FetchRequest,
         deadline: Deadline,
     ) -> Result<FetchPage, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let response = execute_rpc(deadline, request, |request| client.fetch(request)).await?;
         match response.result {
             Some(fetch_response::Result::Success(value)) => {
@@ -3057,7 +3411,7 @@ impl Client {
         request: v1::ReceiptRequest,
         deadline: Deadline,
     ) -> Result<PublishReceipt, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let response =
             execute_rpc(deadline, request, |request| client.get_receipt(request)).await?;
         match response.result {
@@ -3079,7 +3433,7 @@ impl Client {
         request: v1::GetCheckpointRequest,
         deadline: Deadline,
     ) -> Result<CommittedCheckpoint, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let response =
             execute_rpc(deadline, request, |request| client.get_checkpoint(request)).await?;
         match response.result {
@@ -3102,7 +3456,7 @@ impl Client {
         deadline: Deadline,
         request_may_have_reached: &mut bool,
     ) -> Result<CheckpointCasResult, AttemptError> {
-        let mut client = connect_client(endpoint, deadline).await?;
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
         let (request, timeout) = timed_request(deadline, request)?;
         *request_may_have_reached = true;
         let response = await_rpc(
@@ -3212,14 +3566,150 @@ fn decode_domain_error(value: v1::ErrorResult) -> Result<DomainError, ClientErro
 async fn connect_client(
     endpoint: &str,
     deadline: Deadline,
-) -> Result<LightStreamClient<Channel>, AttemptError> {
-    let channel = connect_channel(endpoint, deadline).await?;
-    Ok(LightStreamClient::new(channel)
+    security: &ClientSecurity,
+) -> Result<ApiClient, AttemptError> {
+    let channel = connect_channel(endpoint, deadline, security).await?;
+    let interceptor = AuthInterceptor {
+        authorization: load_authorization(security)?,
+    };
+    Ok(LightStreamClient::with_interceptor(channel, interceptor)
         .max_decoding_message_size(MAX_PUBLIC_MESSAGE_BYTES)
         .max_encoding_message_size(MAX_PUBLIC_MESSAGE_BYTES))
 }
 
-async fn connect_channel(endpoint: &str, deadline: Deadline) -> Result<Channel, AttemptError> {
+fn load_client_security(path: &Path) -> Result<ClientSecurity, ClientError> {
+    let bytes = read_client_file(path, false)?;
+    let config: ClientSecurityFile = serde_json::from_slice(&bytes).map_err(|error| {
+        ClientError::SecurityConfiguration(format!(
+            "client security config {} is invalid: {error}",
+            path.display()
+        ))
+    })?;
+    if config.version != 1 {
+        return Err(ClientError::SecurityConfiguration(format!(
+            "client security config version {} is unsupported",
+            config.version
+        )));
+    }
+    if !config.ca_certificate_file.is_absolute() || !config.credential_file.is_absolute() {
+        return Err(ClientError::SecurityConfiguration(
+            "client security material paths must be absolute".to_owned(),
+        ));
+    }
+    Ok(ClientSecurity::Secured(Arc::new(SecuredClientSecurity {
+        ca_certificate: read_client_file(&config.ca_certificate_file, false)?,
+        credential_file: config.credential_file,
+    })))
+}
+
+fn load_authorization(
+    security: &ClientSecurity,
+) -> Result<Option<MetadataValue<Ascii>>, AttemptError> {
+    let ClientSecurity::Secured(security) = security else {
+        return Ok(None);
+    };
+    let bytes = Zeroizing::new(read_client_file(&security.credential_file, true)?);
+    let credential: ClientCredentialFile = serde_json::from_slice(&bytes).map_err(|error| {
+        ClientError::SecurityConfiguration(format!(
+            "credential file {} is invalid: {error}",
+            security.credential_file.display()
+        ))
+    })?;
+    if credential.version != 1 {
+        return Err(ClientError::SecurityConfiguration(format!(
+            "credential file version {} is unsupported",
+            credential.version
+        ))
+        .into());
+    }
+    let id = light_stream_core::CredentialId::parse(&credential.credential_id)
+        .map_err(ClientError::Domain)?;
+    let generation = light_stream_core::CredentialGeneration::new(credential.generation)
+        .map_err(ClientError::Domain)?;
+    let token = Zeroizing::new(credential.token);
+    let expected_prefix = format!("ls1.{}.{}.", id.as_str(), generation.get());
+    if !token.starts_with(&expected_prefix) {
+        return Err(ClientError::SecurityConfiguration(
+            "credential token identity does not match its file metadata".to_owned(),
+        )
+        .into());
+    }
+    let value = MetadataValue::try_from(format!("Bearer {}", token.as_str())).map_err(|_| {
+        ClientError::SecurityConfiguration(
+            "credential token cannot be encoded as request metadata".to_owned(),
+        )
+    })?;
+    Ok(Some(value))
+}
+
+fn read_client_file(path: &Path, secret: bool) -> Result<Vec<u8>, ClientError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        ClientError::SecurityConfiguration(format!(
+            "security material {} is unavailable: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_CLIENT_SECURITY_FILE_BYTES {
+        return Err(ClientError::SecurityConfiguration(format!(
+            "security material {} must be a bounded regular file",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: geteuid has no preconditions and does not dereference pointers.
+        let current_user = unsafe { libc::geteuid() };
+        if metadata.uid() != current_user {
+            return Err(ClientError::SecurityConfiguration(format!(
+                "security material {} must be owned by the current user",
+                path.display()
+            )));
+        }
+        if metadata.mode() & 0o022 != 0 {
+            return Err(ClientError::SecurityConfiguration(format!(
+                "security material {} must not be group or world writable",
+                path.display()
+            )));
+        }
+        if secret && metadata.mode() & 0o077 != 0 {
+            return Err(ClientError::SecurityConfiguration(format!(
+                "secret file {} must not grant group or other permissions",
+                path.display()
+            )));
+        }
+    }
+    fs::read(path).map_err(|error| {
+        ClientError::SecurityConfiguration(format!(
+            "security material {} could not be read: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn validate_security_endpoint(
+    security: &ClientSecurity,
+    endpoint: &str,
+) -> Result<(), ClientError> {
+    let valid = match security {
+        ClientSecurity::LocalInsecure => endpoint.starts_with("http://"),
+        ClientSecurity::Secured(_) => endpoint.starts_with("https://"),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ClientError::InvalidEndpoint {
+            endpoint: endpoint.to_owned(),
+            reason: "endpoint scheme does not match the selected security mode".to_owned(),
+        })
+    }
+}
+
+async fn connect_channel(
+    endpoint: &str,
+    deadline: Deadline,
+    security: &ClientSecurity,
+) -> Result<Channel, AttemptError> {
+    validate_security_endpoint(security, endpoint)?;
     let timeout = deadline.remaining().ok_or(AttemptError::Deadline)?;
     let transport = Endpoint::from_shared(endpoint.to_owned())
         .map_err(|error| ClientError::InvalidEndpoint {
@@ -3228,11 +3718,42 @@ async fn connect_channel(endpoint: &str, deadline: Deadline) -> Result<Channel, 
         })?
         .connect_timeout(timeout)
         .timeout(timeout);
+    let transport = match security {
+        ClientSecurity::LocalInsecure => transport,
+        ClientSecurity::Secured(value) => transport
+            .tls_config(
+                ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(value.ca_certificate.clone())),
+            )
+            .map_err(|error| ClientError::InvalidEndpoint {
+                endpoint: endpoint.to_owned(),
+                reason: error.to_string(),
+            })?,
+    };
     match tokio::time::timeout(timeout, transport.connect()).await {
         Ok(Ok(channel)) => Ok(channel),
         Ok(Err(_)) if deadline.expired() => Err(AttemptError::Deadline),
-        Ok(Err(error)) => Err(ClientError::Connection(error.to_string()).into()),
+        Ok(Err(error)) => Err(classify_connect_error(security, error.to_string()).into()),
         Err(_) => Err(AttemptError::Deadline),
+    }
+}
+
+fn classify_connect_error(security: &ClientSecurity, message: String) -> ClientError {
+    let lower = message.to_ascii_lowercase();
+    if matches!(security, ClientSecurity::Secured(_))
+        && [
+            "certificate",
+            "tls",
+            "unknownissuer",
+            "invalid peer",
+            "not valid for",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        ClientError::SecurityConfiguration(message)
+    } else {
+        ClientError::Connection(message)
     }
 }
 
@@ -3252,6 +3773,18 @@ async fn await_rpc<T>(
         Ok(Ok(response)) => Ok(response.into_inner()),
         Ok(Err(status)) if status.code() == Code::DeadlineExceeded || deadline.expired() => {
             Err(AttemptError::Deadline)
+        }
+        Ok(Err(status)) if status.code() == Code::Unauthenticated => {
+            Err(ClientError::Domain(DomainError::SecurityAuthenticationFailed).into())
+        }
+        Ok(Err(status)) if status.code() == Code::PermissionDenied => {
+            Err(ClientError::Domain(DomainError::SecurityPermissionDenied).into())
+        }
+        Ok(Err(status))
+            if status.code() == Code::Unavailable
+                && status.message().contains("security policy") =>
+        {
+            Err(ClientError::Domain(DomainError::SecurityPolicyStale).into())
         }
         Ok(Err(status)) => Err(ClientError::Request(status.to_string()).into()),
         Err(_) => Err(AttemptError::Deadline),

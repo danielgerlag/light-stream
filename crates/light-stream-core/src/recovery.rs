@@ -67,10 +67,11 @@ impl ClusterTopology {
                             kind: "node endpoint".to_owned(),
                             reason: error.to_string(),
                         })?;
-                if uri.scheme_str() != Some("http") || uri.authority().is_none() {
+                if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none()
+                {
                     return Err(DomainError::InvalidName {
                         kind: "node endpoint".to_owned(),
-                        reason: "endpoint must be an absolute HTTP URI".to_owned(),
+                        reason: "endpoint must be an absolute HTTP or HTTPS URI".to_owned(),
                     });
                 }
                 if !endpoints.insert(endpoint) {

@@ -1,10 +1,12 @@
 # `light-streamctl` reference
 
-Status: implemented through LS07.
+Status: implemented through LS08.
 
 `light-streamctl` writes one JSON object to standard output for each command. Diagnostics go to standard error. Every command requires `--endpoint`.
 
 Use `--seed` more than once to add fallback public endpoints. `--deadline-ms` sets one absolute deadline for each public operation. The initial connection, fallback connections, retry delays, and RPCs all consume that deadline. `--no-retry` sends one request to the initial endpoint. The default deadline is 5000 milliseconds.
+
+Use `--security-config PATH` with every secured command. The client rejects HTTPS without this file and rejects HTTP when this file is present.
 
 ## Exit codes
 
@@ -239,4 +241,80 @@ Followers return `not_leader` with a typed data-group leader hint. The normal cl
 
 ## Security
 
-`local-insecure` binds loopback by default. `secured` remains unavailable until LS08.
+`local-insecure` binds loopback by default. `secured` requires HTTPS, a trusted server certificate, and a bearer credential.
+
+The client security file contains absolute paths:
+
+```json
+{
+  "version": 1,
+  "ca_certificate_file": "/etc/light-stream/ca.pem",
+  "credential_file": "/run/light-stream/admin-credential.json"
+}
+```
+
+The credential file contains the raw token and must not grant group or other permissions:
+
+```json
+{
+  "version": 1,
+  "credential_id": "admin",
+  "generation": 1,
+  "token": "ls1.admin.1.REDACTED"
+}
+```
+
+Generate a token and its non-secret policy verifier without printing the token:
+
+```sh
+light-streamctl --endpoint http://127.0.0.1:7101 security generate-token \
+  --principal cluster-admin \
+  --credential-id admin \
+  --generation 1 \
+  --credential-file /run/light-stream/admin-credential.json \
+  --verifier-file /etc/light-stream/admin-verifier.json
+```
+
+The command creates the credential file with mode `0600`. It refuses to overwrite either output.
+
+Read the committed policy revision:
+
+```sh
+light-streamctl \
+  --endpoint https://node-1.example.test:7101 \
+  --security-config /run/light-stream/client.json \
+  security status \
+  --cluster-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6501
+```
+
+Apply one revision-checked policy mutation:
+
+```sh
+light-streamctl \
+  --endpoint https://node-1.example.test:7101 \
+  --security-config /run/light-stream/client.json \
+  security apply \
+  --cluster-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6501 \
+  --mutation-file add-token-generation.json
+```
+
+`security apply` accepts `replace_principal_grants`, `add_token_generation`, `revoke_token_generation`, `add_peer_certificate`, and `revoke_peer_certificate`. The mutation file includes a `MutationRequestId` and an exact expected policy revision.
+
+To convert an existing three-voter cluster to secured transport, first prepare the TLS files and the same bootstrap policy on every voter. Then commit the HTTPS topology and policy through the plaintext cluster:
+
+```sh
+light-streamctl \
+  --endpoint http://127.0.0.1:7101 \
+  security activate-transport \
+  --cluster-id 018f3f7e-5b3b-7c11-98f7-b65ac15f6501 \
+  --principal cluster-admin \
+  --mutation-session 018f3f7e-5b3b-7c11-98f7-b65ac15f6509 \
+  --sequence 1 \
+  --expected-topology-revision 1 \
+  --node 1,https://node-1.example.test:7101,https://node-1.example.test:7201 \
+  --node 2,https://node-2.example.test:7101,https://node-2.example.test:7201 \
+  --node 3,https://node-3.example.test:7101,https://node-3.example.test:7201 \
+  --policy-file /etc/light-stream/bootstrap-policy.json
+```
+
+Stop all voters after this command succeeds. Restart every voter with `--security-mode secured` and its local `--security-config`. A later startup with `local-insecure` fails because the durable manifest records the secured profile.

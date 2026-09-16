@@ -34,7 +34,12 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use tonic::{Code, Request, Response, Status, transport::Endpoint};
 
-use crate::{config::PeerRoutes, manifest::FormationSpec, runtime::ClusterManager};
+use crate::{
+    config::PeerRoutes,
+    manifest::FormationSpec,
+    runtime::ClusterManager,
+    security::{PeerOperation, RuntimeSecurityConfig},
+};
 
 pub(crate) mod wire {
     tonic::include_proto!("lightstream.peer.v1");
@@ -106,6 +111,7 @@ pub struct TonicNetworkFactory<C> {
     sender_node_id: u64,
     topology: PeerTopology,
     peer_routes: PeerRoutes,
+    security: RuntimeSecurityConfig,
     marker: PhantomData<C>,
 }
 
@@ -155,6 +161,7 @@ impl<C> TonicNetworkFactory<C> {
             sender_node_id,
             PeerTopology::new(members),
             peer_routes,
+            RuntimeSecurityConfig::LocalInsecure,
         )
     }
 
@@ -164,6 +171,7 @@ impl<C> TonicNetworkFactory<C> {
         sender_node_id: u64,
         topology: PeerTopology,
         peer_routes: PeerRoutes,
+        security: RuntimeSecurityConfig,
     ) -> Self {
         Self {
             cluster_id,
@@ -171,6 +179,7 @@ impl<C> TonicNetworkFactory<C> {
             sender_node_id,
             topology,
             peer_routes,
+            security,
             marker: PhantomData,
         }
     }
@@ -196,7 +205,9 @@ impl<C> TonicNetworkFactory<C> {
             sender_node_id: self.sender_node_id,
             target_node_id: target,
             endpoint,
+            expected_peer_uri: configured.map(|member| member.peer_uri().to_owned()),
             valid,
+            security: self.security.clone(),
             marker: PhantomData,
         }
     }
@@ -233,7 +244,9 @@ pub struct TonicRaftNetwork<C> {
     sender_node_id: u64,
     target_node_id: u64,
     endpoint: Option<String>,
+    expected_peer_uri: Option<String>,
     valid: bool,
+    security: RuntimeSecurityConfig,
     marker: PhantomData<C>,
 }
 
@@ -275,6 +288,28 @@ where
             .map_err(|error| self.unavailable(error))?
             .connect_timeout(timeout)
             .timeout(timeout);
+        let transport = self
+            .security
+            .configure_peer_endpoint(
+                transport,
+                self.expected_peer_uri
+                    .as_deref()
+                    .ok_or_else(|| self.unavailable("target peer URI is unavailable"))?,
+                light_stream_core::NodeId::new(self.target_node_id)
+                    .map_err(|error| self.unavailable(error))?,
+                match action {
+                    RPCTypes::AppendEntries => PeerOperation::AppendEntries,
+                    RPCTypes::Vote => PeerOperation::Vote,
+                    RPCTypes::InstallSnapshot => PeerOperation::SnapshotBegin,
+                    RPCTypes::TransferLeader => PeerOperation::TransferLeader,
+                },
+                if self.group_id == CONTROL_GROUP_ID {
+                    crate::security::PeerRecoveryScope::ControlGroup
+                } else {
+                    crate::security::PeerRecoveryScope::None
+                },
+            )
+            .map_err(|error| self.unavailable(error))?;
         match tokio::time::timeout(timeout, transport.connect()).await {
             Ok(Ok(channel)) => Ok(wire::peer_service_client::PeerServiceClient::new(channel)
                 .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
@@ -584,6 +619,7 @@ where
 
 pub struct PeerApi {
     cluster: Arc<ClusterManager>,
+    security: RuntimeSecurityConfig,
     snapshot_groups: AsyncMutex<BTreeMap<u64, Arc<AsyncMutex<()>>>>,
 }
 
@@ -881,10 +917,51 @@ where
 
 impl PeerApi {
     pub fn new(cluster: Arc<ClusterManager>) -> Self {
+        let security = cluster.runtime_security().clone();
         Self {
             cluster,
+            security,
             snapshot_groups: AsyncMutex::new(BTreeMap::new()),
         }
+    }
+
+    async fn authenticated_envelope(
+        &self,
+        operation: PeerOperation,
+        request: Request<wire::PeerRequest>,
+    ) -> Result<wire::PeerEnvelope, Status> {
+        let claimed = request
+            .get_ref()
+            .envelope
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("peer envelope is required"))?;
+        let cluster: ClusterId = claimed
+            .cluster_id
+            .parse()
+            .map_err(|_| Status::permission_denied("peer cluster identity is invalid"))?;
+        let node = light_stream_core::NodeId::new(claimed.sender_node_id)
+            .map_err(|_| Status::permission_denied("peer node identity is invalid"))?;
+        let recovery_scope = self.cluster.peer_recovery_scope(claimed.group_id);
+        self.security
+            .authenticate_peer(&request, cluster, node, operation, recovery_scope)?;
+        require_envelope(request)
+    }
+
+    async fn authenticate_snapshot<T>(
+        &self,
+        operation: PeerOperation,
+        request: &Request<T>,
+        identity: &wire::SnapshotIdentity,
+    ) -> Result<(), Status> {
+        let cluster: ClusterId = identity
+            .cluster_id
+            .parse()
+            .map_err(|_| Status::permission_denied("peer cluster identity is invalid"))?;
+        let node = light_stream_core::NodeId::new(identity.sender_node_id)
+            .map_err(|_| Status::permission_denied("peer node identity is invalid"))?;
+        let recovery_scope = self.cluster.peer_recovery_scope(identity.group_id);
+        self.security
+            .authenticate_peer(request, cluster, node, operation, recovery_scope)
     }
 
     async fn snapshot_transfer_lock(
@@ -908,7 +985,9 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::AppendEntries, request)
+            .await?;
         let response = match envelope.group_id {
             CONTROL_GROUP_ID => {
                 let rpc = decode::<AppendEntriesRequest<ControlRaftConfig>>(&envelope)?;
@@ -919,6 +998,15 @@ impl wire::peer_service_server::PeerService for PeerApi {
                     .append_entries(rpc)
                     .await
                     .map_err(internal_status)?;
+                if matches!(
+                    &value,
+                    AppendEntriesResponse::Success | AppendEntriesResponse::PartialSuccess(_)
+                ) && let Ok(Some(policy)) = self.cluster.security_policy().await
+                {
+                    self.security
+                        .renew_policy(policy)
+                        .map_err(internal_status)?;
+                }
                 encode_response(&envelope, &value)?
             }
             group_id if group_id >= DATA_GROUP_ID => {
@@ -941,21 +1029,24 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        self.vote_request(request, false).await
+        self.vote_request(request, false, PeerOperation::Vote).await
     }
 
     async fn pre_vote(
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        self.vote_request(request, true).await
+        self.vote_request(request, true, PeerOperation::PreVote)
+            .await
     }
 
     async fn prepare_join(
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::PrepareJoin, request)
+            .await?;
         if envelope.group_id != LIFECYCLE_GROUP_ID {
             return Err(Status::invalid_argument(
                 "lifecycle requests must use group zero",
@@ -970,7 +1061,9 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::Activate, request)
+            .await?;
         if envelope.group_id != LIFECYCLE_GROUP_ID {
             return Err(Status::invalid_argument(
                 "lifecycle requests must use group zero",
@@ -985,7 +1078,9 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::PrepareReplacement, request)
+            .await?;
         if envelope.group_id != LIFECYCLE_GROUP_ID {
             return Err(Status::invalid_argument(
                 "lifecycle requests must use group zero",
@@ -1002,7 +1097,9 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::ActivateReplacement, request)
+            .await?;
         if envelope.group_id != LIFECYCLE_GROUP_ID {
             return Err(Status::invalid_argument(
                 "lifecycle requests must use group zero",
@@ -1019,7 +1116,9 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::RetireReplacement, request)
+            .await?;
         if envelope.group_id != LIFECYCLE_GROUP_ID {
             return Err(Status::invalid_argument(
                 "lifecycle requests must use group zero",
@@ -1036,7 +1135,9 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self
+            .authenticated_envelope(PeerOperation::TransferLeader, request)
+            .await?;
         let response = match envelope.group_id {
             CONTROL_GROUP_ID => {
                 let rpc = decode::<TransferLeaderRequest<ControlRaftConfig>>(&envelope)?;
@@ -1065,6 +1166,13 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::SnapshotBeginRequest>,
     ) -> Result<Response<wire::SnapshotProgressResponse>, Status> {
+        let claimed = request
+            .get_ref()
+            .identity
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("snapshot identity missing"))?;
+        self.authenticate_snapshot(PeerOperation::SnapshotBegin, &request, claimed)
+            .await?;
         let request = request.into_inner();
         let identity = require_snapshot_identity(request.identity)?;
         validate_snapshot_target(&self.cluster, &identity).await?;
@@ -1135,6 +1243,13 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::SnapshotChunkRequest>,
     ) -> Result<Response<wire::SnapshotProgressResponse>, Status> {
+        let claimed = request
+            .get_ref()
+            .identity
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("snapshot identity missing"))?;
+        self.authenticate_snapshot(PeerOperation::SnapshotChunk, &request, claimed)
+            .await?;
         let request = request.into_inner();
         let identity = require_snapshot_identity(request.identity)?;
         validate_snapshot_target(&self.cluster, &identity).await?;
@@ -1193,6 +1308,13 @@ impl wire::peer_service_server::PeerService for PeerApi {
         &self,
         request: Request<wire::SnapshotFinishRequest>,
     ) -> Result<Response<wire::SnapshotProgressResponse>, Status> {
+        let claimed = request
+            .get_ref()
+            .identity
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("snapshot identity missing"))?;
+        self.authenticate_snapshot(PeerOperation::SnapshotFinish, &request, claimed)
+            .await?;
         let identity = require_snapshot_identity(request.into_inner().identity)?;
         validate_snapshot_target(&self.cluster, &identity).await?;
         let _transfer = self.snapshot_transfer_lock(&identity).await;
@@ -1270,8 +1392,9 @@ impl PeerApi {
         &self,
         request: Request<wire::PeerRequest>,
         pre_vote: bool,
+        operation: PeerOperation,
     ) -> Result<Response<wire::PeerResponse>, Status> {
-        let envelope = require_envelope(request)?;
+        let envelope = self.authenticated_envelope(operation, request).await?;
         let response = match envelope.group_id {
             CONTROL_GROUP_ID => {
                 let rpc = decode::<VoteRequest<ControlRaftConfig>>(&envelope)?;
@@ -1305,22 +1428,25 @@ pub async fn prepare_remote(
     formation: &FormationSpec,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
-    lifecycle_call("prepare_join", formation, sender_node_id, target).await
+    lifecycle_call("prepare_join", formation, sender_node_id, target, security).await
 }
 
 pub async fn activate_remote(
     formation: &FormationSpec,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
-    lifecycle_call("activate", formation, sender_node_id, target).await
+    lifecycle_call("activate", formation, sender_node_id, target, security).await
 }
 
 pub async fn prepare_replacement_remote(
     preparation: &ReplacementPreparation,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
     lifecycle_payload_call(
         "prepare_replacement",
@@ -1328,6 +1454,7 @@ pub async fn prepare_replacement_remote(
         serde_json::to_vec(preparation).map_err(storage_error)?,
         sender_node_id,
         target,
+        security,
     )
     .await
 }
@@ -1336,6 +1463,7 @@ pub async fn activate_replacement_remote(
     preparation: &ReplacementPreparation,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
     lifecycle_payload_call(
         "activate_replacement",
@@ -1343,6 +1471,7 @@ pub async fn activate_replacement_remote(
         serde_json::to_vec(preparation).map_err(storage_error)?,
         sender_node_id,
         target,
+        security,
     )
     .await
 }
@@ -1351,6 +1480,7 @@ pub async fn retire_replacement_remote(
     retirement: &ReplacementRetirement,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
     lifecycle_payload_call(
         "retire_replacement",
@@ -1358,6 +1488,7 @@ pub async fn retire_replacement_remote(
         serde_json::to_vec(retirement).map_err(storage_error)?,
         sender_node_id,
         target,
+        security,
     )
     .await
 }
@@ -1367,6 +1498,7 @@ async fn lifecycle_call(
     formation: &FormationSpec,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
     lifecycle_payload_call(
         operation,
@@ -1374,6 +1506,7 @@ async fn lifecycle_call(
         serde_json::to_vec(formation).map_err(storage_error)?,
         sender_node_id,
         target,
+        security,
     )
     .await
 }
@@ -1384,11 +1517,21 @@ async fn lifecycle_payload_call(
     payload: Vec<u8>,
     sender_node_id: u64,
     target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
 ) -> Result<(), DomainError> {
     let endpoint = Endpoint::from_shared(target.peer_uri().to_owned())
         .map_err(storage_error)?
         .connect_timeout(LIFECYCLE_TIMEOUT)
         .timeout(LIFECYCLE_TIMEOUT);
+    let endpoint = security
+        .configure_peer_endpoint(
+            endpoint,
+            target.peer_uri(),
+            target.node_id(),
+            lifecycle_peer_operation(operation),
+            crate::security::PeerRecoveryScope::None,
+        )
+        .map_err(storage_error)?;
     let channel = tokio::time::timeout(LIFECYCLE_TIMEOUT, endpoint.connect())
         .await
         .map_err(|_| DomainError::Storage {
@@ -1422,6 +1565,16 @@ async fn lifecycle_payload_call(
     };
     result.map_err(storage_error)?;
     Ok(())
+}
+
+fn lifecycle_peer_operation(operation: &str) -> PeerOperation {
+    match operation {
+        "prepare_join" => PeerOperation::PrepareJoin,
+        "prepare_replacement" => PeerOperation::PrepareReplacement,
+        "activate_replacement" => PeerOperation::ActivateReplacement,
+        "retire_replacement" => PeerOperation::RetireReplacement,
+        _ => PeerOperation::Activate,
+    }
 }
 
 fn require_envelope(request: Request<wire::PeerRequest>) -> Result<wire::PeerEnvelope, Status> {
@@ -1526,6 +1679,8 @@ mod tests {
         let valid = factory.build_network(2, &BasicNode::new(durable_uri));
         assert!(valid.valid);
         assert_eq!(Some(override_uri), valid.endpoint.as_deref());
+        assert_eq!(Some(durable_uri), valid.expected_peer_uri.as_deref());
+        assert_eq!(2, valid.target_node_id);
 
         let invalid = factory.build_network(2, &BasicNode::new("http://127.0.0.1:7999"));
         assert!(!invalid.valid);
@@ -1547,6 +1702,7 @@ mod tests {
             1,
             topology.clone(),
             PeerRoutes::default(),
+            RuntimeSecurityConfig::LocalInsecure,
         );
         assert!(
             factory

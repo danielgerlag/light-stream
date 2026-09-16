@@ -1,0 +1,6 @@
+{
+  "base_secured_mode": "UNSUPPORTED_LS08",
+  "head_secured_mode": "AVAILABLE",
+  "local_regression": "PASS",
+  "verdict": "PASS"
+}

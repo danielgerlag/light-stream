@@ -14,7 +14,7 @@ use light_stream_core::{
 use tonic::transport::{Endpoint, Uri};
 
 use crate::publish_scheduler::PublishSchedulerConfig;
-use crate::{StartupError, manifest::GroupPoolConfig};
+use crate::{StartupError, manifest::GroupPoolConfig, security::RuntimeSecurityConfig};
 
 const DEFAULT_ROCKSDB_CACHE_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_ROCKSDB_WRITE_BUFFER_BYTES: usize = 128 * 1024 * 1024;
@@ -52,7 +52,7 @@ impl PeerRoutes {
                     "peer route cannot target the local node".to_owned(),
                 ));
             }
-            validate_http_uri("peer route", uri)?;
+            validate_uri("peer route", uri)?;
             let identity = route_identity(uri).map_err(StartupError::InvalidConfig)?;
             if !route_identities.insert(identity) {
                 return Err(StartupError::InvalidConfig(
@@ -119,6 +119,19 @@ impl PeerRoutes {
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    fn validate_security_mode(&self, mode: SecurityMode) -> Result<(), StartupError> {
+        let expected = match mode {
+            SecurityMode::LocalInsecure => "http://",
+            SecurityMode::Secured => "https://",
+        };
+        if self.0.values().any(|uri| !uri.starts_with(expected)) {
+            return Err(StartupError::InvalidConfig(format!(
+                "peer routes must use {expected} for the selected security mode"
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -132,6 +145,8 @@ pub struct ServerArgs {
     pub data_dir: PathBuf,
     #[arg(long, default_value = "local-insecure")]
     pub security_mode: String,
+    #[arg(long)]
+    pub security_config: Option<PathBuf>,
     #[arg(long)]
     pub allow_insecure_non_loopback: bool,
     #[arg(long, default_value_t = light_stream_storage::DEFAULT_RECEIPT_WINDOW)]
@@ -185,7 +200,7 @@ pub struct ServerConfig {
     public_listen: SocketAddr,
     peer_listen: SocketAddr,
     data_dir: PathBuf,
-    security_mode: SecurityMode,
+    security: RuntimeSecurityConfig,
     receipt_window: usize,
     node_id: u64,
     advertise_public_uri: Option<String>,
@@ -203,15 +218,13 @@ impl TryFrom<ServerArgs> for ServerConfig {
     fn try_from(args: ServerArgs) -> Result<Self, Self::Error> {
         let security_mode = SecurityMode::from_str(&args.security_mode)
             .map_err(|error| StartupError::InvalidConfig(error.to_string()))?;
-        if security_mode == SecurityMode::Secured {
-            return Err(StartupError::SecuredModeUnsupported);
-        }
         if args.public_listen == args.peer_listen && args.public_listen.port() != 0 {
             return Err(StartupError::InvalidConfig(
                 "public and peer listeners must use different addresses".to_owned(),
             ));
         }
-        if !args.allow_insecure_non_loopback
+        if security_mode == SecurityMode::LocalInsecure
+            && !args.allow_insecure_non_loopback
             && (!args.public_listen.ip().is_loopback() || !args.peer_listen.ip().is_loopback())
         {
             return Err(StartupError::InvalidConfig(
@@ -229,12 +242,26 @@ impl TryFrom<ServerArgs> for ServerConfig {
                 "node ID zero is reserved".to_owned(),
             ));
         }
+        let security = RuntimeSecurityConfig::load(
+            security_mode,
+            args.security_config.as_deref(),
+            NodeId::new(args.node_id).map_err(StartupError::Cluster)?,
+        )?;
         for (kind, value) in [
             ("public", args.advertise_public_uri.as_ref()),
             ("peer", args.advertise_peer_uri.as_ref()),
         ] {
             if let Some(value) = value {
-                validate_http_uri(&format!("advertised {kind} URI"), value)?;
+                validate_uri(&format!("advertised {kind} URI"), value)?;
+                let expected_scheme = match security_mode {
+                    SecurityMode::LocalInsecure => "http://",
+                    SecurityMode::Secured => "https://",
+                };
+                if !value.starts_with(expected_scheme) {
+                    return Err(StartupError::InvalidConfig(format!(
+                        "advertised {kind} URI must use {expected_scheme}"
+                    )));
+                }
             }
         }
         if args.advertise_public_uri == args.advertise_peer_uri
@@ -245,6 +272,7 @@ impl TryFrom<ServerArgs> for ServerConfig {
             ));
         }
         let peer_routes = PeerRoutes::parse(args.peer_routes, args.node_id)?;
+        peer_routes.validate_security_mode(security_mode)?;
         if !(MIN_DATA_GROUPS..=MAX_DATA_GROUPS).contains(&args.max_data_groups)
             || args.max_streams == 0
             || args.max_partitions_per_stream == 0
@@ -287,7 +315,7 @@ impl TryFrom<ServerArgs> for ServerConfig {
             public_listen: args.public_listen,
             peer_listen: args.peer_listen,
             data_dir: args.data_dir,
-            security_mode,
+            security,
             receipt_window: args.receipt_window,
             node_id: args.node_id,
             advertise_public_uri: args.advertise_public_uri,
@@ -315,7 +343,11 @@ impl ServerConfig {
     }
 
     pub const fn security_mode(&self) -> SecurityMode {
-        self.security_mode
+        self.security.mode()
+    }
+
+    pub(crate) const fn security(&self) -> &RuntimeSecurityConfig {
+        &self.security
     }
 
     pub const fn receipt_window(&self) -> usize {
@@ -372,10 +404,12 @@ fn parse_verification_delay(
     }
 }
 
-fn validate_http_uri(kind: &str, value: &str) -> Result<(), StartupError> {
-    if !value.starts_with("http://") || Endpoint::from_shared(value.to_owned()).is_err() {
+fn validate_uri(kind: &str, value: &str) -> Result<(), StartupError> {
+    if !(value.starts_with("http://") || value.starts_with("https://"))
+        || Endpoint::from_shared(value.to_owned()).is_err()
+    {
         return Err(StartupError::InvalidConfig(format!(
-            "{kind} must be a valid http:// URI"
+            "{kind} must be a valid http:// or https:// URI"
         )));
     }
     Ok(())
@@ -404,6 +438,7 @@ mod tests {
             peer_listen: "127.0.0.1:7201".parse().unwrap(),
             data_dir: PathBuf::from("data"),
             security_mode: "local-insecure".to_owned(),
+            security_config: None,
             allow_insecure_non_loopback: false,
             receipt_window: light_stream_storage::DEFAULT_RECEIPT_WINDOW,
             node_id: 1,
@@ -438,12 +473,12 @@ mod tests {
     }
 
     #[test]
-    fn secured_mode_is_explicitly_unsupported() {
+    fn secured_mode_requires_a_security_config() {
         let mut value = args();
         value.security_mode = "secured".to_owned();
         assert!(matches!(
             ServerConfig::try_from(value),
-            Err(StartupError::SecuredModeUnsupported)
+            Err(StartupError::InvalidConfig(_))
         ));
     }
 

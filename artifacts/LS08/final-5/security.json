@@ -1,0 +1,12 @@
+{
+  "modes": [
+    {
+      "mode": "local-insecure",
+      "verdict": "PASS"
+    },
+    {
+      "mode": "secured",
+      "verdict": "PASS"
+    }
+  ]
+}

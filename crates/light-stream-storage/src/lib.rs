@@ -33,9 +33,9 @@ use light_stream_core::{
     LeaseRelease, LeaseRenewal, MutationRequestId, NodeId, OperationalProof, PartitionId,
     PartitionKey, PartitionPlacement, PartitionRoute, ProducerRequestId, PublishBatch,
     PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
-    ReplicatedPublishBatch, RetentionRequest, RetentionResult, RetentionStatus, StreamBookmarkPage,
-    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
-    StreamName,
+    ReplicatedPublishBatch, RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation,
+    SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
+    StreamDescriptor, StreamId, StreamLifecycle, StreamName,
 };
 use openraft::{
     BasicNode, EntryPayload,
@@ -130,6 +130,7 @@ const KEY_LEASE_CLOCK: &[u8] = b"lease-clock";
 const KEY_LEASE_BUDGET: &[u8] = b"lease-budget";
 const KEY_OPERATIONAL_PROOF: &[u8] = b"operational-proof";
 const KEY_CLUSTER_TOPOLOGY: &[u8] = b"cluster-topology";
+const KEY_SECURITY_POLICY: &[u8] = b"security-policy";
 const KEY_ACTIVE_ADMINISTRATION: &[u8] = b"administration/active";
 const ADMINISTRATION_REQUEST_PREFIX: &[u8] = b"administration/request/";
 const LEASE_ID_PREFIX: &[u8] = b"lease/id/";
@@ -204,6 +205,8 @@ pub enum GroupCommand {
     BootstrapControl {
         spec: BootstrapSpec,
         topology: Option<ClusterTopology>,
+        #[serde(default)]
+        security: Option<SecurityPolicy>,
         data_groups: Vec<GroupId>,
         max_streams: u32,
         max_partitions_per_stream: u32,
@@ -297,6 +300,17 @@ pub enum GroupCommand {
     InitializeClusterTopology {
         topology: ClusterTopology,
     },
+    InitializeSecurityPolicy {
+        policy: SecurityPolicy,
+    },
+    ApplySecurityMutation {
+        mutation: SecurityMutation,
+    },
+    ActivateSecuredTransport {
+        request: MutationRequestId,
+        topology: ClusterTopology,
+        policy: SecurityPolicy,
+    },
 }
 
 impl fmt::Display for GroupCommand {
@@ -333,6 +347,13 @@ impl fmt::Display for GroupCommand {
             Self::InitializeClusterTopology { .. } => {
                 formatter.write_str("initialize-cluster-topology")
             }
+            Self::InitializeSecurityPolicy { .. } => {
+                formatter.write_str("initialize-security-policy")
+            }
+            Self::ApplySecurityMutation { .. } => formatter.write_str("apply-security-mutation"),
+            Self::ActivateSecuredTransport { .. } => {
+                formatter.write_str("activate-secured-transport")
+            }
         }
     }
 }
@@ -351,6 +372,7 @@ pub enum ApplyResult {
     RetentionStatus(RetentionStatus),
     OperationalProof(OperationalProof),
     Administration(AdministrationOperation),
+    SecurityPolicy(SecurityPolicy),
     Rejected(DomainError),
     Noop,
 }
@@ -383,6 +405,9 @@ impl fmt::Display for ApplyResult {
             }
             Self::Administration(value) => {
                 write!(formatter, "administration {:?}", value.lifecycle())
+            }
+            Self::SecurityPolicy(value) => {
+                write!(formatter, "security policy {}", value.revision().get())
             }
             Self::Rejected(error) => write!(formatter, "rejected: {error}"),
             Self::Noop => formatter.write_str("noop"),
@@ -609,6 +634,8 @@ enum ThinCommand {
         spec: BootstrapSpec,
         #[serde(default)]
         topology: Option<ClusterTopology>,
+        #[serde(default)]
+        security: Option<Box<SecurityPolicy>>,
         data_groups: Vec<GroupId>,
         max_streams: u32,
         max_partitions_per_stream: u32,
@@ -707,6 +734,22 @@ enum ThinCommand {
     InitializeClusterTopology {
         topology: ClusterTopology,
     },
+    InitializeSecurityPolicy {
+        policy: Box<SecurityPolicy>,
+    },
+    ApplySecurityMutation {
+        mutation: Box<SecurityMutation>,
+    },
+    ActivateSecuredTransport {
+        request: MutationRequestId,
+        topology: ClusterTopology,
+        policy: Box<SecurityPolicy>,
+    },
+}
+
+struct BootstrapControlState {
+    topology: Option<ClusterTopology>,
+    security: Option<SecurityPolicy>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2026,6 +2069,7 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
             GroupCommand::BootstrapControl {
                 spec,
                 topology,
+                security,
                 data_groups,
                 max_streams,
                 max_partitions_per_stream,
@@ -2035,6 +2079,7 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                     payload: ThinPayload::Normal(ThinCommand::BootstrapControl {
                         spec,
                         topology,
+                        security: security.map(Box::new),
                         data_groups,
                         max_streams,
                         max_partitions_per_stream,
@@ -2296,6 +2341,39 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                 },
                 Vec::new(),
             )),
+            GroupCommand::InitializeSecurityPolicy { policy } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::InitializeSecurityPolicy {
+                        policy: Box::new(policy),
+                    }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::ApplySecurityMutation { mutation } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::ApplySecurityMutation {
+                        mutation: Box::new(mutation),
+                    }),
+                },
+                Vec::new(),
+            )),
+            GroupCommand::ActivateSecuredTransport {
+                request,
+                topology,
+                policy,
+            } => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::ActivateSecuredTransport {
+                        request,
+                        topology,
+                        policy: Box::new(policy),
+                    }),
+                },
+                Vec::new(),
+            )),
         },
     }
 }
@@ -2340,12 +2418,14 @@ macro_rules! impl_log_storage {
                                 ThinCommand::BootstrapControl {
                                     spec,
                                     topology,
+                                    security,
                                     data_groups,
                                     max_streams,
                                     max_partitions_per_stream,
                                 } => GroupCommand::BootstrapControl {
                                     spec,
                                     topology,
+                                    security: security.map(|policy| *policy),
                                     data_groups,
                                     max_streams,
                                     max_partitions_per_stream,
@@ -2507,6 +2587,23 @@ macro_rules! impl_log_storage {
                                 ThinCommand::InitializeClusterTopology { topology } => {
                                     GroupCommand::InitializeClusterTopology { topology }
                                 }
+                                ThinCommand::InitializeSecurityPolicy { policy } => {
+                                    GroupCommand::InitializeSecurityPolicy { policy: *policy }
+                                }
+                                ThinCommand::ApplySecurityMutation { mutation } => {
+                                    GroupCommand::ApplySecurityMutation {
+                                        mutation: *mutation,
+                                    }
+                                }
+                                ThinCommand::ActivateSecuredTransport {
+                                    request,
+                                    topology,
+                                    policy,
+                                } => GroupCommand::ActivateSecuredTransport {
+                                    request,
+                                    topology,
+                                    policy: *policy,
+                                },
                             };
                             EntryPayload::Normal(hydrated)
                         }
@@ -3217,12 +3314,13 @@ impl GroupDb {
             GroupCommand::BootstrapControl {
                 spec,
                 topology,
+                security,
                 data_groups,
                 max_streams,
                 max_partitions_per_stream,
             } => self.apply_bootstrap_control(
                 spec,
-                topology,
+                BootstrapControlState { topology, security },
                 data_groups,
                 max_streams,
                 max_partitions_per_stream,
@@ -3311,6 +3409,17 @@ impl GroupDb {
             GroupCommand::InitializeClusterTopology { topology } => {
                 self.apply_initialize_cluster_topology(topology, write)
             }
+            GroupCommand::InitializeSecurityPolicy { policy } => {
+                self.apply_initialize_security_policy(policy, write)
+            }
+            GroupCommand::ApplySecurityMutation { mutation } => {
+                self.apply_security_mutation(mutation, write)
+            }
+            GroupCommand::ActivateSecuredTransport {
+                request,
+                topology,
+                policy,
+            } => self.apply_secured_transport(request, topology, policy, write),
         }
     }
 
@@ -3570,6 +3679,112 @@ impl GroupDb {
         Ok(ApplyResult::Noop)
     }
 
+    fn apply_initialize_security_policy(
+        &self,
+        policy: SecurityPolicy,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "security policy initialization reached a data group".to_owned(),
+            }));
+        }
+        if policy.cluster() != self.identity.cluster_id {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "security policy cluster does not match the control group".to_owned(),
+            }));
+        }
+        if let Some(existing) = self.get::<SecurityPolicy>(CF_STATE, KEY_SECURITY_POLICY)? {
+            return if existing == policy {
+                Ok(ApplyResult::SecurityPolicy(existing))
+            } else {
+                Ok(ApplyResult::Rejected(DomainError::SecurityPolicyConflict))
+            };
+        }
+        write.put_cf(&self.cf(CF_STATE)?, KEY_SECURITY_POLICY, encode(&policy)?);
+        Ok(ApplyResult::SecurityPolicy(policy))
+    }
+
+    fn apply_security_mutation(
+        &self,
+        mutation: SecurityMutation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "security policy mutation reached a data group".to_owned(),
+            }));
+        }
+        let fingerprint = mutation_fingerprint(&mutation)?;
+        if let Some(result) = self.prior_mutation_result(mutation.request(), &fingerprint)? {
+            return Ok(result);
+        }
+        let Some(policy) = self.get::<SecurityPolicy>(CF_STATE, KEY_SECURITY_POLICY)? else {
+            return Ok(ApplyResult::Rejected(DomainError::SecurityPolicyConflict));
+        };
+        let request = mutation.request().clone();
+        let result = match policy.apply(mutation) {
+            Ok(policy) => {
+                write.put_cf(&self.cf(CF_STATE)?, KEY_SECURITY_POLICY, encode(&policy)?);
+                ApplyResult::SecurityPolicy(policy)
+            }
+            Err(error) => ApplyResult::Rejected(error),
+        };
+        self.store_mutation_result(&request, fingerprint, &result, write)?;
+        Ok(result)
+    }
+
+    fn apply_secured_transport(
+        &self,
+        request: MutationRequestId,
+        topology: ClusterTopology,
+        policy: SecurityPolicy,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "secured transport activation reached a data group".to_owned(),
+            }));
+        }
+        let fingerprint =
+            mutation_fingerprint(&(request.clone(), topology.clone(), policy.clone()))?;
+        if let Some(result) = self.prior_mutation_result(&request, &fingerprint)? {
+            return Ok(result);
+        }
+        let current = self
+            .get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?
+            .ok_or_else(|| io_error("control topology is missing"))?;
+        if let Some(existing) = self.get::<SecurityPolicy>(CF_STATE, KEY_SECURITY_POLICY)? {
+            return if existing == policy && current == topology {
+                Ok(ApplyResult::SecurityPolicy(existing))
+            } else {
+                Ok(ApplyResult::Rejected(DomainError::SecurityPolicyConflict))
+            };
+        }
+        if topology.revision() != current.revision().saturating_add(1)
+            || topology.desired_voters() != current.desired_voters()
+            || topology.authorized_nodes().keys().collect::<BTreeSet<_>>()
+                != current.authorized_nodes().keys().collect::<BTreeSet<_>>()
+            || topology.authorized_nodes().values().any(|node| {
+                !node.public_uri().starts_with("https://")
+                    || !node.peer_uri().starts_with("https://")
+            })
+            || policy.cluster() != self.identity.cluster_id
+            || topology
+                .authorized_nodes()
+                .keys()
+                .any(|node| !policy.has_active_peer(*node))
+        {
+            return Ok(ApplyResult::Rejected(DomainError::SecurityPolicyConflict));
+        }
+        let state = self.cf(CF_STATE)?;
+        write.put_cf(&state, KEY_CLUSTER_TOPOLOGY, encode(&topology)?);
+        write.put_cf(&state, KEY_SECURITY_POLICY, encode(&policy)?);
+        let result = ApplyResult::SecurityPolicy(policy);
+        self.store_mutation_result(&request, fingerprint, &result, write)?;
+        Ok(result)
+    }
+
     fn apply_operational_probe(
         &self,
         log_id: GroupLogId,
@@ -3594,12 +3809,13 @@ impl GroupDb {
     fn apply_bootstrap_control(
         &self,
         spec: BootstrapSpec,
-        topology: Option<ClusterTopology>,
+        state: BootstrapControlState,
         data_groups: Vec<GroupId>,
         max_streams: u32,
         max_partitions: u32,
         write: &mut WriteBatch,
     ) -> io::Result<ApplyResult> {
+        let BootstrapControlState { topology, security } = state;
         if data_groups.is_empty()
             || max_streams == 0
             || max_partitions == 0
@@ -3617,10 +3833,14 @@ impl GroupDb {
         }
         if let Some(existing) = self.get::<Vec<GroupId>>(CF_STATE, KEY_DATA_GROUP_POOL)? {
             let stored_topology = self.get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?;
+            let stored_security = self.get::<SecurityPolicy>(CF_STATE, KEY_SECURITY_POLICY)?;
             if existing != data_groups
                 || topology
                     .as_ref()
                     .is_some_and(|topology| stored_topology.as_ref() != Some(topology))
+                || security
+                    .as_ref()
+                    .is_some_and(|security| stored_security.as_ref() != Some(security))
                 || self.get::<u32>(CF_STATE, KEY_MAX_STREAMS)? != Some(max_streams)
                 || self.get::<u32>(CF_STATE, KEY_MAX_PARTITIONS)? != Some(max_partitions)
             {
@@ -3644,6 +3864,14 @@ impl GroupDb {
         write.put_cf(&state, KEY_DATA_GROUP_POOL, encode(&data_groups)?);
         if let Some(topology) = topology {
             write.put_cf(&state, KEY_CLUSTER_TOPOLOGY, encode(&topology)?);
+        }
+        if let Some(security) = security {
+            if security.cluster() != spec.cluster() {
+                return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                    reason: "bootstrap security policy cluster differs".to_owned(),
+                }));
+            }
+            write.put_cf(&state, KEY_SECURITY_POLICY, encode(&security)?);
         }
         write.put_cf(&state, KEY_MAX_STREAMS, encode(&max_streams)?);
         write.put_cf(&state, KEY_MAX_PARTITIONS, encode(&max_partitions)?);
@@ -5316,6 +5544,12 @@ impl GroupDb {
 }
 
 impl CommittedStateReader {
+    pub fn security_policy(&self) -> Result<Option<SecurityPolicy>, DomainError> {
+        self.db
+            .get(CF_STATE, KEY_SECURITY_POLICY)
+            .map_err(storage_domain)
+    }
+
     pub fn cluster_topology(&self) -> Result<Option<ClusterTopology>, DomainError> {
         self.db
             .get(CF_STATE, KEY_CLUSTER_TOPOLOGY)
@@ -6092,12 +6326,62 @@ mod tests {
         ClusterTopology::try_new(1, [node.clone()], [node.node_id()]).unwrap()
     }
 
+    fn test_security_policy(
+        cluster: ClusterId,
+    ) -> (
+        SecurityPolicy,
+        light_stream_core::PrincipalId,
+        light_stream_core::CredentialRef,
+    ) {
+        let principal = light_stream_core::PrincipalId::parse("security-admin").unwrap();
+        let credential = light_stream_core::CredentialRef::new(
+            light_stream_core::CredentialId::parse("admin").unwrap(),
+            light_stream_core::CredentialGeneration::initial(),
+        );
+        let grants = BTreeMap::from([(
+            principal.clone(),
+            BTreeSet::from([
+                light_stream_core::Grant::new(
+                    light_stream_core::Permission::SecurityAdmin,
+                    light_stream_core::ResourceScope::Cluster { cluster },
+                ),
+                light_stream_core::Grant::new(
+                    light_stream_core::Permission::ClusterAdmin,
+                    light_stream_core::ResourceScope::Cluster { cluster },
+                ),
+            ]),
+        )]);
+        let policy = SecurityPolicy::try_new(
+            cluster,
+            light_stream_core::PolicyRevision::initial(),
+            light_stream_core::RevocationRevision::default(),
+            grants,
+            vec![light_stream_core::TokenVerifier::new(
+                credential.clone(),
+                principal.clone(),
+                light_stream_core::TokenVerifierDigest::from_token_bytes(b"test-security-token"),
+            )],
+            BTreeMap::from([(
+                NodeId::new(1).unwrap(),
+                BTreeSet::from([light_stream_core::PeerCertificateBinding::new(
+                    cluster,
+                    NodeId::new(1).unwrap(),
+                    light_stream_core::CredentialGeneration::initial(),
+                    light_stream_core::CertificateFingerprint::from_der(b"test-peer-certificate"),
+                )]),
+            )]),
+        )
+        .unwrap();
+        (policy, principal, credential)
+    }
+
     #[test]
     fn legacy_bootstrap_log_without_topology_still_decodes() {
         let (cluster, stream) = ids();
         let command = ThinCommand::BootstrapControl {
             spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
             topology: Some(test_topology()),
+            security: None,
             data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
             max_streams: 8,
             max_partitions_per_stream: 4,
@@ -6108,6 +6392,11 @@ mod tests {
             .and_then(serde_json::Value::as_object_mut)
             .unwrap()
             .remove("topology");
+        value
+            .get_mut("BootstrapControl")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .remove("security");
 
         let decoded: ThinCommand = serde_json::from_value(value).unwrap();
 
@@ -6115,6 +6404,298 @@ mod tests {
             decoded,
             ThinCommand::BootstrapControl { topology: None, .. }
         ));
+    }
+
+    #[test]
+    fn security_policy_mutations_are_idempotent_and_snapshot_backed() {
+        let directory = ProjectTestDir::new("security-policy");
+        let (cluster, _) = ids();
+        let identity = GroupIdentity::new(
+            cluster,
+            GroupId::new(CONTROL_GROUP_ID).unwrap(),
+            GroupKind::Control,
+        );
+        let handles = create_control_store(
+            &directory.0,
+            identity,
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let (policy, principal, _) = test_security_policy(cluster);
+        let initialized = handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::InitializeSecurityPolicy {
+                    policy: policy.clone(),
+                }),
+            })
+            .unwrap();
+        assert_eq!(initialized, ApplyResult::SecurityPolicy(policy.clone()));
+
+        let request = MutationRequestId::new(
+            principal.clone(),
+            light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+            light_stream_core::RequestSequence::new(1),
+        );
+        let next_credential = light_stream_core::CredentialRef::new(
+            light_stream_core::CredentialId::parse("admin").unwrap(),
+            light_stream_core::CredentialGeneration::new(2).unwrap(),
+        );
+        let mutation = SecurityMutation::new(
+            request,
+            policy.revision(),
+            light_stream_core::SecurityChange::AddTokenGeneration {
+                verifier: light_stream_core::TokenVerifier::new(
+                    next_credential,
+                    principal,
+                    light_stream_core::TokenVerifierDigest::from_token_bytes(
+                        b"next-test-security-token",
+                    ),
+                ),
+            },
+        );
+        let first = handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::ApplySecurityMutation {
+                    mutation: mutation.clone(),
+                }),
+            })
+            .unwrap();
+        let retry = handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::ApplySecurityMutation { mutation }),
+            })
+            .unwrap();
+        assert_eq!(first, retry);
+        let committed = handles.reader.security_policy().unwrap().unwrap();
+        assert_eq!(committed.revision().get(), 2);
+        assert_eq!(committed.token_verifiers().len(), 2);
+
+        let (_, artifact) = handles.state_machine.db.build_snapshot().unwrap();
+        let mut artifact = artifact.reader().unwrap();
+        let mut snapshotted = None;
+        while let Some(record) = artifact.next_record().unwrap() {
+            if let SnapshotRecord::State { key, value } = record
+                && key == KEY_SECURITY_POLICY
+            {
+                snapshotted = Some(decode::<SecurityPolicy>(&value).unwrap());
+            }
+        }
+        assert_eq!(snapshotted, Some(committed));
+    }
+
+    #[test]
+    fn secured_transport_activation_updates_topology_and_policy_atomically() {
+        let directory = ProjectTestDir::new("secured-transport");
+        let (cluster, stream) = ids();
+        let handles = create_control_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let initial_topology = test_topology();
+        handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapControl {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                    topology: Some(initial_topology.clone()),
+                    security: None,
+                    data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
+                    max_streams: 8,
+                    max_partitions_per_stream: 4,
+                }),
+            })
+            .unwrap();
+        let secured_node = light_stream_core::NodeDescriptor::new(
+            NodeId::new(1).unwrap(),
+            "https://127.0.0.1:7101",
+            "https://127.0.0.1:7201",
+        );
+        let secured_topology =
+            ClusterTopology::try_new(2, [secured_node.clone()], [secured_node.node_id()]).unwrap();
+        let (policy, principal, _) = test_security_policy(cluster);
+        let request = MutationRequestId::new(
+            principal,
+            light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+            light_stream_core::RequestSequence::new(1),
+        );
+        let command = GroupCommand::ActivateSecuredTransport {
+            request,
+            topology: secured_topology.clone(),
+            policy: policy.clone(),
+        };
+        let first = handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(command.clone()),
+            })
+            .unwrap();
+        let retry = handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    3,
+                ),
+                payload: EntryPayload::Normal(command),
+            })
+            .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(
+            handles.reader.cluster_topology().unwrap(),
+            Some(secured_topology)
+        );
+        assert_eq!(handles.reader.security_policy().unwrap(), Some(policy));
+    }
+
+    #[test]
+    fn secured_transport_activation_rejects_missing_peer_coverage_atomically() {
+        let directory = ProjectTestDir::new("secured-transport-missing-peer");
+        let (cluster, stream) = ids();
+        let handles = create_control_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let initial_topology = test_topology();
+        handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::BootstrapControl {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                    topology: Some(initial_topology.clone()),
+                    security: None,
+                    data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
+                    max_streams: 8,
+                    max_partitions_per_stream: 4,
+                }),
+            })
+            .unwrap();
+        let secured_node = light_stream_core::NodeDescriptor::new(
+            NodeId::new(1).unwrap(),
+            "https://127.0.0.1:7101",
+            "https://127.0.0.1:7201",
+        );
+        let secured_topology =
+            ClusterTopology::try_new(2, [secured_node.clone()], [secured_node.node_id()]).unwrap();
+        let (covered_policy, principal, _) = test_security_policy(cluster);
+        let policy = SecurityPolicy::try_new(
+            covered_policy.cluster(),
+            covered_policy.revision(),
+            covered_policy.revocation_revision(),
+            covered_policy.grants().clone(),
+            covered_policy.token_verifiers().to_vec(),
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let result = handles
+            .state_machine
+            .db
+            .apply_entry(GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    2,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::ActivateSecuredTransport {
+                    request: MutationRequestId::new(
+                        principal,
+                        light_stream_core::MutationSessionId::from_uuid(Uuid::new_v4()),
+                        light_stream_core::RequestSequence::new(1),
+                    ),
+                    topology: secured_topology,
+                    policy,
+                }),
+            })
+            .unwrap();
+
+        assert_eq!(
+            result,
+            ApplyResult::Rejected(DomainError::SecurityPolicyConflict)
+        );
+        assert_eq!(
+            handles.reader.cluster_topology().unwrap(),
+            Some(initial_topology)
+        );
+        assert_eq!(handles.reader.security_policy().unwrap(), None);
     }
 
     #[tokio::test]
@@ -7023,6 +7604,7 @@ mod tests {
                 payload: EntryPayload::Normal(GroupCommand::BootstrapControl {
                     spec,
                     topology: Some(test_topology()),
+                    security: None,
                     data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
                     max_streams: 8,
                     max_partitions_per_stream: 4,
@@ -7128,6 +7710,7 @@ mod tests {
                 GroupCommand::BootstrapControl {
                     spec: bootstrap,
                     topology: Some(topology.clone()),
+                    security: None,
                     data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
                     max_streams: 8,
                     max_partitions_per_stream: 4,
@@ -7530,6 +8113,7 @@ mod tests {
                                 StreamName::parse("bootstrap").unwrap(),
                             ),
                             topology: None,
+                            security: None,
                             data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap()],
                             max_streams: 8,
                             max_partitions_per_stream: 4,

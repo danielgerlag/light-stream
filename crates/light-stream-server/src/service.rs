@@ -3,7 +3,7 @@ use std::sync::Arc;
 use light_stream_core::{
     AdministrationIntent, AdministrationLifecycle, AdministrationOperation,
     AdministrationRequestId, Capability, CapabilityReport, CapabilitySupport, ClusterId, GroupId,
-    HealthStatus, NodeDescriptor, NodeId, SecurityMode,
+    HealthStatus, NodeDescriptor, NodeId, Permission, PrincipalId, ResourceScope, SecurityPolicy,
 };
 use light_stream_proto::{
     admit_replay_lease_from_wire, advance_retention_from_wire, bookmark_page_to_wire,
@@ -23,11 +23,15 @@ use light_stream_proto::{
 };
 use tonic::{Request, Response, Status};
 
-use crate::{BUILD_REVISION, runtime::ClusterManager};
+use crate::{
+    BUILD_REVISION,
+    runtime::ClusterManager,
+    security::{Permit, RuntimeSecurityConfig, action},
+};
 
 pub struct PublicApi {
     cluster: Arc<ClusterManager>,
-    security_mode: SecurityMode,
+    security: RuntimeSecurityConfig,
     public_address: String,
     peer_address: String,
 }
@@ -35,13 +39,13 @@ pub struct PublicApi {
 impl PublicApi {
     pub fn new(
         cluster: Arc<ClusterManager>,
-        security_mode: SecurityMode,
+        security: RuntimeSecurityConfig,
         public_address: String,
         peer_address: String,
     ) -> Self {
         Self {
             cluster,
-            security_mode,
+            security,
             public_address,
             peer_address,
         }
@@ -59,10 +63,71 @@ impl PublicApi {
             Capability::Retention,
             Capability::ProtectedReplay,
             Capability::ConsumerCheckpoints,
+            Capability::Security,
         ]
         .into_iter()
         .map(|capability| CapabilityReport::new(capability, CapabilitySupport::Available))
         .collect()
+    }
+
+    async fn policy_for_request(&self) -> Result<Option<SecurityPolicy>, Status> {
+        if self.security.mode() == light_stream_core::SecurityMode::LocalInsecure {
+            return Ok(None);
+        }
+        if self.cluster.identity().await.is_some() {
+            if let Ok(policy) = self.cluster.confirmed_security_policy().await {
+                self.security
+                    .renew_policy(policy)
+                    .map_err(|error| Status::unavailable(error.to_string()))?;
+            }
+            return self
+                .security
+                .current_policy()
+                .map_err(|error| Status::unavailable(error.to_string()));
+        }
+        Ok(self.security.bootstrap_policy().cloned())
+    }
+
+    async fn admit<A, T>(
+        &self,
+        request: &Request<T>,
+        permission: Permission,
+        resource: ResourceScope,
+        claimed_principal: Option<&PrincipalId>,
+    ) -> Result<Permit<A>, Status> {
+        let policy = self.policy_for_request().await?;
+        let permit = self.security.authorize(
+            request.metadata(),
+            policy.as_ref(),
+            permission,
+            &resource,
+            claimed_principal,
+        )?;
+        let _ = permit.principal();
+        Ok(permit)
+    }
+
+    async fn configured_cluster_scope(&self) -> ResourceScope {
+        let cluster = match self.security.configured_cluster() {
+            Some(cluster) => cluster,
+            None => self
+                .cluster
+                .identity()
+                .await
+                .unwrap_or_else(|| ClusterId::from_uuid(uuid::Uuid::nil())),
+        };
+        ResourceScope::Cluster { cluster }
+    }
+
+    async fn reauthorize<A, B>(
+        &self,
+        permit: &Permit<A>,
+        permission: Permission,
+        resource: ResourceScope,
+    ) -> Result<Permit<B>, Status> {
+        let policy = self.policy_for_request().await?;
+        self.security
+            .reauthorize(permit, policy.as_ref(), permission, &resource)
     }
 }
 
@@ -70,11 +135,20 @@ impl PublicApi {
 impl LightStream for PublicApi {
     async fn health(
         &self,
-        _request: Request<v1::HealthRequest>,
+        request: Request<v1::HealthRequest>,
     ) -> Result<Response<v1::HealthResponse>, Status> {
+        let resource = self.configured_cluster_scope().await;
+        let _permit = self
+            .admit::<action::ClusterObserve, _>(
+                &request,
+                Permission::ClusterObserve,
+                resource,
+                None,
+            )
+            .await?;
         let cluster_id = self.cluster.identity().await;
         Ok(Response::new(health_to_wire(
-            &HealthStatus::new(true, BUILD_REVISION, self.security_mode),
+            &HealthStatus::new(true, BUILD_REVISION, self.security.mode()),
             &self.public_address,
             &self.peer_address,
             cluster_id.is_some(),
@@ -84,8 +158,17 @@ impl LightStream for PublicApi {
 
     async fn capabilities(
         &self,
-        _request: Request<v1::CapabilitiesRequest>,
+        request: Request<v1::CapabilitiesRequest>,
     ) -> Result<Response<v1::CapabilitiesResponse>, Status> {
+        let resource = self.configured_cluster_scope().await;
+        let _permit = self
+            .admit::<action::ClusterObserve, _>(
+                &request,
+                Permission::ClusterObserve,
+                resource,
+                None,
+            )
+            .await?;
         Ok(Response::new(capabilities_to_wire(
             BUILD_REVISION,
             &self.capabilities(),
@@ -96,9 +179,26 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::BootstrapRequest>,
     ) -> Result<Response<v1::BootstrapResponse>, Status> {
+        let cluster = request
+            .get_ref()
+            .cluster_id
+            .parse::<ClusterId>()
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let _permit = self
+            .admit::<action::ClusterBootstrap, _>(
+                &request,
+                Permission::ClusterBootstrap,
+                ResourceScope::Cluster { cluster },
+                None,
+            )
+            .await?;
         let spec = bootstrap_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        let response = match self.cluster.bootstrap(spec).await {
+        let result = match self.security.bootstrap_policy() {
+            Some(policy) => self.cluster.bootstrap_secured(spec, policy.clone()).await,
+            None => self.cluster.bootstrap(spec).await,
+        };
+        let response = match result {
             Ok(result) => bootstrap_to_wire(&result),
             Err(error) => v1::BootstrapResponse {
                 result: Some(v1::bootstrap_response::Result::Error(domain_error_to_wire(
@@ -113,6 +213,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::CreateStreamRequest>,
     ) -> Result<Response<v1::StreamResponse>, Status> {
+        let _permit = self
+            .admit::<action::StreamCreate, _>(
+                &request,
+                Permission::StreamCreate,
+                all_streams_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let (cluster, spec) = create_stream_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self.cluster.create_stream(cluster, spec).await {
@@ -128,12 +236,47 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::DescribeStreamRequest>,
     ) -> Result<Response<v1::StreamResponse>, Status> {
+        let discover = if request.get_ref().stream_id.is_empty() {
+            Some(
+                self.admit::<action::StreamDiscover, _>(
+                    &request,
+                    Permission::StreamDiscover,
+                    all_streams_scope(&request.get_ref().cluster_id)?,
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            let _permit = self
+                .admit::<action::StreamDescribe, _>(
+                    &request,
+                    Permission::StreamDescribe,
+                    stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                    None,
+                )
+                .await?;
+            None
+        };
         let request = request.into_inner();
         let (cluster, stream_id, name) =
             stream_selector_from_wire(request.cluster_id, request.stream_id, request.stream_name)
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self.cluster.describe_stream(cluster, stream_id, name).await {
-            Ok(value) => v1::stream_response::Result::Stream(stream_to_wire(&value)),
+            Ok(value) => {
+                if let Some(discover) = discover {
+                    let _permit = self
+                        .reauthorize::<action::StreamDiscover, action::StreamDescribe>(
+                            &discover,
+                            Permission::StreamDescribe,
+                            ResourceScope::Stream {
+                                cluster,
+                                stream: value.stream(),
+                            },
+                        )
+                        .await?;
+                }
+                v1::stream_response::Result::Stream(stream_to_wire(&value))
+            }
             Err(error) => v1::stream_response::Result::Error(domain_error_to_wire(&error)),
         };
         Ok(Response::new(v1::StreamResponse {
@@ -145,6 +288,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ListStreamsRequest>,
     ) -> Result<Response<v1::ListStreamsResponse>, Status> {
+        let _permit = self
+            .admit::<action::StreamDescribe, _>(
+                &request,
+                Permission::StreamDescribe,
+                all_streams_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let cluster = request.into_inner().cluster_id.parse().map_err(
             |error: light_stream_core::DomainError| Status::invalid_argument(error.to_string()),
         )?;
@@ -163,6 +314,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::DeleteStreamRequest>,
     ) -> Result<Response<v1::StreamResponse>, Status> {
+        let _permit = self
+            .admit::<action::StreamDelete, _>(
+                &request,
+                Permission::StreamDelete,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let request = request.into_inner();
         let cluster =
             request
@@ -191,6 +350,27 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::RouteRequest>,
     ) -> Result<Response<v1::RouteResponse>, Status> {
+        let discover = if request.get_ref().stream_id.is_empty() {
+            Some(
+                self.admit::<action::StreamDiscover, _>(
+                    &request,
+                    Permission::StreamDiscover,
+                    all_streams_scope(&request.get_ref().cluster_id)?,
+                    None,
+                )
+                .await?,
+            )
+        } else {
+            let _permit = self
+                .admit::<action::RouteResolve, _>(
+                    &request,
+                    Permission::RouteResolve,
+                    stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                    None,
+                )
+                .await?;
+            None
+        };
         let request = request.into_inner();
         let partition = light_stream_core::PartitionId::new(request.partition_id);
         let (cluster, stream_id, name) =
@@ -201,10 +381,24 @@ impl LightStream for PublicApi {
             .route(cluster, stream_id, name, partition)
             .await
         {
-            Ok(route) => v1::route_response::Result::Route(route_to_wire(
-                &route,
-                self.cluster.route_leader(route.group()).await.as_ref(),
-            )),
+            Ok(route) => {
+                if let Some(discover) = discover {
+                    let _permit = self
+                        .reauthorize::<action::StreamDiscover, action::RouteResolve>(
+                            &discover,
+                            Permission::RouteResolve,
+                            ResourceScope::Stream {
+                                cluster,
+                                stream: route.stream(),
+                            },
+                        )
+                        .await?;
+                }
+                v1::route_response::Result::Route(route_to_wire(
+                    &route,
+                    self.cluster.route_leader(route.group()).await.as_ref(),
+                ))
+            }
             Err(error) => v1::route_response::Result::Error(domain_error_to_wire(&error)),
         };
         Ok(Response::new(v1::RouteResponse {
@@ -216,6 +410,15 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::PublishRequest>,
     ) -> Result<Response<v1::PublishResponse>, Status> {
+        let claimed = producer_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::Publish, _>(
+                &request,
+                Permission::Publish,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         publish_probe_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         Ok(Response::new(unsupported_publish_to_wire()))
@@ -225,6 +428,15 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::PublishRequest>,
     ) -> Result<Response<v1::PublishResponse>, Status> {
+        let claimed = producer_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::Publish, _>(
+                &request,
+                Permission::Publish,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (batch, group, revision) = publish_batch_and_route_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let response = match self.cluster.publish(batch, group, revision).await {
@@ -246,6 +458,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::FetchRequest>,
     ) -> Result<Response<v1::FetchResponse>, Status> {
+        let _permit = self
+            .admit::<action::Fetch, _>(
+                &request,
+                Permission::Fetch,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, partition, offset, limit, group, revision) =
             fetch_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -268,6 +488,15 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ReceiptRequest>,
     ) -> Result<Response<v1::ReceiptResponse>, Status> {
+        let claimed = producer_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ReceiptRead, _>(
+                &request,
+                Permission::ReceiptRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (cluster, partition, request_id, group, revision) =
             receipt_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -294,6 +523,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::CreateBookmarkRequest>,
     ) -> Result<Response<v1::BookmarkResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkManage, _>(
+                &request,
+                Permission::BookmarkManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, spec, group, revision) = create_bookmark_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self
@@ -313,6 +550,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ResolveBookmarkRequest>,
     ) -> Result<Response<v1::BookmarkResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkRead, _>(
+                &request,
+                Permission::BookmarkRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, partition, name, group, revision) =
             resolve_bookmark_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -333,6 +578,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::DeleteBookmarkRequest>,
     ) -> Result<Response<v1::BookmarkResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkManage, _>(
+                &request,
+                Permission::BookmarkManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, partition, id, group, revision) =
             delete_bookmark_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -353,6 +606,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ListBookmarksRequest>,
     ) -> Result<Response<v1::ListBookmarksResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkRead, _>(
+                &request,
+                Permission::BookmarkRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, page_request, group, revision) =
             list_bookmarks_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -374,6 +635,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::CreateStreamBookmarkRequest>,
     ) -> Result<Response<v1::StreamBookmarkResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkManage, _>(
+                &request,
+                Permission::BookmarkManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, id, name, vector) = create_stream_bookmark_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self
@@ -395,6 +664,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ResolveStreamBookmarkRequest>,
     ) -> Result<Response<v1::StreamBookmarkResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkRead, _>(
+                &request,
+                Permission::BookmarkRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, stream, name) = resolve_stream_bookmark_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self
@@ -416,6 +693,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::DeleteStreamBookmarkRequest>,
     ) -> Result<Response<v1::StreamBookmarkResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkManage, _>(
+                &request,
+                Permission::BookmarkManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, stream, id) = delete_stream_bookmark_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self
@@ -437,6 +722,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ListStreamBookmarksRequest>,
     ) -> Result<Response<v1::ListStreamBookmarksResponse>, Status> {
+        let _permit = self
+            .admit::<action::BookmarkRead, _>(
+                &request,
+                Permission::BookmarkRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let request = list_stream_bookmarks_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         match self.cluster.list_stream_bookmarks(&request).await {
@@ -453,6 +746,15 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::AdvanceRetentionRequest>,
     ) -> Result<Response<v1::AdvanceRetentionResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::RetentionManage, _>(
+                &request,
+                Permission::RetentionManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (cluster, request, group, revision) = advance_retention_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self
@@ -476,6 +778,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::RetentionStatusRequest>,
     ) -> Result<Response<v1::RetentionStatusResponse>, Status> {
+        let _permit = self
+            .admit::<action::RetentionRead, _>(
+                &request,
+                Permission::RetentionRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, partition, group, revision) =
             retention_status_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -500,6 +810,20 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::AdmitReplayLeaseRequest>,
     ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let range = request
+            .get_ref()
+            .range
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("replay range is required"))?;
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ReplayManage, _>(
+                &request,
+                Permission::ReplayManage,
+                stream_scope(&request.get_ref().cluster_id, &range.stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (cluster, request, group, revision) =
             admit_replay_lease_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -520,6 +844,15 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::RenewReplayLeaseRequest>,
     ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ReplayManage, _>(
+                &request,
+                Permission::ReplayManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (cluster, request, group, revision) =
             renew_replay_lease_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -540,6 +873,15 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ReleaseReplayLeaseRequest>,
     ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ReplayManage, _>(
+                &request,
+                Permission::ReplayManage,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (cluster, request, group, revision) =
             release_replay_lease_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -560,6 +902,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::GetReplayLeaseRequest>,
     ) -> Result<Response<v1::ReplayLeaseResponse>, Status> {
+        let permit = self
+            .admit::<action::ReplayRead, _>(
+                &request,
+                Permission::ReplayRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (cluster, partition, lease, group, revision) =
             get_replay_lease_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -568,6 +918,15 @@ impl LightStream for PublicApi {
             .replay_lease(cluster, partition, lease, group, revision)
             .await
         {
+            Ok(lease)
+                if permit.principal().is_some_and(|principal| {
+                    principal != lease.request().request().principal()
+                }) =>
+            {
+                return Err(Status::permission_denied(
+                    "replay lease belongs to another principal",
+                ));
+            }
             Ok(lease) => v1::replay_lease_response::Result::Lease(replay_lease_to_wire(&lease)),
             Err(error) => v1::replay_lease_response::Result::Error(domain_error_to_wire(&error)),
         };
@@ -580,8 +939,35 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::FetchProtectedRequest>,
     ) -> Result<Response<v1::FetchResponse>, Status> {
+        let permit = self
+            .admit::<action::ReplayRead, _>(
+                &request,
+                Permission::ReplayRead,
+                stream_scope(&request.get_ref().cluster_id, &request.get_ref().stream_id)?,
+                None,
+            )
+            .await?;
         let (request, group, revision) = fetch_protected_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let lease = self
+            .cluster
+            .replay_lease(
+                request.cluster(),
+                request.partition(),
+                request.lease(),
+                group,
+                revision,
+            )
+            .await
+            .map_err(|error| Status::failed_precondition(error.to_string()))?;
+        if permit
+            .principal()
+            .is_some_and(|principal| principal != lease.request().request().principal())
+        {
+            return Err(Status::permission_denied(
+                "replay lease belongs to another principal",
+            ));
+        }
         let response = match self.cluster.fetch_protected(request, group, revision).await {
             Ok(page) => fetch_to_wire(&page),
             Err(error) => v1::FetchResponse {
@@ -597,6 +983,19 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::GetCheckpointRequest>,
     ) -> Result<Response<v1::GetCheckpointResponse>, Status> {
+        let key = request
+            .get_ref()
+            .key
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("checkpoint key is required"))?;
+        let _permit = self
+            .admit::<action::CheckpointRead, _>(
+                &request,
+                Permission::CheckpointRead,
+                stream_scope(&key.cluster_id, &key.stream_id)?,
+                None,
+            )
+            .await?;
         let (key, group, revision) = get_checkpoint_from_wire(request.into_inner())
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let result = match self.cluster.checkpoint(key, group, revision).await {
@@ -614,6 +1013,20 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::CompareAndSetCheckpointRequest>,
     ) -> Result<Response<v1::CompareAndSetCheckpointResponse>, Status> {
+        let key = request
+            .get_ref()
+            .key
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("checkpoint key is required"))?;
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::CheckpointManage, _>(
+                &request,
+                Permission::CheckpointManage,
+                stream_scope(&key.cluster_id, &key.stream_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
         let (mutation, group, revision) =
             compare_and_set_checkpoint_from_wire(request.into_inner())
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
@@ -632,10 +1045,145 @@ impl LightStream for PublicApi {
         }))
     }
 
+    async fn get_security_policy(
+        &self,
+        request: Request<v1::GetSecurityPolicyRequest>,
+    ) -> Result<Response<v1::SecurityPolicyResponse>, Status> {
+        let _permit = self
+            .admit::<action::SecurityObserve, _>(
+                &request,
+                Permission::SecurityObserve,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
+        let result = match self.cluster.confirmed_security_policy().await {
+            Ok(policy) => {
+                self.security
+                    .renew_policy(policy.clone())
+                    .map_err(|error| Status::unavailable(error.to_string()))?;
+                v1::security_policy_response::Result::Policy(security_policy_summary(&policy))
+            }
+            Err(error) => v1::security_policy_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::SecurityPolicyResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn apply_security_mutation(
+        &self,
+        request: Request<v1::ApplySecurityMutationRequest>,
+    ) -> Result<Response<v1::SecurityPolicyResponse>, Status> {
+        let mutation: light_stream_core::SecurityMutation =
+            serde_json::from_str(&request.get_ref().mutation_json)
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let claimed = mutation.request().principal().clone();
+        let _permit = self
+            .admit::<action::SecurityAdmin, _>(
+                &request,
+                Permission::SecurityAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                Some(&claimed),
+            )
+            .await?;
+        let cluster: ClusterId = request.get_ref().cluster_id.parse().map_err(
+            |error: light_stream_core::DomainError| Status::invalid_argument(error.to_string()),
+        )?;
+        if cluster != self.security.configured_cluster().unwrap_or(cluster) {
+            return Err(Status::permission_denied(
+                "security mutation targets another cluster",
+            ));
+        }
+        let result = match self.cluster.apply_security_mutation(mutation).await {
+            Ok(policy) => {
+                self.security
+                    .renew_policy(policy.clone())
+                    .map_err(|error| Status::unavailable(error.to_string()))?;
+                v1::security_policy_response::Result::Policy(security_policy_summary(&policy))
+            }
+            Err(error) => v1::security_policy_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::SecurityPolicyResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn activate_secured_transport(
+        &self,
+        request: Request<v1::ActivateSecuredTransportRequest>,
+    ) -> Result<Response<v1::SecurityPolicyResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::SecurityAdmin, _>(
+                &request,
+                Permission::SecurityAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
+        let request = request.into_inner();
+        let cluster: ClusterId =
+            request
+                .cluster_id
+                .parse()
+                .map_err(|error: light_stream_core::DomainError| {
+                    Status::invalid_argument(error.to_string())
+                })?;
+        let policy: SecurityPolicy = serde_json::from_str(&request.policy_json)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let nodes = request
+            .nodes
+            .into_iter()
+            .map(|node| {
+                Ok(NodeDescriptor::new(
+                    NodeId::new(node.node_id)?,
+                    node.public_uri,
+                    node.peer_uri,
+                ))
+            })
+            .collect::<Result<Vec<_>, light_stream_core::DomainError>>()
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let mutation_request = light_stream_proto::mutation_request_id_from_wire(
+            request
+                .request_id
+                .ok_or_else(|| Status::invalid_argument("request_id is required"))?,
+        )
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .activate_secured_transport(
+                cluster,
+                mutation_request,
+                request.expected_topology_revision,
+                nodes,
+                policy,
+            )
+            .await
+        {
+            Ok(policy) => {
+                v1::security_policy_response::Result::Policy(security_policy_summary(&policy))
+            }
+            Err(error) => v1::security_policy_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::SecurityPolicyResponse {
+            result: Some(result),
+        }))
+    }
+
     async fn diagnostics(
         &self,
-        _request: Request<v1::DiagnosticsRequest>,
+        request: Request<v1::DiagnosticsRequest>,
     ) -> Result<Response<v1::DiagnosticsResponse>, Status> {
+        let resource = self.configured_cluster_scope().await;
+        let _permit = self
+            .admit::<action::ClusterObserve, _>(
+                &request,
+                Permission::ClusterObserve,
+                resource,
+                None,
+            )
+            .await?;
         let diagnostic = self.cluster.diagnostics().await;
         Ok(Response::new(v1::DiagnosticsResponse {
             node_id: diagnostic.node_id,
@@ -711,6 +1259,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::SnapshotGroupRequest>,
     ) -> Result<Response<v1::SnapshotGroupResponse>, Status> {
+        let _permit = self
+            .admit::<action::SnapshotManage, _>(
+                &request,
+                Permission::SnapshotManage,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let request = request.into_inner();
         let result = match request.cluster_id.parse::<light_stream_core::ClusterId>() {
             Ok(cluster) => {
@@ -743,6 +1299,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::ReplaceVoterRequest>,
     ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let request = request.into_inner();
         let result = (|| {
             let add = request.add_node.ok_or_else(|| {
@@ -776,6 +1340,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::TransferLeadershipRequest>,
     ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let request = request.into_inner();
         let result = (|| {
             Ok((
@@ -798,6 +1370,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::AdministrationStatusRequest>,
     ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let request = request.into_inner();
         let result = match (
             request.cluster_id.parse::<ClusterId>(),
@@ -817,6 +1397,14 @@ impl LightStream for PublicApi {
         &self,
         request: Request<v1::AbortAdministrationRequest>,
     ) -> Result<Response<v1::AdministrationResponse>, Status> {
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
         let request = request.into_inner();
         let result = match (
             request.cluster_id.parse::<ClusterId>(),
@@ -895,5 +1483,70 @@ fn administration_response(
                 domain_error_to_wire(&error),
             )),
         },
+    }
+}
+
+fn cluster_scope(value: &str) -> Result<ResourceScope, Status> {
+    Ok(ResourceScope::Cluster {
+        cluster: value
+            .parse()
+            .map_err(|error: light_stream_core::DomainError| {
+                Status::invalid_argument(error.to_string())
+            })?,
+    })
+}
+
+fn all_streams_scope(value: &str) -> Result<ResourceScope, Status> {
+    Ok(ResourceScope::AllStreams {
+        cluster: value
+            .parse()
+            .map_err(|error: light_stream_core::DomainError| {
+                Status::invalid_argument(error.to_string())
+            })?,
+    })
+}
+
+fn stream_scope(cluster: &str, stream: &str) -> Result<ResourceScope, Status> {
+    Ok(ResourceScope::Stream {
+        cluster: cluster
+            .parse()
+            .map_err(|error: light_stream_core::DomainError| {
+                Status::invalid_argument(error.to_string())
+            })?,
+        stream: stream
+            .parse()
+            .map_err(|error: light_stream_core::DomainError| {
+                Status::invalid_argument(error.to_string())
+            })?,
+    })
+}
+
+fn producer_principal(
+    value: Option<&v1::ProducerRequestId>,
+) -> Result<Option<PrincipalId>, Status> {
+    value
+        .map(|value| {
+            PrincipalId::parse(&value.principal_id)
+                .map_err(|error| Status::invalid_argument(error.to_string()))
+        })
+        .transpose()
+}
+
+fn mutation_principal(
+    value: Option<&v1::MutationRequestId>,
+) -> Result<Option<PrincipalId>, Status> {
+    value
+        .map(|value| {
+            PrincipalId::parse(&value.principal_id)
+                .map_err(|error| Status::invalid_argument(error.to_string()))
+        })
+        .transpose()
+}
+
+fn security_policy_summary(policy: &SecurityPolicy) -> v1::SecurityPolicySummary {
+    v1::SecurityPolicySummary {
+        cluster_id: policy.cluster().to_string(),
+        policy_revision: policy.revision().get(),
+        revocation_revision: policy.revocation_revision().get(),
     }
 }

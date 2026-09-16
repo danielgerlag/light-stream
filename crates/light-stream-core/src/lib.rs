@@ -56,6 +56,11 @@ pub use replay::{
     ReplayLease, ReplayLeaseLifecycle, ReplayLeaseRequest, ReplayRange, RetentionRequest,
     RetentionResult, RetentionStatus,
 };
-pub use security::SecurityMode;
+pub use security::{
+    AuthenticatedPrincipal, CertificateFingerprint, CredentialGeneration, CredentialId,
+    CredentialRef, CredentialStatus, Grant, PeerCertificateBinding, Permission, PolicyRevision,
+    ResourceScope, RevocationRevision, SecurityChange, SecurityMode, SecurityMutation,
+    SecurityPolicy, TokenVerifier, TokenVerifierDigest,
+};
 
 pub const MAX_PUBLIC_MESSAGE_BYTES: usize = 9 * 1024 * 1024;

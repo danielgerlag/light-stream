@@ -54,6 +54,8 @@ def trial(label, server_binary, cli_binary, artifacts, index, operations):
                 cli_binary,
                 "--endpoint",
                 endpoint,
+                "--deadline-ms",
+                "30000",
                 "cluster",
                 "bootstrap",
                 "--cluster-id",
@@ -73,6 +75,8 @@ def trial(label, server_binary, cli_binary, artifacts, index, operations):
                     cli_binary,
                     "--endpoint",
                     endpoint,
+                    "--deadline-ms",
+                    "30000",
                     "publish",
                     "--cluster-id",
                     cluster,
@@ -99,6 +103,8 @@ def trial(label, server_binary, cli_binary, artifacts, index, operations):
                     cli_binary,
                     "--endpoint",
                     endpoint,
+                    "--deadline-ms",
+                    "30000",
                     "fetch",
                     "--cluster-id",
                     cluster,
@@ -123,7 +129,7 @@ def trial(label, server_binary, cli_binary, artifacts, index, operations):
             "fetch_samples_seconds": fetch_seconds,
         }
     finally:
-        server.stop()
+        server.kill()
 
 
 def summarize(trials):
