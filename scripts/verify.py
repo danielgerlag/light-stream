@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run release verification for LS01 through LS07 and retain evidence."""
-
 import argparse
 import base64
+import concurrent.futures
+import gzip
 import hashlib
+import io
 import json
 import os
 import platform
@@ -15,15 +16,21 @@ import socket
 import ssl
 import subprocess
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import unittest
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+import package_release
+
 KNOWN_SCENARIOS = {
     "all",
     "bootstrap",
@@ -39,6 +46,7 @@ KNOWN_SCENARIOS = {
     "unsupported-publish",
     "process-isolation",
     "evidence-preservation",
+    "package",
 }
 PRODUCTION_PACKAGES = (
     "light-stream-server",
@@ -69,10 +77,12 @@ def append_jsonl(path, value):
 def source_paths():
     paths = [
         ROOT / ".cargo" / "config.toml",
+        ROOT / ".dockerignore",
         ROOT / ".gitignore",
         ROOT / "Cargo.toml",
         ROOT / "Cargo.lock",
         ROOT / "README.md",
+        ROOT / "packaging" / "Containerfile",
         ROOT / "docs" / "architecture" / "runtime.md",
         ROOT / "artifacts" / "LS02b" / "design" / "synthesis.md",
         ROOT / "artifacts" / "LS02b" / "index.md",
@@ -121,17 +131,18 @@ def source_fingerprint():
 
 
 class CommandRunner:
-    def __init__(self, artifacts):
+    def __init__(self, artifacts, cwd=ROOT):
         self.artifacts = artifacts
         self.commands_path = artifacts / "commands.jsonl"
         self.counter = 0
+        self.cwd = cwd
 
-    def run(self, command, name, expected_codes=(0,), timeout=300, env=None):
+    def run(self, command, name, expected_codes=(0,), timeout=300, env=None, cwd=None):
         self.counter += 1
         started = time.monotonic()
         result = subprocess.run(
             [str(item) for item in command],
-            cwd=ROOT,
+            cwd=cwd or self.cwd,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -146,6 +157,7 @@ class CommandRunner:
             self.commands_path,
             {
                 "command": [str(item) for item in command],
+                "cwd": str(cwd or self.cwd),
                 "duration_seconds": time.monotonic() - started,
                 "expected_codes": list(expected_codes),
                 "name": name,
@@ -355,6 +367,7 @@ class OwnedServer:
         publish_batch_bytes=None,
         publish_coalesce_us=None,
         ready_timeout_seconds=5,
+        cwd=ROOT,
     ):
         self.data_dir = data_dir
         self.label = label
@@ -435,7 +448,7 @@ class OwnedServer:
         self.ready_timeout_seconds = ready_timeout_seconds
         self.process = subprocess.Popen(
             self.command,
-            cwd=ROOT,
+            cwd=cwd,
             stdout=self.stdout,
             stderr=self.stderr,
         )
@@ -1088,6 +1101,56 @@ def peer_request_frame(cluster, group, sender, target, payload):
     )
     request = protobuf_bytes_field(1, envelope)
     return b"\x00" + len(request).to_bytes(4, "big") + request
+
+
+def docker_archive_image_id(path):
+    with tarfile.open(path, mode="r:") as archive:
+        manifest_file = archive.extractfile("manifest.json")
+        if manifest_file is None:
+            raise VerificationError("Docker archive omitted manifest.json")
+        manifest = json.load(manifest_file)
+    if not isinstance(manifest, list) or len(manifest) != 1:
+        raise VerificationError("Docker archive manifest is invalid")
+    config = manifest[0].get("Config")
+    if not isinstance(config, str):
+        raise VerificationError("Docker archive config identity is invalid")
+    if config.endswith(".json") and len(config) == 69:
+        digest = config[:-5]
+    elif config.startswith("blobs/sha256/") and len(config) == 77:
+        digest = config.removeprefix("blobs/sha256/")
+    else:
+        raise VerificationError("Docker archive config identity is invalid")
+    if any(value not in "0123456789abcdef" for value in digest):
+        raise VerificationError("Docker archive config digest is invalid")
+    return f"sha256:{digest}"
+
+
+def scan_docker_archive(path, forbidden):
+    with tarfile.open(path, mode="r:") as archive:
+        manifest_file = archive.extractfile("manifest.json")
+        if manifest_file is None:
+            raise VerificationError("Docker archive omitted manifest.json")
+        manifest_bytes = manifest_file.read()
+        package_release.scan_secrets(manifest_bytes, forbidden)
+        manifest = json.loads(manifest_bytes)
+        if not isinstance(manifest, list) or len(manifest) != 1:
+            raise VerificationError("Docker archive manifest is invalid")
+        names = [manifest[0].get("Config"), *manifest[0].get("Layers", [])]
+        if any(
+            not isinstance(name, str)
+            or PurePosixPath(name).is_absolute()
+            or ".." in PurePosixPath(name).parts
+            for name in names
+        ):
+            raise VerificationError("Docker archive blob path is invalid")
+        for name in names:
+            blob = archive.extractfile(name)
+            if blob is None:
+                raise VerificationError(f"Docker archive omitted {name}")
+            payload = blob.read()
+            if payload.startswith(b"\x1f\x8b"):
+                payload = gzip.decompress(payload)
+            package_release.scan_secrets(payload, forbidden)
 
 
 def run_publish_scenario(artifacts, runner, binaries):
@@ -9467,7 +9530,686 @@ def run_ls08_scenario(artifacts, runner, binaries, revision, profile, seed):
                 pass
 
 
+def run_ls09_package_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    external = tempfile.TemporaryDirectory(prefix="light-stream-ls09-package-")
+    external_root = Path(external.name)
+    package_output = external_root / "package-output-1"
+    second_package_output = external_root / "package-output-2"
+    extracted = external_root / "package-root"
+    secret_canary = f"LS09_SECRET_{secrets.token_urlsafe(32)}".encode()
+    epoch = int(
+        runner.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            "ls09-source-date-epoch",
+            timeout=10,
+        ).stdout.strip()
+    )
+    target = package_release.native_target()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        builds = [
+            executor.submit(
+                package_release.create_release,
+                output,
+                target,
+                revision,
+                epoch,
+                forbidden=(secret_canary,),
+            )
+            for output in (package_output, second_package_output)
+        ]
+        archive, sidecar, manifest = builds[0].result()
+        second_archive, second_sidecar, second_manifest = builds[1].result()
+    if (
+        archive.read_bytes() != second_archive.read_bytes()
+        or sidecar.read_bytes() != second_sidecar.read_bytes()
+        or manifest != second_manifest
+    ):
+        raise VerificationError("LS09 native package build is not reproducible")
+    current_revision, _ = source_fingerprint()
+    if current_revision != revision:
+        raise VerificationError("source changed during the LS09 package build")
+    archive_digest = sha256_file(archive)
+    retained_release = artifacts / "ls09" / "release"
+    retained_release.mkdir(parents=True)
+    retained_archive = retained_release / archive.name
+    retained_sidecar = retained_release / sidecar.name
+    shutil.copy2(archive, retained_archive)
+    shutil.copy2(sidecar, retained_sidecar)
+    package_root, extracted_manifest = package_release.extract_release(
+        archive,
+        extracted,
+        expected_sha256=archive_digest,
+    )
+    if extracted_manifest != manifest:
+        raise VerificationError("LS09 extracted manifest differs from the package manifest")
+    write_json(
+        artifacts / "binary-fingerprints.json",
+        {
+            Path(binary.path).name: {
+                "bytes": binary.bytes,
+                "path": binary.path,
+                "sha256": binary.sha256,
+            }
+            for binary in manifest.binaries
+        },
+    )
+    binaries = {
+        name: (package_root / "bin" / name).resolve()
+        for name in package_release.BINARIES
+    }
+    if any(ROOT in path.parents for path in binaries.values()):
+        raise VerificationError("LS09 packaged binary resolved inside the source checkout")
+    if any(not path.is_file() for path in binaries.values()):
+        raise VerificationError("LS09 package omitted a production binary")
+
+    previous_cwd = runner.cwd
+    runner.cwd = package_root
+    standalone = None
+    nodes = {}
+    image = {"verdict": "BLOCKED", "reason": "Docker is unavailable"}
+    try:
+        standalone_dir = external_root / "package-standalone"
+        started = time.monotonic()
+        standalone = OwnedServer(
+            binaries["light-streamd"],
+            standalone_dir,
+            artifacts / "node-logs",
+            "ls09-package-standalone",
+            cwd=package_root,
+        )
+        process_liveness_seconds = time.monotonic() - started
+        endpoint = f"http://{standalone.ready['public_address']}"
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        session = deterministic_uuid(rng)
+        runner.run(
+            [
+                binaries["light-streamctl"],
+                "--endpoint",
+                endpoint,
+                "--deadline-ms",
+                "30000",
+                "cluster",
+                "bootstrap",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--stream-name",
+                "package",
+            ],
+            "ls09-package-standalone-bootstrap",
+            timeout=60,
+        )
+        payload = artifacts / "samples" / "ls09-package.bin"
+        payload.parent.mkdir(parents=True, exist_ok=True)
+        payload.write_bytes(bytes(rng.randrange(0, 256) for _ in range(1024)))
+        published = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    cluster,
+                    stream,
+                    "package",
+                    session,
+                    1,
+                    payload,
+                    deadline_ms=30000,
+                ),
+                "ls09-package-standalone-publish",
+                timeout=40,
+            ),
+            "LS09 packaged standalone publish",
+        )
+        write_ready_seconds = time.monotonic() - started
+        fetched = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    deadline_ms=30000,
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "8",
+                ],
+                "ls09-package-standalone-fetch",
+                timeout=40,
+            ),
+            "LS09 packaged standalone fetch",
+        )
+        if fetched["page"]["records"][0]["payload"] != list(payload.read_bytes()):
+            raise VerificationError("LS09 package changed standalone record bytes")
+        for index in range(9):
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    endpoint,
+                    "--deadline-ms",
+                    "30000",
+                    "stream",
+                    "create",
+                    "--cluster-id",
+                    cluster,
+                    "--request-id",
+                    deterministic_uuid(rng),
+                    "--name",
+                    f"package-{index}",
+                    "--partitions",
+                    "1",
+                ],
+                f"ls09-package-stream-{index}",
+                timeout=30,
+            )
+        time.sleep(1)
+        rss_samples = []
+        rss_deadline = time.monotonic() + 5
+        while time.monotonic() < rss_deadline:
+            rss = subprocess.run(
+                ["ps", "-o", "rss=", "-p", str(standalone.process.pid)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            rss_samples.append(int(rss.stdout.strip()) * 1024)
+            time.sleep(0.25)
+        idle_rss_bytes = max(rss_samples)
+        standalone.stop()
+        standalone = None
+        restarted = OwnedServer(
+            binaries["light-streamd"],
+            standalone_dir,
+            artifacts / "node-logs",
+            "ls09-package-standalone-restart",
+            cwd=package_root,
+        )
+        standalone = restarted
+        restart_endpoint = f"http://{restarted.ready['public_address']}"
+        restart_fetch = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    restart_endpoint,
+                    deadline_ms=30000,
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "8",
+                ],
+                "ls09-package-standalone-restart-fetch",
+                timeout=40,
+            ),
+            "LS09 packaged standalone restart fetch",
+        )
+        if restart_fetch["page"]["records"] != fetched["page"]["records"]:
+            raise VerificationError("LS09 package restart changed standalone records")
+        standalone.stop()
+        standalone = None
+
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        node_configs = {}
+        used_ports = set()
+        for node_id in (1, 2, 3):
+            public_port = free_port()
+            while public_port in used_ports:
+                public_port = free_port()
+            used_ports.add(public_port)
+            peer_port = free_port()
+            while peer_port in used_ports:
+                peer_port = free_port()
+            used_ports.add(peer_port)
+            node_configs[node_id] = {
+                "public_address": f"127.0.0.1:{public_port}",
+                "peer_address": f"127.0.0.1:{peer_port}",
+                "endpoint": f"http://127.0.0.1:{public_port}",
+                "peer_uri": f"http://127.0.0.1:{peer_port}",
+                "data_dir": external_root / f"package-node-{node_id}",
+            }
+        for node_id, config in node_configs.items():
+            server = OwnedServer(
+                binaries["light-streamd"],
+                config["data_dir"],
+                artifacts / "node-logs",
+                f"ls09-package-node-{node_id}",
+                node_id=node_id,
+                public_address=config["public_address"],
+                peer_address=config["peer_address"],
+                advertise_public_uri=config["endpoint"],
+                advertise_peer_uri=config["peer_uri"],
+                peer_routes={
+                    target: node_configs[target]["peer_uri"]
+                    for target in node_configs
+                    if target != node_id
+                },
+                max_data_groups=1,
+                cwd=package_root,
+            )
+            nodes[node_id] = {**config, "server": server}
+        bootstrap = cli_endpoint_command(
+            binaries["light-streamctl"],
+            nodes[1]["endpoint"],
+            seeds=[nodes[2]["endpoint"], nodes[3]["endpoint"]],
+            deadline_ms=30000,
+        ) + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream,
+            "--stream-name",
+            "package",
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            bootstrap.extend(
+                [
+                    "--member",
+                    (
+                        f"{node_id},{nodes[node_id]['endpoint']},"
+                        f"{nodes[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        runner.run(bootstrap, "ls09-package-three-voter-bootstrap", timeout=60)
+        memberships = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            "ls09-package-three-voter-active",
+        )
+        leader = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["leader_loss_seconds"],
+            "ls09-package-three-voter-leader",
+        )
+        payload = artifacts / "samples" / "ls09-package-three-voter.bin"
+        payload.write_bytes(bytes(rng.randrange(0, 256) for _ in range(2048)))
+        published_three = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    nodes[leader]["endpoint"],
+                    cluster,
+                    stream,
+                    "package",
+                    deterministic_uuid(rng),
+                    1,
+                    payload,
+                    seeds=[
+                        node["endpoint"]
+                        for node_id, node in nodes.items()
+                        if node_id != leader
+                    ],
+                    deadline_ms=30000,
+                ),
+                "ls09-package-three-voter-publish",
+                timeout=40,
+            ),
+            "LS09 packaged three-voter publish",
+        )
+        reader_node = next(node_id for node_id in nodes if node_id != leader)
+        fetched_three = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[reader_node]["endpoint"],
+                    seeds=[
+                        node["endpoint"]
+                        for node_id, node in nodes.items()
+                        if node_id != reader_node
+                    ],
+                    deadline_ms=30000,
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "8",
+                ],
+                "ls09-package-three-voter-fetch",
+                timeout=40,
+            ),
+            "LS09 packaged three-voter fetch",
+        )
+        if fetched_three["page"]["records"][0]["payload"] != list(payload.read_bytes()):
+            raise VerificationError("LS09 package changed three-voter record bytes")
+
+        if not shutil.which("docker"):
+            raise VerificationError("LS09 package verification requires Docker")
+        image_tag = f"light-stream-ls09:{revision[:8]}-{uuid.uuid4().hex}"
+        image_ids = []
+        compressed_sizes = []
+        image_archives = []
+        container_id = None
+        try:
+            for index in (1, 2):
+                image_tar = (
+                    artifacts / "scratch" / "success" / f"image-{index}.tar"
+                )
+                runner.run(
+                    [
+                        "docker",
+                        "buildx",
+                        "build",
+                        "--no-cache",
+                        "--provenance=false",
+                        "--platform",
+                        "linux/arm64",
+                        "--file",
+                        ROOT / "packaging" / "Containerfile",
+                        "--build-arg",
+                        f"LIGHT_STREAM_BUILD_REVISION={revision}",
+                        "--build-arg",
+                        f"SOURCE_DATE_EPOCH={epoch}",
+                        "--tag",
+                        image_tag,
+                        "--output",
+                        (
+                            f"type=docker,dest={image_tar},"
+                            "rewrite-timestamp=true"
+                        ),
+                        ROOT,
+                    ],
+                    f"ls09-package-image-build-{index}",
+                    timeout=1800,
+                    cwd=ROOT,
+                )
+                image_payload = image_tar.read_bytes()
+                scan_docker_archive(
+                    image_tar,
+                    (secret_canary, str(ROOT).encode()),
+                )
+                image_ids.append(docker_archive_image_id(image_tar))
+                image_archives.append(image_tar)
+                compressed_sizes.append(
+                    len(gzip.compress(image_payload, compresslevel=9, mtime=0))
+                )
+            if len(set(image_ids)) != 1:
+                raise VerificationError("LS09 OCI image build is not reproducible")
+            image_id = image_ids[0]
+            compressed_image_bytes = compressed_sizes[0]
+            runner.run(
+                ["docker", "image", "load", "--input", image_archives[0]],
+                "ls09-package-image-load",
+                timeout=120,
+                cwd=ROOT,
+            )
+            inspected = runner.run(
+                [
+                    "docker",
+                    "image",
+                    "inspect",
+                    image_tag,
+                    "--format",
+                    "{{.Id}} {{.Size}}",
+                ],
+                "ls09-package-image-inspect",
+                timeout=30,
+                cwd=ROOT,
+            ).stdout.strip().split()
+            runtime_image_id = inspected[0]
+            image_bytes = int(inspected[1])
+            container_id = runner.run(
+                [
+                    "docker",
+                    "run",
+                    "--detach",
+                    "--rm",
+                    "--tmpfs",
+                    "/var/lib/light-stream:rw,mode=0777",
+                    "--publish",
+                    "127.0.0.1::7101",
+                    image_tag,
+                    "--public-listen",
+                    "0.0.0.0:7101",
+                    "--peer-listen",
+                    "0.0.0.0:7201",
+                    "--allow-insecure-non-loopback",
+                ],
+                "ls09-package-image-run",
+                timeout=30,
+                cwd=ROOT,
+            ).stdout.strip()
+            port_value = runner.run(
+                ["docker", "port", container_id, "7101/tcp"],
+                "ls09-package-image-port",
+                timeout=30,
+                cwd=ROOT,
+            ).stdout.strip()
+            image_endpoint = f"http://127.0.0.1:{port_value.rsplit(':', 1)[1]}"
+            deadline = time.monotonic() + 10
+            last = None
+            while time.monotonic() < deadline:
+                last = runner.run(
+                    [
+                        binaries["light-streamctl"],
+                        "--endpoint",
+                        image_endpoint,
+                        "--no-retry",
+                        "--deadline-ms",
+                        "1000",
+                        "health",
+                    ],
+                    "ls09-package-image-health",
+                    expected_codes=(0, 1, 5),
+                    timeout=3,
+                )
+                if last.returncode == 0:
+                    break
+                time.sleep(0.1)
+            if last is None or last.returncode != 0:
+                raise VerificationError("LS09 packaged image did not become healthy")
+            image_cluster = deterministic_uuid(rng)
+            image_stream = deterministic_uuid(rng)
+            runner.run(
+                [
+                    binaries["light-streamctl"],
+                    "--endpoint",
+                    image_endpoint,
+                    "--deadline-ms",
+                    "30000",
+                    "cluster",
+                    "bootstrap",
+                    "--cluster-id",
+                    image_cluster,
+                    "--stream-id",
+                    image_stream,
+                    "--stream-name",
+                    "image",
+                ],
+                "ls09-package-image-bootstrap",
+                timeout=60,
+            )
+            image_payload = artifacts / "samples" / "ls09-package-image.bin"
+            image_payload.write_bytes(b"packaged-image")
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    image_endpoint,
+                    image_cluster,
+                    image_stream,
+                    "package",
+                    deterministic_uuid(rng),
+                    1,
+                    image_payload,
+                    deadline_ms=30000,
+                ),
+                "ls09-package-image-publish",
+                timeout=40,
+            )
+            image_fetch = parse_json_output(
+                runner.run(
+                    cli_endpoint_command(
+                        binaries["light-streamctl"],
+                        image_endpoint,
+                        deadline_ms=30000,
+                    )
+                    + [
+                        "fetch",
+                        "--cluster-id",
+                        image_cluster,
+                        "--stream-id",
+                        image_stream,
+                        "--offset",
+                        "0",
+                        "--limit",
+                        "8",
+                    ],
+                    "ls09-package-image-fetch",
+                    timeout=40,
+                ),
+                "LS09 packaged image fetch",
+            )
+            if image_fetch["page"]["records"][0]["payload"] != list(
+                image_payload.read_bytes()
+            ):
+                raise VerificationError("LS09 image changed record bytes")
+            image = {
+                "image_id": image_id,
+                "runtime_image_id": runtime_image_id,
+                "reproducible_builds": 2,
+                "uncompressed_bytes": image_bytes,
+                "compressed_archive_bytes": compressed_image_bytes,
+                "maximum_compressed_bytes": 50 * 1024 * 1024,
+                "standalone_journey": "PASS",
+                "runtime_arguments": [
+                    "--public-listen",
+                    "0.0.0.0:7101",
+                    "--peer-listen",
+                    "0.0.0.0:7201",
+                    "--allow-insecure-non-loopback",
+                ],
+                "verdict": (
+                    "PASS"
+                    if compressed_image_bytes <= 50 * 1024 * 1024
+                    else "FAIL"
+                ),
+            }
+            if image["verdict"] != "PASS":
+                raise VerificationError("LS09 image exceeds the 50 MiB budget")
+        finally:
+            if container_id:
+                subprocess.run(
+                    ["docker", "rm", "--force", container_id],
+                    cwd=ROOT,
+                    capture_output=True,
+                )
+            subprocess.run(
+                ["docker", "image", "rm", "--force", image_tag],
+                cwd=ROOT,
+                capture_output=True,
+            )
+
+        journey = {
+            "archive": {
+                "bytes": archive.stat().st_size,
+                "sha256": archive_digest,
+                "manifest": json.loads(sidecar.read_text()),
+                "files": list(package_release.FILES),
+            },
+            "path_isolation": {
+                "cwd": str(package_root),
+                "source_checkout": str(ROOT),
+                "packaged_binaries_outside_checkout": True,
+            },
+            "standalone": {
+                "process_liveness_seconds": process_liveness_seconds,
+                "maximum_process_liveness_seconds": 5.0,
+                "write_ready_seconds": write_ready_seconds,
+                "target_write_ready_seconds": 1.0,
+                "write_ready_target": (
+                    "PASS" if write_ready_seconds <= 1.0 else "NOT_MET"
+                ),
+                "idle_rss_window_seconds": 5,
+                "idle_rss_samples_bytes": rss_samples,
+                "idle_rss_peak_bytes": idle_rss_bytes,
+                "target_idle_rss_bytes": 128 * 1024 * 1024,
+                "idle_rss_target": (
+                    "PASS"
+                    if idle_rss_bytes <= 128 * 1024 * 1024
+                    else "NOT_MET"
+                ),
+                "publish": published["receipt"],
+                "restart_records_verified": len(restart_fetch["page"]["records"]),
+            },
+            "three_voter": {
+                "memberships": memberships,
+                "leader": leader,
+                "publish": published_three["receipt"],
+                "fetch_verified": True,
+            },
+            "image": image,
+            "later_lanes": "NOT_IMPLEMENTED",
+            "verdict": "PASS",
+        }
+        if process_liveness_seconds > 5.0:
+            raise VerificationError("LS09 process liveness exceeded B0")
+        write_json(artifacts / "ls09" / "package-journey.json", journey)
+        write_json(
+            artifacts / "release-journey.json",
+            {
+                "implemented_unit": "package",
+                "package": "PASS",
+                "lifecycle": "NOT_IMPLEMENTED",
+                "export_restore": "NOT_IMPLEMENTED",
+                "verdict": "PASS",
+            },
+        )
+    finally:
+        runner.cwd = previous_cwd
+        if standalone is not None:
+            try:
+                standalone.stop()
+            except VerificationError:
+                pass
+        for node in nodes.values():
+            try:
+                node["server"].stop()
+            except VerificationError:
+                pass
+        external.cleanup()
+
+
 def run_selected(args, artifacts, runner, binaries, revision, profile):
+    if args.phase == "LS09":
+        if args.scenario != "package":
+            raise VerificationError(
+                "full LS09 verification is unavailable until lifecycle and restore are implemented"
+            )
+        run_ls09_package_scenario(
+            artifacts, runner, revision, profile, args.seed
+        )
+        return
     if args.phase == "LS08" or args.suite == "ls08-e2e":
         runner.run(
             [
@@ -9678,6 +10420,7 @@ def parse_args():
         "LS06",
         "LS07",
         "LS08",
+        "LS09",
     ):
         parser.error(f"unknown phase {args.phase!r}")
     if args.suite is not None and args.suite not in (
@@ -9812,6 +10555,40 @@ class VerifierHelperTests(unittest.TestCase):
         self.assertTrue(any(path.startswith("poc/") and path.endswith(".rs") for path in paths))
         self.assertTrue(any(path.startswith("poc/") and path.endswith(".py") for path in paths))
 
+    def test_docker_archive_scanner_reads_compressed_layers(self):
+        secret = b"LS09_COMPRESSED_SECRET"
+        layer_tar = io.BytesIO()
+        with tarfile.open(fileobj=layer_tar, mode="w") as layer:
+            info = tarfile.TarInfo("secret.txt")
+            info.size = len(secret)
+            layer.addfile(info, io.BytesIO(secret))
+        config_name = "a" * 64 + ".json"
+        layer_name = "layer.tar.gz"
+        docker_tar = io.BytesIO()
+        with tarfile.open(fileobj=docker_tar, mode="w") as archive:
+            manifest = json.dumps(
+                [
+                    {
+                        "Config": config_name,
+                        "RepoTags": ["test:latest"],
+                        "Layers": [layer_name],
+                    }
+                ]
+            ).encode()
+            for name, payload in (
+                ("manifest.json", manifest),
+                (config_name, b"{}"),
+                (layer_name, gzip.compress(layer_tar.getvalue())),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                archive.addfile(info, io.BytesIO(payload))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "image.tar"
+            path.write_bytes(docker_tar.getvalue())
+            with self.assertRaises(package_release.PackageError):
+                scan_docker_archive(path, (secret,))
+
     def test_directed_proxy_passes_delays_and_drops_real_bytes(self):
         upstream_port = free_port()
         stop = threading.Event()
@@ -9914,22 +10691,25 @@ def main():
     error_message = None
     try:
         snapshot_source(artifacts, fingerprints)
-        build_release(runner, revision)
-        current_revision, _ = source_fingerprint()
-        if current_revision != revision:
-            raise VerificationError("source changed during the release build")
-        binaries = release_binaries()
-        write_json(
-            artifacts / "binary-fingerprints.json",
-            {
-                name: {
-                    "bytes": path.stat().st_size,
-                    "path": str(path.relative_to(ROOT)),
-                    "sha256": sha256_file(path),
-                }
-                for name, path in binaries.items()
-            },
-        )
+        if args.phase == "LS09" and args.scenario == "package":
+            binaries = {}
+        else:
+            build_release(runner, revision)
+            current_revision, _ = source_fingerprint()
+            if current_revision != revision:
+                raise VerificationError("source changed during the release build")
+            binaries = release_binaries()
+            write_json(
+                artifacts / "binary-fingerprints.json",
+                {
+                    name: {
+                        "bytes": path.stat().st_size,
+                        "path": str(path.relative_to(ROOT)),
+                        "sha256": sha256_file(path),
+                    }
+                    for name, path in binaries.items()
+                },
+            )
         run_selected(args, artifacts, runner, binaries, revision, profile)
         record_security(artifacts, runner, binaries, args.security, args.phase)
         status = "PASS"

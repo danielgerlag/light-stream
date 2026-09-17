@@ -64,6 +64,10 @@
     "secured-runtime": {
       "command": "python3 scripts/verify.py --phase LS08 --profile local --security all --artifacts artifacts/LS08/skill-security",
       "evidence": ["l01.json", "l02.json", "l03.json", "l04.json", "l05.json", "l06.json", "l07.json", "l08.json", "l09.json", "l10.json", "ls08/security-journey.json", "ls08/security-migration.json", "ls08/secured-performance.json", "result.json", "cleanup.json"]
+    },
+    "release-package": {
+      "command": "python3 scripts/verify.py --phase LS09 --scenario package --profile local --security local-insecure --artifacts artifacts/LS09/skill-package",
+      "evidence": ["ls09/package-journey.json", "release-journey.json", "binary-fingerprints.json", "result.json", "cleanup.json"]
     }
   }
 }

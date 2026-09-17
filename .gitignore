@@ -36,3 +36,6 @@ __pycache__/
 !/artifacts/LS08/checkpoint.json
 !/artifacts/LS08/final-5/
 !/artifacts/LS08/perf-7/
+/artifacts/LS09/*
+!/artifacts/LS09/checkpoint.json
+!/artifacts/LS09/package-11/

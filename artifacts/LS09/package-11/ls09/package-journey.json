@@ -1,0 +1,271 @@
+{
+  "archive": {
+    "bytes": 12660723,
+    "files": [
+      "bin/light-streamctl",
+      "bin/light-streamd",
+      "release.json",
+      "SHA256SUMS"
+    ],
+    "manifest": {
+      "binaries": [
+        {
+          "bytes": 25559680,
+          "dynamic_libraries": [
+            "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+            "/usr/lib/libSystem.B.dylib",
+            "/usr/lib/libc++.1.dylib",
+            "/usr/lib/libiconv.2.dylib"
+          ],
+          "path": "bin/light-streamd",
+          "sha256": "f9b413c9a4685245f4d67f0da4b6b8f42b981100588d0a5850f6792f8bb36f7c"
+        },
+        {
+          "bytes": 6457376,
+          "dynamic_libraries": [
+            "/usr/lib/libSystem.B.dylib",
+            "/usr/lib/libiconv.2.dylib"
+          ],
+          "path": "bin/light-streamctl",
+          "sha256": "e95b600e5920090a14199910b314b8bdda496e8fe0ff1fe10980d662aff7238a"
+        }
+      ],
+      "cargo_lock_sha256": "3820ba37b0f54f77f547c005b7869ebbc7d73395ef938e7a39ab1564f8e765c8",
+      "package_format": 1,
+      "package_version": "0.1.0",
+      "peer_codec": 1,
+      "peer_protocol": 1,
+      "public_api": "lightstream.v1",
+      "record_schema": 2,
+      "replicated_manifest_read": [
+        3,
+        4,
+        5
+      ],
+      "replicated_manifest_write": 5,
+      "security_config": 1,
+      "source_date_epoch": 1789593486,
+      "source_revision": "fa9d0e726094f0e3f6b21b9b0a774535cb82b5dd73b5d5e9bd77a27e1b80cb75",
+      "standalone_manifest": 1,
+      "storage_format": 1,
+      "target": "aarch64-apple-darwin"
+    },
+    "sha256": "46109a2dcd3c8da4305115d51e76d87f397be96f24a7d4c6951aa1437b6e0e1f"
+  },
+  "image": {
+    "compressed_archive_bytes": 20093931,
+    "image_id": "sha256:83086f29b48719a708a7c52304b02ffc411c09bd2ab3adc115e4751d8ff4cd93",
+    "maximum_compressed_bytes": 52428800,
+    "reproducible_builds": 2,
+    "runtime_arguments": [
+      "--public-listen",
+      "0.0.0.0:7101",
+      "--peer-listen",
+      "0.0.0.0:7201",
+      "--allow-insecure-non-loopback"
+    ],
+    "runtime_image_id": "sha256:7855b6e45eb68b265f3f7d175caa555dffd09aad152b0897cdc28370922c7315",
+    "standalone_journey": "PASS",
+    "uncompressed_bytes": 20348553,
+    "verdict": "PASS"
+  },
+  "later_lanes": "NOT_IMPLEMENTED",
+  "path_isolation": {
+    "cwd": "/var/folders/v6/zgkt30g92r30p6x0ky8kpw3c0000gn/T/light-stream-ls09-package-gljek1ge/package-root/light-stream-0.1.0-aarch64-apple-darwin",
+    "packaged_binaries_outside_checkout": true,
+    "source_checkout": "/Users/danielgerlag/dev/light-stream/.pstack-work/ls09-recovery"
+  },
+  "standalone": {
+    "idle_rss_peak_bytes": 58343424,
+    "idle_rss_samples_bytes": [
+      58294272,
+      58294272,
+      58294272,
+      58294272,
+      58294272,
+      58294272,
+      58294272,
+      58310656,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424,
+      58343424
+    ],
+    "idle_rss_target": "PASS",
+    "idle_rss_window_seconds": 5,
+    "maximum_process_liveness_seconds": 5.0,
+    "process_liveness_seconds": 0.5128449169999953,
+    "publish": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 0,
+        "partition": {
+          "partition": 0,
+          "stream": "a8fc25d5-4e16-4eb9-92ce-f794f7456485"
+        }
+      },
+      "request": {
+        "principal": "package",
+        "sequence": 1,
+        "session": "eff6d7c6-fa33-856f-ee69-80f64ca8c28c"
+      }
+    },
+    "restart_records_verified": 1,
+    "target_idle_rss_bytes": 134217728,
+    "target_write_ready_seconds": 1.0,
+    "write_ready_seconds": 1.616727458000014,
+    "write_ready_target": "NOT_MET"
+  },
+  "three_voter": {
+    "fetch_verified": true,
+    "leader": 1,
+    "memberships": [
+      {
+        "groups": {
+          "control": {
+            "committed_learners": [],
+            "committed_uniform": true,
+            "committed_voters": [
+              1,
+              2,
+              3
+            ],
+            "effective_learners": [],
+            "effective_uniform": true,
+            "effective_voters": [
+              1,
+              2,
+              3
+            ],
+            "group_id": 1
+          },
+          "data-2": {
+            "committed_learners": [],
+            "committed_uniform": true,
+            "committed_voters": [
+              1,
+              2,
+              3
+            ],
+            "effective_learners": [],
+            "effective_uniform": true,
+            "effective_voters": [
+              1,
+              2,
+              3
+            ],
+            "group_id": 2
+          }
+        },
+        "lifecycle": "active",
+        "node_id": 1
+      },
+      {
+        "groups": {
+          "control": {
+            "committed_learners": [],
+            "committed_uniform": true,
+            "committed_voters": [
+              1,
+              2,
+              3
+            ],
+            "effective_learners": [],
+            "effective_uniform": true,
+            "effective_voters": [
+              1,
+              2,
+              3
+            ],
+            "group_id": 1
+          },
+          "data-2": {
+            "committed_learners": [],
+            "committed_uniform": true,
+            "committed_voters": [
+              1,
+              2,
+              3
+            ],
+            "effective_learners": [],
+            "effective_uniform": true,
+            "effective_voters": [
+              1,
+              2,
+              3
+            ],
+            "group_id": 2
+          }
+        },
+        "lifecycle": "active",
+        "node_id": 2
+      },
+      {
+        "groups": {
+          "control": {
+            "committed_learners": [],
+            "committed_uniform": true,
+            "committed_voters": [
+              1,
+              2,
+              3
+            ],
+            "effective_learners": [],
+            "effective_uniform": true,
+            "effective_voters": [
+              1,
+              2,
+              3
+            ],
+            "group_id": 1
+          },
+          "data-2": {
+            "committed_learners": [],
+            "committed_uniform": true,
+            "committed_voters": [
+              1,
+              2,
+              3
+            ],
+            "effective_learners": [],
+            "effective_uniform": true,
+            "effective_voters": [
+              1,
+              2,
+              3
+            ],
+            "group_id": 2
+          }
+        },
+        "lifecycle": "active",
+        "node_id": 3
+      }
+    ],
+    "publish": {
+      "bookmark": null,
+      "range": {
+        "count": 1,
+        "first": 0,
+        "partition": {
+          "partition": 0,
+          "stream": "7980f767-46f5-f4ac-a3f5-ab21b672b0e9"
+        }
+      },
+      "request": {
+        "principal": "package",
+        "sequence": 1,
+        "session": "5af5cd9a-631a-5df8-3270-983a1bb3000b"
+      }
+    }
+  },
+  "verdict": "PASS"
+}

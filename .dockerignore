@@ -1,0 +1,13 @@
+**
+!Cargo.toml
+!Cargo.lock
+!.cargo/
+!.cargo/**
+!crates/
+!crates/**
+!poc/
+!poc/**
+!proto/
+!proto/**
+!packaging/
+!packaging/Containerfile

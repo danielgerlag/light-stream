@@ -1,6 +1,6 @@
 ---
 name: verify-light-stream
-description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS08, including secured migration, rotation, and fail-closed authorization.
+description: Run Light Stream's real release binaries and preserve evidence for LS01 through LS09, including clean release packages and secured operation.
 ---
 
 # Verify Light Stream
@@ -134,6 +134,17 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS08/skill-security
 ```
 
+For the LS09 clean-package journey, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS09 \
+  --scenario package \
+  --profile local \
+  --security local-insecure \
+  --artifacts artifacts/LS09/skill-package
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -163,5 +174,7 @@ For B4, inspect `artifacts/LS07/perf-7/result.json`. Confirm publish throughput 
 For LS08, inspect `l01.json` through `l10.json`, `ls08/security-journey.json`, `ls08/security-migration.json`, and `ls08/secured-performance.json`. Confirm HTTPS public traffic, mutual-TLS peer traffic, authorization before side effects, immutable stream-scope checks, token rotation, rolling peer-certificate rotation, five-second public-policy expiry, rogue-peer rejection, plaintext-to-secured migration, and raw plus encoded secret-canary scans. Confirm that runtime diagnostics no longer report `secured_mode:UNSUPPORTED_LS08`.
 
 For the LS08 B4 gate, run `scripts/compare_ls05_perf.py` against the LS07 release binaries and the current release binaries. Confirm publish throughput is at least 90% of the LS07 baseline and publish and fetch p99 ratios are at most 1.20.
+
+For the LS09 package journey, inspect `ls09/package-journey.json` and `release-journey.json`. Confirm that the archive contains only `light-streamd`, `light-streamctl`, `release.json`, and `SHA256SUMS`. Confirm that two clean native builds and two normalized OCI builds match. Confirm that the extracted binaries and runtime data live outside the checkout. Confirm standalone publish, fetch, restart, and three-voter replication. Confirm process liveness is at most five seconds, inspect the measured ready-to-append time against the one-second target, confirm ten-stream idle RSS is at most 128 MiB, and confirm the compressed Linux image is at most 50 MiB. Later LS09 lifecycle, export, and restore lanes remain `NOT_IMPLEMENTED`.
 
 Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report the optional independent security review as `NOT_REQUESTED` unless the execution manifest selected it. Report independent-host verification as `BLOCKED`.

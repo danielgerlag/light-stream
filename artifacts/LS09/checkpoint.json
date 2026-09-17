@@ -1,0 +1,39 @@
+{
+  "checkpoint": "release-package",
+  "verdict": "PASS_WITH_TARGET_GAP",
+  "source_revision": "fa9d0e726094f0e3f6b21b9b0a774535cb82b5dd73b5d5e9bd77a27e1b80cb75",
+  "evidence": "artifacts/LS09/package-11",
+  "archive": {
+    "bytes": 12660723,
+    "sha256": "46109a2dcd3c8da4305115d51e76d87f397be96f24a7d4c6951aa1437b6e0e1f",
+    "exact_inventory": true,
+    "outside_checkout": true,
+    "reproducible_builds": 2
+  },
+  "image": {
+    "config_digest": "sha256:83086f29b48719a708a7c52304b02ffc411c09bd2ab3adc115e4751d8ff4cd93",
+    "compressed_bytes": 20093931,
+    "maximum_compressed_bytes": 52428800,
+    "reproducible_builds": 2,
+    "standalone_journey": "PASS"
+  },
+  "local_measurements": {
+    "process_liveness_seconds": 0.5128449169999953,
+    "maximum_process_liveness_seconds": 5.0,
+    "write_ready_seconds": 1.616727458000014,
+    "target_write_ready_seconds": 1.0,
+    "write_ready_target": "NOT_MET",
+    "idle_rss_peak_bytes": 58343424,
+    "target_idle_rss_bytes": 134217728,
+    "idle_rss_target": "PASS"
+  },
+  "three_voter_journey": "PASS",
+  "success_data_removed": true,
+  "pending": [
+    "reduce ready-to-append below one second",
+    "lifecycle, readiness, metrics, and drain",
+    "logical export",
+    "offline restore and version fixtures",
+    "full LS09 B4 comparison"
+  ]
+}
