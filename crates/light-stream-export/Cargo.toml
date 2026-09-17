@@ -1,0 +1,10 @@
+[package]
+name = "light-stream-export"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+light-stream-core.workspace = true
+sha2.workspace = true
+thiserror.workspace = true

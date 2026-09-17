@@ -4,6 +4,7 @@ members = [
     "crates/light-stream-client",
     "crates/light-stream-cli",
     "crates/light-stream-core",
+    "crates/light-stream-export",
     "crates/light-stream-proto",
     "crates/light-stream-server",
     "crates/light-stream-storage",
@@ -28,6 +29,7 @@ fs2 = "0.4"
 getrandom = "0.3"
 futures-util = "0.3"
 http = "1"
+light-stream-core = { path = "crates/light-stream-core" }
 openraft = { version = "=0.10.0-alpha.34", features = ["serde", "type-alias"] }
 prost = "0.14"
 rocksdb = { version = "0.25.0", default-features = false, features = ["bindgen-runtime", "multi-threaded-cf"] }

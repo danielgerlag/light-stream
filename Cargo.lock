@@ -1139,6 +1139,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "light-stream-export"
+version = "0.1.0"
+dependencies = [
+ "light-stream-core",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "light-stream-proto"
 version = "0.1.0"
 dependencies = [
