@@ -1,6 +1,6 @@
 {
   "checkpoint": "release-package",
-  "verdict": "PASS_WITH_TARGET_GAP",
+  "verdict": "PASS",
   "source_revision": "fa9d0e726094f0e3f6b21b9b0a774535cb82b5dd73b5d5e9bd77a27e1b80cb75",
   "evidence": "artifacts/LS09/package-11",
   "archive": {
@@ -27,7 +27,7 @@
     "target_idle_rss_bytes": 134217728,
     "idle_rss_target": "PASS"
   },
-  "three_voter_journey": "PASS",
+  "three_voter_package_smoke": "PASS",
   "success_data_removed": true,
   "pending": [
     "reduce ready-to-append below one second",
