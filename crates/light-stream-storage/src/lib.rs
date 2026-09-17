@@ -24,18 +24,22 @@ use std::{
 use crc32fast::Hasher as Crc32;
 use futures_util::{Stream, StreamExt};
 use light_stream_core::{
-    AdministrationIntent, AdministrationOperation, AdministrationRequestId, BookmarkId,
-    BookmarkName, BookmarkPage, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapResult,
-    BootstrapSpec, ByteCount, CatalogRequestId, CheckpointCasResult, CheckpointExpectation,
-    CheckpointKey, CheckpointMutation, CheckpointRevision, ClusterId, ClusterTopology,
-    CommittedBookmark, CommittedCheckpoint, CommittedCursor, CommittedRecord, CommittedRecordRange,
-    CommittedStreamBookmark, CreateStreamSpec, DomainError, FetchPage, GroupId, LeaseDeadline,
-    LeaseRelease, LeaseRenewal, MutationRequestId, NodeId, OperationalProof, PartitionId,
-    PartitionKey, PartitionPlacement, PartitionRoute, ProducerRequestId, PublishBatch,
-    PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
-    ReplicatedPublishBatch, RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation,
-    SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
-    StreamDescriptor, StreamId, StreamLifecycle, StreamName,
+    ActiveExport, AdministrationIntent, AdministrationOperation, AdministrationRequestId,
+    ArtifactIdentity, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
+    BookmarkPublicationSequence, BootstrapResult, BootstrapSpec, ByteCount, CatalogRequestId,
+    CheckpointCasResult, CheckpointExpectation, CheckpointKey, CheckpointMutation,
+    CheckpointRevision, ClusterId, ClusterTopology, CommittedBookmark, CommittedCheckpoint,
+    CommittedCursor, CommittedRecord, CommittedRecordRange, CommittedStreamBookmark,
+    CreateStreamSpec, DomainError, ExportAbortReason, ExportDeadline, ExportEpoch,
+    ExportFenceObservation, ExportFenceToken, ExportId, ExportIntent, ExportReceipt,
+    ExportReceiptOutcome, ExportRequestDigest, ExportSpec, ExportStatus, FetchPage, GroupCut,
+    GroupId, LeaseDeadline, LeaseRelease, LeaseRenewal, MutationFenceState, MutationRequestId,
+    NodeId, OperationalProof, PartitionId, PartitionKey, PartitionPlacement, PartitionRoute,
+    ProducerRequestId, PublishBatch, PublishReceipt, QuiescentCut, RecordOffset, ReplayLease,
+    ReplayLeaseId, ReplayLeaseRequest, ReplicatedPublishBatch, RequestOutcome, RetentionRequest,
+    RetentionResult, RetentionStatus, SecurityMutation, SecurityPolicy, StreamBookmarkPage,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle,
+    StreamName,
 };
 use openraft::{
     BasicNode, EntryPayload,
@@ -126,6 +130,7 @@ const STREAM_BOOKMARK_NAME_PREFIX: &[u8] = b"stream-bookmark/name/";
 const STREAM_BOOKMARK_ORDER_PREFIX: &[u8] = b"stream-bookmark/order/";
 const STREAM_BOOKMARK_PUBLICATION_PREFIX: &[u8] = b"stream-bookmark/publication/";
 const RETENTION_PREFIX: &[u8] = b"retention/";
+const RETENTION_RECLAIM_HINT_PREFIX: &[u8] = b"retention-reclaim-hint/";
 const KEY_LEASE_CLOCK: &[u8] = b"lease-clock";
 const KEY_LEASE_BUDGET: &[u8] = b"lease-budget";
 const KEY_OPERATIONAL_PROOF: &[u8] = b"operational-proof";
@@ -133,6 +138,11 @@ const KEY_CLUSTER_TOPOLOGY: &[u8] = b"cluster-topology";
 const KEY_SECURITY_POLICY: &[u8] = b"security-policy";
 const KEY_ACTIVE_ADMINISTRATION: &[u8] = b"administration/active";
 const ADMINISTRATION_REQUEST_PREFIX: &[u8] = b"administration/request/";
+const KEY_ACTIVE_EXPORT: &[u8] = b"export/active";
+const KEY_EXPORT_EPOCH: &[u8] = b"export/epoch";
+const EXPORT_RECEIPT_PREFIX: &[u8] = b"export/receipt/";
+const EXPORT_SESSION_PREFIX: &[u8] = b"export/session/";
+const KEY_MUTATION_FENCE: &[u8] = b"export/mutation-fence";
 const LEASE_ID_PREFIX: &[u8] = b"lease/id/";
 const LEASE_REQUEST_PREFIX: &[u8] = b"lease/request/";
 const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -311,6 +321,98 @@ pub enum GroupCommand {
         topology: ClusterTopology,
         policy: SecurityPolicy,
     },
+    Export(ExportCommand),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ExportCommand {
+    Begin {
+        intent: ExportIntent,
+        deadline: ExportDeadline,
+    },
+    AcquireFence {
+        token: ExportFenceToken,
+    },
+    RecordFence {
+        token: ExportFenceToken,
+        observation: ExportFenceObservation,
+    },
+    BeginMaterialization {
+        token: ExportFenceToken,
+    },
+    PublishArtifact {
+        token: ExportFenceToken,
+        artifact: ArtifactIdentity,
+        cut: QuiescentCut,
+    },
+    RequestCompletion {
+        request: MutationRequestId,
+        export: ExportId,
+        artifact: ArtifactIdentity,
+    },
+    RequestAbort {
+        request: MutationRequestId,
+        reason: ExportAbortReason,
+        observed_clock: ExportDeadline,
+    },
+    ReleaseFence {
+        token: ExportFenceToken,
+    },
+    RecordRelease {
+        token: ExportFenceToken,
+        observation: ExportFenceObservation,
+    },
+    Finish {
+        token: ExportFenceToken,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CommandFenceClass {
+    IncludedMutation,
+    ExcludedMutation,
+    ExportProtocol,
+}
+
+impl GroupCommand {
+    fn fence_class(&self) -> CommandFenceClass {
+        match self {
+            Self::BootstrapControl { .. }
+            | Self::BootstrapData { .. }
+            | Self::CreateStreamIntent { .. }
+            | Self::ReplicaReady { .. }
+            | Self::ActivateStream { .. }
+            | Self::BeginDeleteStream { .. }
+            | Self::FinishDeleteStream { .. }
+            | Self::Publish { .. }
+            | Self::PublishMany { .. }
+            | Self::CreateBookmark { .. }
+            | Self::DeleteBookmark { .. }
+            | Self::CreateStreamBookmark { .. }
+            | Self::DeleteStreamBookmark { .. }
+            | Self::AdvanceRetention { .. }
+            | Self::MaintainRetention { .. } => CommandFenceClass::IncludedMutation,
+            Self::BeginAdministration {
+                intent: AdministrationIntent::ReplaceVoter { .. },
+            } => CommandFenceClass::IncludedMutation,
+            Self::CompareAndSetCheckpoint { .. }
+            | Self::AdmitReplayLease { .. }
+            | Self::RenewReplayLease { .. }
+            | Self::ReleaseReplayLease { .. }
+            | Self::OperationalProbe { .. }
+            | Self::BeginAdministration {
+                intent: AdministrationIntent::TransferLeader { .. },
+            }
+            | Self::CompleteAdministration { .. }
+            | Self::AbortAdministration { .. }
+            | Self::FinishAdministrationAbort { .. }
+            | Self::InitializeClusterTopology { .. }
+            | Self::InitializeSecurityPolicy { .. }
+            | Self::ApplySecurityMutation { .. }
+            | Self::ActivateSecuredTransport { .. } => CommandFenceClass::ExcludedMutation,
+            Self::Export(_) => CommandFenceClass::ExportProtocol,
+        }
+    }
 }
 
 impl fmt::Display for GroupCommand {
@@ -354,8 +456,32 @@ impl fmt::Display for GroupCommand {
             Self::ActivateSecuredTransport { .. } => {
                 formatter.write_str("activate-secured-transport")
             }
+            Self::Export(command) => write!(formatter, "export-{command}"),
         }
     }
+}
+
+impl fmt::Display for ExportCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Begin { .. } => "begin",
+            Self::AcquireFence { .. } => "acquire-fence",
+            Self::RecordFence { .. } => "record-fence",
+            Self::BeginMaterialization { .. } => "begin-materialization",
+            Self::PublishArtifact { .. } => "publish-artifact",
+            Self::RequestCompletion { .. } => "request-completion",
+            Self::RequestAbort { .. } => "request-abort",
+            Self::ReleaseFence { .. } => "release-fence",
+            Self::RecordRelease { .. } => "record-release",
+            Self::Finish { .. } => "finish",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ExportApplyResult {
+    Status(ExportStatus),
+    Fence(ExportFenceObservation),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -373,6 +499,7 @@ pub enum ApplyResult {
     OperationalProof(OperationalProof),
     Administration(AdministrationOperation),
     SecurityPolicy(SecurityPolicy),
+    Export(ExportApplyResult),
     Rejected(DomainError),
     Noop,
 }
@@ -409,6 +536,8 @@ impl fmt::Display for ApplyResult {
             Self::SecurityPolicy(value) => {
                 write!(formatter, "security policy {}", value.revision().get())
             }
+            Self::Export(ExportApplyResult::Status(_)) => formatter.write_str("export status"),
+            Self::Export(ExportApplyResult::Fence(_)) => formatter.write_str("export fence"),
             Self::Rejected(error) => write!(formatter, "rejected: {error}"),
             Self::Noop => formatter.write_str("noop"),
         }
@@ -745,6 +874,7 @@ enum ThinCommand {
         topology: ClusterTopology,
         policy: Box<SecurityPolicy>,
     },
+    Export(ExportCommand),
 }
 
 struct BootstrapControlState {
@@ -879,10 +1009,16 @@ struct MutationSessionState {
     retained_sequences: VecDeque<u64>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct ExportSessionState {
+    highest_sequence: Option<u64>,
+}
+
 struct LeaseExpiryState {
     budget: LeaseBudget,
     active: Vec<ReplayLease>,
     retentions: Vec<(PartitionKey, PartitionRetentionState)>,
+    reclaim_hints: HashMap<PartitionKey, u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1744,6 +1880,20 @@ fn partition_from_retention_key(key: &[u8]) -> io::Result<PartitionKey> {
     Ok(PartitionKey::new(stream, PartitionId::new(partition)))
 }
 
+fn partition_from_reclaim_hint_key(key: &[u8]) -> io::Result<PartitionKey> {
+    let expected = RETENTION_RECLAIM_HINT_PREFIX.len() + 16 + 4;
+    if key.len() != expected || !key.starts_with(RETENTION_RECLAIM_HINT_PREFIX) {
+        return Err(io_error("invalid retention reclaim hint key"));
+    }
+    let stream_start = RETENTION_RECLAIM_HINT_PREFIX.len();
+    let stream_end = stream_start + 16;
+    let stream = StreamId::from_uuid(
+        uuid::Uuid::from_slice(&key[stream_start..stream_end]).map_err(io_error)?,
+    );
+    let partition = u32::from_be_bytes(key[stream_end..].try_into().map_err(io_error)?);
+    Ok(PartitionKey::new(stream, PartitionId::new(partition)))
+}
+
 fn legacy_fingerprint(batch: &PublishBatch) -> io::Result<String> {
     #[derive(Serialize)]
     struct Fingerprint<'a> {
@@ -1855,6 +2005,14 @@ fn retention_key(partition: PartitionKey) -> Vec<u8> {
     key
 }
 
+fn retention_reclaim_hint_key(partition: PartitionKey) -> Vec<u8> {
+    let mut key = Vec::with_capacity(RETENTION_RECLAIM_HINT_PREFIX.len() + 20);
+    key.extend_from_slice(RETENTION_RECLAIM_HINT_PREFIX);
+    key.extend_from_slice(partition.stream().as_uuid().as_bytes());
+    key.extend_from_slice(&partition.partition().get().to_be_bytes());
+    key
+}
+
 fn stream_key(stream: StreamId) -> Vec<u8> {
     [STREAM_PREFIX, stream.as_uuid().as_bytes()].concat()
 }
@@ -1869,6 +2027,18 @@ fn create_intent_key(request: CatalogRequestId) -> Vec<u8> {
 
 fn administration_request_key(request: AdministrationRequestId) -> Vec<u8> {
     [ADMINISTRATION_REQUEST_PREFIX, request.as_uuid().as_bytes()].concat()
+}
+
+fn export_receipt_key(request: &MutationRequestId) -> io::Result<Vec<u8>> {
+    let body = serde_json::to_vec(request).map_err(io_error)?;
+    Ok([EXPORT_RECEIPT_PREFIX, Sha256::digest(body).as_slice()].concat())
+}
+
+fn export_session_key(request: &MutationRequestId) -> Vec<u8> {
+    let mut digest = Sha256::new();
+    digest.update(request.principal().as_str().as_bytes());
+    digest.update(request.session().as_uuid().as_bytes());
+    [EXPORT_SESSION_PREFIX, digest.finalize().as_slice()].concat()
 }
 
 fn receipt_key(partition: PartitionKey, request: &ProducerRequestId) -> io::Result<Vec<u8>> {
@@ -2374,6 +2544,13 @@ fn thin_entry(entry: GroupEntry) -> io::Result<ThinEntryWrite> {
                 },
                 Vec::new(),
             )),
+            GroupCommand::Export(command) => Ok((
+                ThinEntry {
+                    log_id,
+                    payload: ThinPayload::Normal(ThinCommand::Export(command)),
+                },
+                Vec::new(),
+            )),
         },
     }
 }
@@ -2604,6 +2781,7 @@ macro_rules! impl_log_storage {
                                     topology,
                                     policy: *policy,
                                 },
+                                ThinCommand::Export(command) => GroupCommand::Export(command),
                             };
                             EntryPayload::Normal(hydrated)
                         }
@@ -3310,6 +3488,17 @@ impl GroupDb {
         command: GroupCommand,
         write: &mut WriteBatch,
     ) -> io::Result<ApplyResult> {
+        if command.fence_class() == CommandFenceClass::IncludedMutation
+            && let Some(held) = self.mutation_fence_state()?.held()
+        {
+            if let Some(result) = self.replay_included_command(&command, held.token().export())? {
+                return Ok(result);
+            }
+            return Ok(ApplyResult::Rejected(DomainError::ExportInProgress {
+                export: held.token().export(),
+                outcome: RequestOutcome::DefiniteNoCommit,
+            }));
+        }
         match command {
             GroupCommand::BootstrapControl {
                 spec,
@@ -3420,7 +3609,794 @@ impl GroupDb {
                 topology,
                 policy,
             } => self.apply_secured_transport(request, topology, policy, write),
+            GroupCommand::Export(command) => self.apply_export(log_id, command, write),
         }
+    }
+
+    fn replay_included_command(
+        &self,
+        command: &GroupCommand,
+        export: ExportId,
+    ) -> io::Result<Option<ApplyResult>> {
+        match command {
+            GroupCommand::BootstrapControl {
+                spec,
+                topology,
+                security,
+                data_groups,
+                max_streams,
+                max_partitions_per_stream,
+            } => {
+                if self.identity.kind != GroupKind::Control {
+                    return Ok(Some(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                        reason: format!(
+                            "{} command reached {} group",
+                            GroupKind::Control,
+                            self.identity.kind
+                        ),
+                    })));
+                }
+                let Some(existing) = self.get::<BootstrapSpec>(CF_STATE, KEY_BOOTSTRAP)? else {
+                    return Ok(None);
+                };
+                if &existing != spec {
+                    return Ok(Some(ApplyResult::Rejected(
+                        DomainError::BootstrapConflict {
+                            reason: "bootstrap stream identity differs".to_owned(),
+                        },
+                    )));
+                }
+                let stored_topology =
+                    self.get::<ClusterTopology>(CF_STATE, KEY_CLUSTER_TOPOLOGY)?;
+                let stored_security = self.get::<SecurityPolicy>(CF_STATE, KEY_SECURITY_POLICY)?;
+                let same_configuration = self.get::<Vec<GroupId>>(CF_STATE, KEY_DATA_GROUP_POOL)?
+                    == Some(data_groups.clone())
+                    && !topology
+                        .as_ref()
+                        .is_some_and(|value| stored_topology.as_ref() != Some(value))
+                    && !security
+                        .as_ref()
+                        .is_some_and(|value| stored_security.as_ref() != Some(value))
+                    && self.get::<u32>(CF_STATE, KEY_MAX_STREAMS)? == Some(*max_streams)
+                    && self.get::<u32>(CF_STATE, KEY_MAX_PARTITIONS)?
+                        == Some(*max_partitions_per_stream);
+                Ok(Some(if same_configuration {
+                    self.bootstrap_result(spec)?
+                } else {
+                    ApplyResult::Rejected(DomainError::BootstrapConflict {
+                        reason: "bounded group pool or catalog limits differ".to_owned(),
+                    })
+                }))
+            }
+            GroupCommand::BootstrapData { spec } => {
+                if self.identity.kind != GroupKind::Data {
+                    return Ok(Some(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                        reason: format!(
+                            "{} command reached {} group",
+                            GroupKind::Data,
+                            self.identity.kind
+                        ),
+                    })));
+                }
+                let Some(existing) = self.get::<BootstrapSpec>(CF_STATE, KEY_BOOTSTRAP)? else {
+                    return Ok(None);
+                };
+                if &existing != spec {
+                    return Ok(Some(ApplyResult::Rejected(
+                        DomainError::BootstrapConflict {
+                            reason: "bootstrap stream identity differs".to_owned(),
+                        },
+                    )));
+                }
+                Ok(Some(self.bootstrap_result(spec)?))
+            }
+            GroupCommand::CreateStreamIntent { spec, .. } => {
+                let Some(existing) = self
+                    .get::<StoredCreateIntent>(CF_STATE, &create_intent_key(spec.request_id()))?
+                else {
+                    return Ok(None);
+                };
+                if &existing.spec != spec {
+                    return Ok(Some(ApplyResult::Rejected(
+                        DomainError::BootstrapConflict {
+                            reason: "catalog request identity was reused with different intent"
+                                .to_owned(),
+                        },
+                    )));
+                }
+                Ok(Some(ApplyResult::Stream(
+                    self.get(CF_STATE, &stream_key(existing.stream_id))?
+                        .ok_or_else(|| io_error("catalog intent references a missing stream"))?,
+                )))
+            }
+            GroupCommand::ReplicaReady {
+                stream_id,
+                group_id,
+            } => {
+                let Some(descriptor) =
+                    self.get::<StreamDescriptor>(CF_STATE, &stream_key(*stream_id))?
+                else {
+                    return Ok(None);
+                };
+                Ok((descriptor.lifecycle() != StreamLifecycle::Preparing
+                    || descriptor.ready_groups().contains(group_id))
+                .then_some(ApplyResult::Stream(descriptor)))
+            }
+            GroupCommand::ActivateStream { stream_id } => Ok(self
+                .get::<StreamDescriptor>(CF_STATE, &stream_key(*stream_id))?
+                .filter(|descriptor| descriptor.lifecycle() == StreamLifecycle::Active)
+                .map(ApplyResult::Stream)),
+            GroupCommand::BeginDeleteStream { stream_id } => Ok(self
+                .get::<StreamDescriptor>(CF_STATE, &stream_key(*stream_id))?
+                .filter(|descriptor| {
+                    matches!(
+                        descriptor.lifecycle(),
+                        StreamLifecycle::Deleting | StreamLifecycle::Deleted
+                    )
+                })
+                .map(ApplyResult::Stream)),
+            GroupCommand::FinishDeleteStream { stream_id } => Ok(self
+                .get::<StreamDescriptor>(CF_STATE, &stream_key(*stream_id))?
+                .filter(|descriptor| descriptor.lifecycle() == StreamLifecycle::Deleted)
+                .map(ApplyResult::Stream)),
+            GroupCommand::Publish { batch } => self.replay_publish(batch),
+            GroupCommand::PublishMany { batch } => {
+                self.replay_publish_many(batch, export).map(Some)
+            }
+            GroupCommand::CreateBookmark {
+                id,
+                partition,
+                name,
+                offset,
+            } => {
+                let Some(existing) =
+                    self.get::<CommittedBookmark>(CF_STATE, &bookmark_id_key(*id))?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(
+                    if existing.name() == name
+                        && existing.cursor().partition() == *partition
+                        && existing.cursor().next_offset() == *offset
+                    {
+                        ApplyResult::Bookmark(existing)
+                    } else {
+                        ApplyResult::Rejected(DomainError::BookmarkNameConflict)
+                    },
+                ))
+            }
+            GroupCommand::DeleteBookmark { partition, id } => Ok(self
+                .get::<CommittedBookmark>(CF_STATE, &bookmark_id_key(*id))?
+                .filter(|bookmark| {
+                    bookmark.cursor().partition() == *partition
+                        && bookmark.lifecycle() == light_stream_core::BookmarkLifecycle::Deleted
+                })
+                .map(ApplyResult::Bookmark)),
+            GroupCommand::CreateStreamBookmark { id, name, vector } => {
+                let Some(existing) =
+                    self.get::<CommittedStreamBookmark>(CF_STATE, &stream_bookmark_id_key(*id))?
+                else {
+                    return Ok(None);
+                };
+                Ok(Some(
+                    if existing.name() == name && existing.vector() == vector {
+                        ApplyResult::StreamBookmark(existing)
+                    } else {
+                        ApplyResult::Rejected(DomainError::BookmarkNameConflict)
+                    },
+                ))
+            }
+            GroupCommand::DeleteStreamBookmark { stream_id, id } => Ok(self
+                .get::<CommittedStreamBookmark>(CF_STATE, &stream_bookmark_id_key(*id))?
+                .filter(|bookmark| {
+                    bookmark.vector().stream() == *stream_id
+                        && bookmark.lifecycle() == light_stream_core::BookmarkLifecycle::Deleted
+                })
+                .map(ApplyResult::StreamBookmark)),
+            GroupCommand::AdvanceRetention { request, .. } => {
+                self.prior_mutation_result(request.request(), &retention_fingerprint(request)?)
+            }
+            GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor,
+                ..
+            } => {
+                let retention = self
+                    .get::<PartitionRetentionState>(CF_STATE, &retention_key(*partition))?
+                    .unwrap_or_default();
+                Ok(
+                    (retention.reclaim_cursor != expected_cursor.get()).then_some(
+                        ApplyResult::RetentionStatus(RetentionStatus::new(
+                            *partition,
+                            RecordOffset::new(retention.logical_floor),
+                            RecordOffset::new(retention.reclaim_cursor),
+                            ByteCount::new(retention.logically_expired_bytes),
+                            ByteCount::new(retention.raft_only_bytes),
+                        )),
+                    ),
+                )
+            }
+            GroupCommand::CompareAndSetCheckpoint { .. }
+            | GroupCommand::AdmitReplayLease { .. }
+            | GroupCommand::RenewReplayLease { .. }
+            | GroupCommand::ReleaseReplayLease { .. }
+            | GroupCommand::OperationalProbe { .. }
+            | GroupCommand::CompleteAdministration { .. }
+            | GroupCommand::AbortAdministration { .. }
+            | GroupCommand::FinishAdministrationAbort { .. }
+            | GroupCommand::InitializeClusterTopology { .. }
+            | GroupCommand::InitializeSecurityPolicy { .. }
+            | GroupCommand::ApplySecurityMutation { .. }
+            | GroupCommand::ActivateSecuredTransport { .. }
+            | GroupCommand::Export(_) => Ok(None),
+            GroupCommand::BeginAdministration { intent } => {
+                let key = administration_request_key(intent.request());
+                Ok(self
+                    .get::<AdministrationOperation>(CF_STATE, &key)?
+                    .map(|existing| {
+                        if existing.intent() == intent {
+                            ApplyResult::Administration(existing)
+                        } else {
+                            ApplyResult::Rejected(DomainError::MutationConflict)
+                        }
+                    }))
+            }
+        }
+    }
+
+    fn bootstrap_result(&self, spec: &BootstrapSpec) -> io::Result<ApplyResult> {
+        Ok(ApplyResult::Bootstrapped(BootstrapResult::new(
+            spec.cluster(),
+            spec.stream(),
+            spec.stream_name().clone(),
+            GroupId::new(CONTROL_GROUP_ID).map_err(io_error)?,
+            GroupId::new(DATA_GROUP_ID).map_err(io_error)?,
+        )))
+    }
+
+    fn replay_publish(&self, batch: &PublishBatch) -> io::Result<Option<ApplyResult>> {
+        let Some(result) = self.prior_publish_outcome(batch)? else {
+            let session = self
+                .get::<ProducerSessionState>(
+                    CF_STATE,
+                    &session_key(batch.partition(), batch.request()),
+                )?
+                .unwrap_or_default();
+            return Ok(session
+                .highest_sequence
+                .is_some_and(|highest| batch.request().sequence().get() <= highest)
+                .then_some(ApplyResult::Rejected(DomainError::ReceiptExpired)));
+        };
+        Ok(Some(match result {
+            Ok(receipt) => ApplyResult::Published(receipt),
+            Err(error) => ApplyResult::Rejected(error),
+        }))
+    }
+
+    fn prior_publish_outcome(
+        &self,
+        batch: &PublishBatch,
+    ) -> io::Result<Option<Result<PublishReceipt, DomainError>>> {
+        let key = receipt_key(batch.partition(), batch.request())?;
+        let Some(stored) = self.get::<StoredPublishOutcome>(CF_STATE, &key)? else {
+            return Ok(None);
+        };
+        Ok(Some(match stored {
+            StoredPublishOutcome::Versioned(stored) => {
+                if stored.fingerprint == fingerprint(batch)? {
+                    stored.result.as_result()
+                } else {
+                    Err(DomainError::ReceiptConflict)
+                }
+            }
+            StoredPublishOutcome::Legacy(stored) => {
+                let same_bookmark =
+                    stored.receipt.bookmark().map(CommittedBookmark::name) == batch.bookmark();
+                if stored.fingerprint == legacy_fingerprint(batch)? && same_bookmark {
+                    Ok(stored.receipt)
+                } else {
+                    Err(DomainError::ReceiptConflict)
+                }
+            }
+        }))
+    }
+
+    fn replay_publish_many(
+        &self,
+        batch: &ReplicatedPublishBatch,
+        export: ExportId,
+    ) -> io::Result<ApplyResult> {
+        let mut outcomes = Vec::with_capacity(batch.requests().len());
+        let mut replayed = false;
+        for publish in batch.requests() {
+            let result = match self.prior_publish_outcome(publish)? {
+                Some(result) => {
+                    replayed = true;
+                    result
+                }
+                None => {
+                    let session = self
+                        .get::<ProducerSessionState>(
+                            CF_STATE,
+                            &session_key(publish.partition(), publish.request()),
+                        )?
+                        .unwrap_or_default();
+                    if session
+                        .highest_sequence
+                        .is_some_and(|highest| publish.request().sequence().get() <= highest)
+                    {
+                        replayed = true;
+                        Err(DomainError::ReceiptExpired)
+                    } else {
+                        Err(DomainError::ExportInProgress {
+                            export,
+                            outcome: RequestOutcome::DefiniteNoCommit,
+                        })
+                    }
+                }
+            };
+            outcomes.push(PublishItemOutcome::new(publish.request().clone(), result));
+        }
+        if replayed {
+            Ok(ApplyResult::PublishedMany(PublishManyResult::new(outcomes)))
+        } else {
+            Ok(ApplyResult::Rejected(DomainError::ExportInProgress {
+                export,
+                outcome: RequestOutcome::DefiniteNoCommit,
+            }))
+        }
+    }
+
+    fn mutation_fence_state(&self) -> io::Result<MutationFenceState> {
+        Ok(self.get(CF_STATE, KEY_MUTATION_FENCE)?.unwrap_or_default())
+    }
+
+    fn apply_export(
+        &self,
+        log_id: GroupLogId,
+        command: ExportCommand,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        match command {
+            ExportCommand::Begin { intent, deadline } => {
+                self.apply_begin_export(log_id, intent, deadline, write)
+            }
+            ExportCommand::AcquireFence { token } => {
+                self.apply_acquire_export_fence(log_id, token, write)
+            }
+            ExportCommand::RecordFence { token, observation } => {
+                self.apply_record_export_fence(token, observation, write)
+            }
+            ExportCommand::BeginMaterialization { token } => {
+                self.update_active_export(token, write, ActiveExport::begin_materialization)
+            }
+            ExportCommand::PublishArtifact {
+                token,
+                artifact,
+                cut,
+            } => self.update_active_export(token, write, |active| {
+                active.publish_artifact(artifact, cut)
+            }),
+            ExportCommand::RequestCompletion {
+                request,
+                export,
+                artifact,
+            } => self.apply_request_export_completion(request, export, artifact, write),
+            ExportCommand::RequestAbort {
+                request,
+                reason,
+                observed_clock,
+            } => self.apply_request_export_abort(request, reason, observed_clock, write),
+            ExportCommand::ReleaseFence { token } => self.apply_release_export_fence(token, write),
+            ExportCommand::RecordRelease { token, observation } => {
+                self.apply_record_export_release(token, observation, write)
+            }
+            ExportCommand::Finish { token } => self.apply_finish_export(token, write),
+        }
+    }
+
+    fn apply_begin_export(
+        &self,
+        log_id: GroupLogId,
+        intent: ExportIntent,
+        deadline: ExportDeadline,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "export begin reached a data group".to_owned(),
+            }));
+        }
+        if intent.cluster() != self.identity.cluster_id {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "export cluster does not match the control group".to_owned(),
+            }));
+        }
+        if let Some(receipt) =
+            self.get::<ExportReceipt>(CF_STATE, &export_receipt_key(intent.request())?)?
+        {
+            return if receipt.request_digest() == intent.request_digest() {
+                Ok(ApplyResult::Export(ExportApplyResult::Status(
+                    ExportStatus::Terminal(receipt),
+                )))
+            } else {
+                Ok(ApplyResult::Rejected(DomainError::ExportConflict))
+            };
+        }
+        if let Some(active) = self.get::<ActiveExport>(CF_STATE, KEY_ACTIVE_EXPORT)? {
+            if active.spec().request() == intent.request() {
+                return if active.spec().request_digest() == intent.request_digest() {
+                    Ok(ApplyResult::Export(ExportApplyResult::Status(
+                        ExportStatus::active(&active),
+                    )))
+                } else {
+                    Ok(ApplyResult::Rejected(DomainError::ExportConflict))
+                };
+            }
+            return Ok(ApplyResult::Rejected(DomainError::ResourceLimit {
+                resource: "active_exports".to_owned(),
+                limit: 1,
+            }));
+        }
+        if self.export_request_expired(intent.request())? {
+            return Ok(ApplyResult::Rejected(DomainError::MutationReceiptExpired));
+        }
+        if self
+            .get::<AdministrationOperation>(CF_STATE, KEY_ACTIVE_ADMINISTRATION)?
+            .is_some()
+        {
+            return Ok(ApplyResult::Rejected(DomainError::ResourceLimit {
+                resource: "active_administration_operations".to_owned(),
+                limit: 1,
+            }));
+        }
+        for stream in intent.selection().streams() {
+            let Some(descriptor) = self.get::<StreamDescriptor>(CF_STATE, &stream_key(stream))?
+            else {
+                return Ok(ApplyResult::Rejected(DomainError::StreamNotFound));
+            };
+            if descriptor.cluster() != intent.cluster() {
+                return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                    reason: "selected export stream belongs to another cluster".to_owned(),
+                }));
+            }
+            if descriptor.lifecycle() != StreamLifecycle::Active {
+                return Ok(ApplyResult::Rejected(DomainError::StreamNotActive));
+            }
+        }
+        let configured_groups = self
+            .get::<Vec<GroupId>>(CF_STATE, KEY_DATA_GROUP_POOL)?
+            .ok_or_else(|| io_error("control data-group pool is missing"))?;
+        let next_epoch = self
+            .get::<u64>(CF_STATE, KEY_EXPORT_EPOCH)?
+            .unwrap_or_default()
+            .checked_add(1)
+            .ok_or_else(|| io_error("export epoch overflow"))?;
+        let epoch = ExportEpoch::new(next_epoch).map_err(io_error)?;
+        let spec = match ExportSpec::try_new(intent, epoch, configured_groups, deadline) {
+            Ok(spec) => spec,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        let control_cut = self.group_cut(log_id)?;
+        let token = spec.token();
+        let (fence, _) = match self.mutation_fence_state()?.acquire(token, control_cut) {
+            Ok(value) => value,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        let active = ActiveExport::preparing(spec, control_cut);
+        let state = self.cf(CF_STATE)?;
+        write.put_cf(&state, KEY_EXPORT_EPOCH, encode(&next_epoch)?);
+        write.put_cf(&state, KEY_MUTATION_FENCE, encode(&fence)?);
+        write.put_cf(&state, KEY_ACTIVE_EXPORT, encode(&active)?);
+        Ok(ApplyResult::Export(ExportApplyResult::Status(
+            ExportStatus::active(&active),
+        )))
+    }
+
+    fn apply_acquire_export_fence(
+        &self,
+        log_id: GroupLogId,
+        token: ExportFenceToken,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Data {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "export data fence reached the control group".to_owned(),
+            }));
+        }
+        let cut = self.group_cut(log_id)?;
+        let (fence, observation) = match self.mutation_fence_state()?.acquire(token, cut) {
+            Ok(value) => value,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        write.put_cf(&self.cf(CF_STATE)?, KEY_MUTATION_FENCE, encode(&fence)?);
+        Ok(ApplyResult::Export(ExportApplyResult::Fence(observation)))
+    }
+
+    fn apply_record_export_fence(
+        &self,
+        token: ExportFenceToken,
+        observation: ExportFenceObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        self.update_active_export(token, write, |active| active.record_fence(observation))
+    }
+
+    fn apply_request_export_completion(
+        &self,
+        request: MutationRequestId,
+        export: ExportId,
+        artifact: ArtifactIdentity,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let Some(active) = self.control_active_export()? else {
+            let result = self.export_receipt_result(&request, Some(export), None)?;
+            return Ok(match result {
+                ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(receipt)))
+                    if receipt.outcome() == &ExportReceiptOutcome::Completed(artifact) =>
+                {
+                    ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(receipt)))
+                }
+                ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(_))) => {
+                    ApplyResult::Rejected(DomainError::ExportConflict)
+                }
+                other => other,
+            });
+        };
+        if active.spec().request() != &request || active.spec().export() != export {
+            return Ok(ApplyResult::Rejected(DomainError::ExportConflict));
+        }
+        self.store_active_export(active.request_completion(artifact), write)
+    }
+
+    fn apply_request_export_abort(
+        &self,
+        request: MutationRequestId,
+        reason: ExportAbortReason,
+        observed_clock: ExportDeadline,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let Some(active) = self.control_active_export()? else {
+            let result = self.export_receipt_result(&request, None, None)?;
+            return Ok(match result {
+                ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(receipt)))
+                    if receipt.outcome() == &ExportReceiptOutcome::Aborted(reason) =>
+                {
+                    ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(receipt)))
+                }
+                ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(_))) => {
+                    ApplyResult::Rejected(DomainError::ExportConflict)
+                }
+                other => other,
+            });
+        };
+        if active.spec().request() != &request {
+            return Ok(ApplyResult::Rejected(DomainError::ExportConflict));
+        }
+        if reason == ExportAbortReason::DeadlineExceeded
+            && observed_clock.lower_bound_unix_ms() < active.spec().deadline().upper_bound_unix_ms()
+        {
+            return Ok(ApplyResult::Rejected(DomainError::InvalidRange {
+                reason: "export deadline has not definitely elapsed".to_owned(),
+            }));
+        }
+        self.store_active_export(active.request_abort(reason), write)
+    }
+
+    fn apply_release_export_fence(
+        &self,
+        token: ExportFenceToken,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        if self.identity.kind != GroupKind::Data {
+            return Ok(ApplyResult::Rejected(DomainError::IdentityMismatch {
+                reason: "export data-fence release reached the control group".to_owned(),
+            }));
+        }
+        let (fence, observation) = match self
+            .mutation_fence_state()?
+            .release_for_group(token, self.identity.group_id)
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        write.put_cf(&self.cf(CF_STATE)?, KEY_MUTATION_FENCE, encode(&fence)?);
+        self.resume_deferred_reclaim(write)?;
+        Ok(ApplyResult::Export(ExportApplyResult::Fence(observation)))
+    }
+
+    fn apply_record_export_release(
+        &self,
+        token: ExportFenceToken,
+        observation: ExportFenceObservation,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        self.update_active_export(token, write, |active| active.record_release(observation))
+    }
+
+    fn apply_finish_export(
+        &self,
+        token: ExportFenceToken,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let Some(active) = self.control_active_export()? else {
+            return self.export_receipt_for_token(token);
+        };
+        if active.spec().token() != token {
+            return Ok(ApplyResult::Rejected(DomainError::ExportConflict));
+        }
+        let receipt = match active.receipt() {
+            Ok(receipt) => receipt,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        let (fence, _) = match self
+            .mutation_fence_state()?
+            .release_for_group(token, self.identity.group_id)
+        {
+            Ok(value) => value,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        let state = self.cf(CF_STATE)?;
+        write.put_cf(&state, KEY_MUTATION_FENCE, encode(&fence)?);
+        write.delete_cf(&state, KEY_ACTIVE_EXPORT);
+        write.put_cf(
+            &state,
+            export_receipt_key(receipt.request())?,
+            encode(&receipt)?,
+        );
+        let session_key = export_session_key(receipt.request());
+        let mut session = self
+            .get::<ExportSessionState>(CF_STATE, &session_key)?
+            .unwrap_or_default();
+        let sequence = receipt.request().sequence().get();
+        session.highest_sequence = Some(
+            session
+                .highest_sequence
+                .map_or(sequence, |highest| highest.max(sequence)),
+        );
+        write.put_cf(&state, session_key, encode(&session)?);
+        self.evict_export_receipts(receipt.request(), write)?;
+        Ok(ApplyResult::Export(ExportApplyResult::Status(
+            ExportStatus::Terminal(receipt),
+        )))
+    }
+
+    fn update_active_export(
+        &self,
+        token: ExportFenceToken,
+        write: &mut WriteBatch,
+        transition: impl FnOnce(ActiveExport) -> Result<ActiveExport, DomainError>,
+    ) -> io::Result<ApplyResult> {
+        let Some(active) = self.control_active_export()? else {
+            return self.export_receipt_for_token(token);
+        };
+        if active.spec().token() != token {
+            return Ok(ApplyResult::Rejected(DomainError::ExportConflict));
+        }
+        self.store_active_export(transition(active), write)
+    }
+
+    fn store_active_export(
+        &self,
+        active: Result<ActiveExport, DomainError>,
+        write: &mut WriteBatch,
+    ) -> io::Result<ApplyResult> {
+        let active = match active {
+            Ok(active) => active,
+            Err(error) => return Ok(ApplyResult::Rejected(error)),
+        };
+        write.put_cf(&self.cf(CF_STATE)?, KEY_ACTIVE_EXPORT, encode(&active)?);
+        Ok(ApplyResult::Export(ExportApplyResult::Status(
+            ExportStatus::active(&active),
+        )))
+    }
+
+    fn control_active_export(&self) -> io::Result<Option<ActiveExport>> {
+        if self.identity.kind != GroupKind::Control {
+            return Ok(None);
+        }
+        self.get(CF_STATE, KEY_ACTIVE_EXPORT)
+    }
+
+    fn export_receipt_result(
+        &self,
+        request: &MutationRequestId,
+        export: Option<ExportId>,
+        digest: Option<ExportRequestDigest>,
+    ) -> io::Result<ApplyResult> {
+        let Some(receipt) = self.get::<ExportReceipt>(CF_STATE, &export_receipt_key(request)?)?
+        else {
+            return Ok(ApplyResult::Rejected(
+                if self.export_request_expired(request)? {
+                    DomainError::MutationReceiptExpired
+                } else {
+                    DomainError::ExportConflict
+                },
+            ));
+        };
+        if export.is_some_and(|value| value != receipt.export())
+            || digest.is_some_and(|value| value != receipt.request_digest())
+        {
+            return Ok(ApplyResult::Rejected(DomainError::ExportConflict));
+        }
+        Ok(ApplyResult::Export(ExportApplyResult::Status(
+            ExportStatus::Terminal(receipt),
+        )))
+    }
+
+    fn export_receipt_for_token(&self, token: ExportFenceToken) -> io::Result<ApplyResult> {
+        let receipt = self
+            .scan_prefix(CF_STATE, EXPORT_RECEIPT_PREFIX)?
+            .into_iter()
+            .map(|(_, value)| decode::<ExportReceipt>(&value))
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .find(|receipt| {
+                receipt.export() == token.export()
+                    && receipt.epoch() == token.epoch()
+                    && receipt.request_digest() == token.request_digest()
+            });
+        match receipt {
+            Some(receipt) => Ok(ApplyResult::Export(ExportApplyResult::Status(
+                ExportStatus::Terminal(receipt),
+            ))),
+            None => Ok(ApplyResult::Rejected(DomainError::ExportConflict)),
+        }
+    }
+
+    fn evict_export_receipts(
+        &self,
+        inserted_request: &MutationRequestId,
+        write: &mut WriteBatch,
+    ) -> io::Result<()> {
+        let inserted_key = export_receipt_key(inserted_request)?;
+        let mut receipts = self
+            .scan_prefix(CF_STATE, EXPORT_RECEIPT_PREFIX)?
+            .into_iter()
+            .filter(|(key, _)| *key != inserted_key)
+            .map(|(key, value)| decode::<ExportReceipt>(&value).map(|receipt| (key, receipt)))
+            .collect::<io::Result<Vec<_>>>()?;
+        receipts.sort_by_key(|(_, receipt)| receipt.epoch());
+        let excess = receipts
+            .len()
+            .saturating_add(1)
+            .saturating_sub(self.receipt_window);
+        let state = self.cf(CF_STATE)?;
+        for (key, _) in receipts.into_iter().take(excess) {
+            write.delete_cf(&state, key);
+        }
+        Ok(())
+    }
+
+    fn export_request_expired(&self, request: &MutationRequestId) -> io::Result<bool> {
+        Ok(self
+            .get::<ExportSessionState>(CF_STATE, &export_session_key(request))?
+            .and_then(|session| session.highest_sequence)
+            .is_some_and(|highest| request.sequence().get() <= highest))
+    }
+
+    fn group_cut(&self, log_id: GroupLogId) -> io::Result<GroupCut> {
+        Ok(GroupCut::new(
+            self.identity.group_id,
+            log_id.leader_id.term,
+            NodeId::new(log_id.leader_id.node_id).map_err(io_error)?,
+            log_id.index,
+        ))
+    }
+
+    fn resume_deferred_reclaim(&self, write: &mut WriteBatch) -> io::Result<()> {
+        let state = self.cf(CF_STATE)?;
+        for (key, value) in self.scan_prefix(CF_STATE, RETENTION_RECLAIM_HINT_PREFIX)? {
+            let partition = partition_from_reclaim_hint_key(&key)?;
+            let hinted_cursor = decode::<u64>(&value)?;
+            let mut retention = self
+                .get::<PartitionRetentionState>(CF_STATE, &retention_key(partition))?
+                .unwrap_or_default();
+            retention.reclaim_cursor = retention.reclaim_cursor.min(hinted_cursor);
+            write.put_cf(&state, retention_key(partition), encode(&retention)?);
+            write.delete_cf(&state, key);
+        }
+        Ok(())
     }
 
     fn apply_begin_administration(
@@ -3440,6 +4416,12 @@ impl GroupDb {
             } else {
                 Ok(ApplyResult::Rejected(DomainError::MutationConflict))
             };
+        }
+        if let Some(active) = self.get::<ActiveExport>(CF_STATE, KEY_ACTIVE_EXPORT)? {
+            return Ok(ApplyResult::Rejected(DomainError::ExportInProgress {
+                export: active.spec().export(),
+                outcome: RequestOutcome::DefiniteNoCommit,
+            }));
         }
         if self
             .get::<AdministrationOperation>(CF_STATE, KEY_ACTIVE_ADMINISTRATION)?
@@ -3913,6 +4895,16 @@ impl GroupDb {
             }
         } else {
             write.put_cf(&self.cf(CF_STATE)?, KEY_BOOTSTRAP, encode(&spec)?);
+        }
+        if self
+            .get::<MutationFenceState>(CF_STATE, KEY_MUTATION_FENCE)?
+            .is_none()
+        {
+            write.put_cf(
+                &self.cf(CF_STATE)?,
+                KEY_MUTATION_FENCE,
+                encode(&MutationFenceState::default())?,
+            );
         }
         Ok(ApplyResult::Bootstrapped(BootstrapResult::new(
             spec.cluster(),
@@ -4608,7 +5600,9 @@ impl GroupDb {
             .unwrap_or_default();
         let mut active = Vec::new();
         let mut retentions = Vec::<(PartitionKey, PartitionRetentionState)>::new();
+        let mut reclaim_hints = HashMap::<PartitionKey, u64>::new();
         let mut expired_any = false;
+        let export_fenced = self.mutation_fence_state()?.held().is_some();
         for lease in leases {
             if lease_is_effectively_active(&lease, clock) {
                 active.push(lease);
@@ -4623,26 +5617,38 @@ impl GroupDb {
             write.put_cf(&state, replay_lease_id_key(expired.id()), encode(&expired)?);
             budget.active_leases = budget.active_leases.saturating_sub(1);
             budget.reserved_bytes = budget.reserved_bytes.saturating_sub(protected_bytes);
-            let index = match retentions
-                .iter()
-                .position(|(partition, _)| *partition == range.partition())
-            {
-                Some(index) => index,
-                None => {
-                    retentions.push((
-                        range.partition(),
-                        self.get::<PartitionRetentionState>(
-                            CF_STATE,
-                            &retention_key(range.partition()),
-                        )?
-                        .unwrap_or_default(),
-                    ));
-                    retentions.len() - 1
+            if export_fenced {
+                let retention = self
+                    .get::<PartitionRetentionState>(CF_STATE, &retention_key(range.partition()))?
+                    .unwrap_or_default();
+                if range.start().get() < retention.logical_floor {
+                    reclaim_hints
+                        .entry(range.partition())
+                        .and_modify(|cursor| *cursor = (*cursor).min(range.start().get()))
+                        .or_insert(range.start().get());
                 }
-            };
-            let retention = &mut retentions[index].1;
-            if range.start().get() < retention.logical_floor {
-                retention.reclaim_cursor = retention.reclaim_cursor.min(range.start().get());
+            } else {
+                let index = match retentions
+                    .iter()
+                    .position(|(partition, _)| *partition == range.partition())
+                {
+                    Some(index) => index,
+                    None => {
+                        retentions.push((
+                            range.partition(),
+                            self.get::<PartitionRetentionState>(
+                                CF_STATE,
+                                &retention_key(range.partition()),
+                            )?
+                            .unwrap_or_default(),
+                        ));
+                        retentions.len() - 1
+                    }
+                };
+                let retention = &mut retentions[index].1;
+                if range.start().get() < retention.logical_floor {
+                    retention.reclaim_cursor = retention.reclaim_cursor.min(range.start().get());
+                }
             }
             expired_any = true;
         }
@@ -4651,11 +5657,19 @@ impl GroupDb {
             for (partition, retention) in &retentions {
                 write.put_cf(&state, retention_key(*partition), encode(retention)?);
             }
+            for (partition, cursor) in &reclaim_hints {
+                let key = retention_reclaim_hint_key(*partition);
+                let cursor = self
+                    .get::<u64>(CF_STATE, &key)?
+                    .map_or(*cursor, |existing| existing.min(*cursor));
+                write.put_cf(&state, key, encode(&cursor)?);
+            }
         }
         Ok(LeaseExpiryState {
             budget,
             active,
             retentions,
+            reclaim_hints,
         })
     }
 
@@ -4864,6 +5878,7 @@ impl GroupDb {
                         let state = self.cf(CF_STATE)?;
                         write.put_cf(&state, id_key, encode(&released)?);
                         let partition = released.range().partition();
+                        let export_fenced = self.mutation_fence_state()?.held().is_some();
                         let mut retention = expiry
                             .retentions
                             .iter()
@@ -4877,9 +5892,23 @@ impl GroupDb {
                                 .unwrap_or_default(),
                             );
                         if released.range().start().get() < retention.logical_floor {
-                            retention.reclaim_cursor =
-                                retention.reclaim_cursor.min(released.range().start().get());
-                            write.put_cf(&state, retention_key(partition), encode(&retention)?);
+                            if export_fenced {
+                                let hinted = expiry
+                                    .reclaim_hints
+                                    .get(&partition)
+                                    .copied()
+                                    .unwrap_or(released.range().start().get())
+                                    .min(released.range().start().get());
+                                let key = retention_reclaim_hint_key(partition);
+                                let hinted = self
+                                    .get::<u64>(CF_STATE, &key)?
+                                    .map_or(hinted, |existing| existing.min(hinted));
+                                write.put_cf(&state, key, encode(&hinted)?);
+                            } else {
+                                retention.reclaim_cursor =
+                                    retention.reclaim_cursor.min(released.range().start().get());
+                                write.put_cf(&state, retention_key(partition), encode(&retention)?);
+                            }
                         }
                         write.put_cf(
                             &state,
@@ -5544,6 +6573,28 @@ impl GroupDb {
 }
 
 impl CommittedStateReader {
+    pub fn active_export(&self) -> Result<Option<ActiveExport>, DomainError> {
+        self.db
+            .get(CF_STATE, KEY_ACTIVE_EXPORT)
+            .map_err(storage_domain)
+    }
+
+    pub fn mutation_fence_state(&self) -> Result<MutationFenceState, DomainError> {
+        self.db.mutation_fence_state().map_err(storage_domain)
+    }
+
+    pub fn export_receipt(
+        &self,
+        request: &MutationRequestId,
+    ) -> Result<Option<ExportReceipt>, DomainError> {
+        self.db
+            .get(
+                CF_STATE,
+                &export_receipt_key(request).map_err(storage_domain)?,
+            )
+            .map_err(storage_domain)
+    }
+
     pub fn security_policy(&self) -> Result<Option<SecurityPolicy>, DomainError> {
         self.db
             .get(CF_STATE, KEY_SECURITY_POLICY)
@@ -6231,13 +7282,18 @@ mod tests {
 
     use openraft::{
         EntryPayload,
-        storage::{IOFlushed, RaftLogStorage, RaftStateMachine},
+        storage::{IOFlushed, RaftLogReader, RaftLogStorage, RaftStateMachine},
         testing::log::{StoreBuilder, Suite},
         type_config::TypeConfigExt,
     };
     use uuid::Uuid;
 
     use super::*;
+    use light_stream_core::{
+        ArtifactIdentity, ExportAbortReason, ExportDeadline, ExportEpoch, ExportFenceObservation,
+        ExportFenceToken, ExportFormatVersion, ExportId, ExportIntent, ExportSelection,
+        ExportStatus, ExportStatusPhase, GroupCut, HeldExportFence, QuiescentCut, RequestOutcome,
+    };
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -9193,5 +10249,1613 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("storage error"));
+    }
+
+    fn export_request(sequence: u64) -> MutationRequestId {
+        MutationRequestId::new(
+            light_stream_core::PrincipalId::parse("export-operator").unwrap(),
+            light_stream_core::MutationSessionId::from_uuid(Uuid::from_u128(0x900)),
+            light_stream_core::RequestSequence::new(sequence),
+        )
+    }
+
+    fn export_intent(
+        request: MutationRequestId,
+        cluster: ClusterId,
+        streams: impl IntoIterator<Item = StreamId>,
+    ) -> ExportIntent {
+        ExportIntent::new(
+            request,
+            cluster,
+            ExportSelection::try_new(streams).unwrap(),
+            ExportFormatVersion::V1,
+        )
+    }
+
+    fn export_token(intent: &ExportIntent, epoch: u64) -> ExportFenceToken {
+        ExportFenceToken::new(ExportEpoch::new(epoch).unwrap(), intent.request_digest())
+    }
+
+    fn apply_test_command(db: &GroupDb, index: u64, command: GroupCommand) -> ApplyResult {
+        let entry = GroupEntry {
+            log_id: GroupLogId::new(
+                GroupLeaderId {
+                    term: 1,
+                    node_id: 1,
+                },
+                index,
+            ),
+            payload: EntryPayload::Normal(command),
+        };
+        let (_, payloads) = thin_entry(entry.clone()).unwrap();
+        if !payloads.is_empty() {
+            let payload_cf = db.cf(CF_PAYLOAD).unwrap();
+            let mut write = WriteBatch::default();
+            for (key, payload) in payloads {
+                write.put_cf(
+                    &payload_cf,
+                    payload_bytes_key(&key),
+                    encode_payload_value(&payload),
+                );
+                write.put_cf(
+                    &payload_cf,
+                    payload_owners_key(&key),
+                    encode(&PayloadOwners {
+                        raft_log: true,
+                        applied_state: false,
+                        applied_banks: 0,
+                    })
+                    .unwrap(),
+                );
+            }
+            db.write_sync(write).unwrap();
+        }
+        db.apply_entry(entry).unwrap()
+    }
+
+    fn begin_export(intent: ExportIntent, lower: u64, upper: u64) -> GroupCommand {
+        GroupCommand::Export(ExportCommand::Begin {
+            intent,
+            deadline: ExportDeadline::new(lower, upper).unwrap(),
+        })
+    }
+
+    fn fence_observation(result: ApplyResult) -> ExportFenceObservation {
+        match result {
+            ApplyResult::Export(ExportApplyResult::Fence(observation)) => observation,
+            other => panic!("expected export fence observation, got {other:?}"),
+        }
+    }
+
+    fn assert_export_rejected(result: ApplyResult, export: ExportId) {
+        let rendered = format!("{result:?}");
+        assert!(
+            matches!(
+                result,
+                ApplyResult::Rejected(DomainError::ExportInProgress {
+                    export: actual,
+                    outcome: RequestOutcome::DefiniteNoCommit,
+                }) if actual == export
+            ),
+            "{rendered}"
+        );
+    }
+
+    fn assert_not_export_rejected(result: &ApplyResult) {
+        assert!(!matches!(
+            result,
+            ApplyResult::Rejected(DomainError::ExportInProgress { .. })
+        ));
+    }
+
+    #[test]
+    fn export_begin_fences_idempotently_and_freezes_only_the_exact_group_set() {
+        let directory = ProjectTestDir::new("export-freeze");
+        let (cluster, stream) = ids();
+        let second_group = GroupId::new(3).unwrap();
+        let control = create_control_store(
+            &directory.0.join("control"),
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+                topology: Some(test_topology()),
+                security: None,
+                data_groups: vec![GroupId::new(DATA_GROUP_ID).unwrap(), second_group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        let intent = export_intent(export_request(1), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        let begin = begin_export(intent.clone(), 1_000, 2_000);
+        let first = apply_test_command(&control.reader.db, 2, begin.clone());
+        let retry = apply_test_command(&control.reader.db, 3, begin);
+        assert_eq!(first, retry);
+        assert!(matches!(
+            first,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Active(active)))
+                if active.phase() == ExportStatusPhase::Preparing
+        ));
+
+        let acquire = |group: GroupId, label: &str| {
+            let data = create_data_store(
+                &directory.0.join(label),
+                GroupIdentity::new(cluster, group, GroupKind::Data),
+                DEFAULT_RECEIPT_WINDOW,
+                test_budget(),
+            )
+            .unwrap();
+            apply_test_command(
+                &data.reader.db,
+                1,
+                GroupCommand::BootstrapData {
+                    spec: BootstrapSpec::new(
+                        cluster,
+                        stream,
+                        StreamName::parse("bootstrap").unwrap(),
+                    ),
+                },
+            );
+            let command = GroupCommand::Export(ExportCommand::AcquireFence { token });
+            let first = apply_test_command(&data.reader.db, 2, command.clone());
+            let retry = apply_test_command(&data.reader.db, 3, command);
+            assert_eq!(first, retry);
+            fence_observation(first)
+        };
+
+        let first_group = acquire(GroupId::new(DATA_GROUP_ID).unwrap(), "data-2");
+        let second_group_observation = acquire(second_group, "data-3");
+        let unexpected_group = acquire(GroupId::new(4).unwrap(), "data-4");
+
+        let record_first = GroupCommand::Export(ExportCommand::RecordFence {
+            token,
+            observation: first_group,
+        });
+        let recorded = apply_test_command(&control.reader.db, 4, record_first.clone());
+        let recorded_retry = apply_test_command(&control.reader.db, 5, record_first);
+        assert_eq!(recorded, recorded_retry);
+        assert!(matches!(
+            recorded,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Active(active)))
+                if active.phase() == ExportStatusPhase::Preparing
+        ));
+
+        let unexpected = apply_test_command(
+            &control.reader.db,
+            6,
+            GroupCommand::Export(ExportCommand::RecordFence {
+                token,
+                observation: unexpected_group,
+            }),
+        );
+        assert!(matches!(
+            unexpected,
+            ApplyResult::Rejected(DomainError::InvalidIdentity { .. })
+        ));
+
+        let freeze = GroupCommand::Export(ExportCommand::RecordFence {
+            token,
+            observation: second_group_observation,
+        });
+        let frozen = apply_test_command(&control.reader.db, 7, freeze.clone());
+        let frozen_retry = apply_test_command(&control.reader.db, 8, freeze);
+        assert_eq!(frozen, frozen_retry);
+        assert!(matches!(
+            frozen,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Active(active)))
+                if active.phase() == ExportStatusPhase::Frozen
+        ));
+    }
+
+    #[test]
+    fn export_begin_requires_selected_streams_to_be_active_at_the_control_cut() {
+        let directory = ProjectTestDir::new("export-selection-validation");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let control = create_control_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+                topology: Some(test_topology()),
+                security: None,
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        let missing = StreamId::from_uuid(Uuid::from_u128(0x930));
+        assert_eq!(
+            apply_test_command(
+                &control.reader.db,
+                2,
+                begin_export(
+                    export_intent(export_request(1), cluster, [missing]),
+                    1_000,
+                    2_000,
+                ),
+            ),
+            ApplyResult::Rejected(DomainError::StreamNotFound)
+        );
+        assert!(control.reader.active_export().unwrap().is_none());
+        assert!(
+            control
+                .reader
+                .mutation_fence_state()
+                .unwrap()
+                .held()
+                .is_none()
+        );
+
+        apply_test_command(
+            &control.reader.db,
+            3,
+            GroupCommand::BeginDeleteStream { stream_id: stream },
+        );
+        apply_test_command(
+            &control.reader.db,
+            4,
+            GroupCommand::FinishDeleteStream { stream_id: stream },
+        );
+        assert_eq!(
+            apply_test_command(
+                &control.reader.db,
+                5,
+                begin_export(
+                    export_intent(export_request(2), cluster, [stream]),
+                    1_000,
+                    2_000,
+                ),
+            ),
+            ApplyResult::Rejected(DomainError::StreamNotActive)
+        );
+        assert!(control.reader.active_export().unwrap().is_none());
+        assert!(
+            control
+                .reader
+                .mutation_fence_state()
+                .unwrap()
+                .held()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn held_export_fence_rejects_every_included_state_command() {
+        let directory = ProjectTestDir::new("export-included-state");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let topology = test_topology();
+        let bootstrap =
+            BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap());
+        let control = create_control_store(
+            &directory.0.join("control"),
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: bootstrap.clone(),
+                topology: Some(topology.clone()),
+                security: None,
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        let intent = export_intent(export_request(1), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        apply_test_command(
+            &control.reader.db,
+            2,
+            begin_export(intent.clone(), 1_000, 2_000),
+        );
+        assert!(matches!(
+            apply_test_command(
+                &control.reader.db,
+                3,
+                GroupCommand::BootstrapControl {
+                    spec: bootstrap.clone(),
+                    topology: Some(topology.clone()),
+                    security: None,
+                    data_groups: vec![group],
+                    max_streams: 8,
+                    max_partitions_per_stream: 4,
+                },
+            ),
+            ApplyResult::Bootstrapped(_)
+        ));
+        assert!(matches!(
+            apply_test_command(
+                &control.reader.db,
+                4,
+                GroupCommand::BootstrapControl {
+                    spec: bootstrap.clone(),
+                    topology: Some(topology.clone()),
+                    security: None,
+                    data_groups: vec![group],
+                    max_streams: 9,
+                    max_partitions_per_stream: 4,
+                },
+            ),
+            ApplyResult::Rejected(DomainError::BootstrapConflict { .. })
+        ));
+        assert!(matches!(
+            apply_test_command(
+                &control.reader.db,
+                5,
+                GroupCommand::BootstrapData {
+                    spec: bootstrap.clone(),
+                },
+            ),
+            ApplyResult::Rejected(DomainError::IdentityMismatch { .. })
+        ));
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let stream_bookmark = StreamCursorVector::new(
+            stream,
+            vec![CommittedCursor::new(
+                cluster,
+                partition,
+                RecordOffset::new(0),
+            )],
+        )
+        .unwrap();
+        let candidate_stream = StreamId::from_uuid(Uuid::from_u128(0x901));
+        let candidate_bookmark = BookmarkId::from_uuid(Uuid::from_u128(0x902));
+        let control_commands = vec![
+            GroupCommand::CreateStreamIntent {
+                spec: CreateStreamSpec::new(
+                    CatalogRequestId::from_uuid(Uuid::from_u128(0x903)),
+                    StreamName::parse("next-stream").unwrap(),
+                    1,
+                )
+                .unwrap(),
+                stream_id: candidate_stream,
+            },
+            GroupCommand::ReplicaReady {
+                stream_id: candidate_stream,
+                group_id: group,
+            },
+            GroupCommand::ActivateStream {
+                stream_id: candidate_stream,
+            },
+            GroupCommand::BeginDeleteStream { stream_id: stream },
+            GroupCommand::FinishDeleteStream { stream_id: stream },
+            GroupCommand::CreateStreamBookmark {
+                id: candidate_bookmark,
+                name: BookmarkName::parse("stream-mark").unwrap(),
+                vector: stream_bookmark,
+            },
+            GroupCommand::DeleteStreamBookmark {
+                stream_id: stream,
+                id: candidate_bookmark,
+            },
+        ];
+        for (offset, command) in control_commands.into_iter().enumerate() {
+            assert_export_rejected(
+                apply_test_command(&control.reader.db, offset as u64 + 6, command),
+                token.export(),
+            );
+        }
+
+        let data = create_data_store(
+            &directory.0.join("data"),
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData {
+                spec: bootstrap.clone(),
+            },
+        );
+        fence_observation(apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+        let producer_session =
+            light_stream_core::ProducerSessionId::from_uuid(Uuid::from_u128(0x904));
+        let publish = |sequence| {
+            PublishBatch::new(
+                cluster,
+                partition,
+                ProducerRequestId::new(
+                    light_stream_core::PrincipalId::parse("producer").unwrap(),
+                    producer_session,
+                    light_stream_core::RequestSequence::new(sequence),
+                ),
+                vec![b"record".to_vec()],
+            )
+            .unwrap()
+        };
+        let bookmark = BookmarkId::from_uuid(Uuid::from_u128(0x905));
+        let data_commands = vec![
+            GroupCommand::Publish { batch: publish(1) },
+            GroupCommand::PublishMany {
+                batch: ReplicatedPublishBatch::new(vec![publish(2)]).unwrap(),
+            },
+            GroupCommand::CreateBookmark {
+                id: bookmark,
+                partition,
+                name: BookmarkName::parse("partition-mark").unwrap(),
+                offset: RecordOffset::new(0),
+            },
+            GroupCommand::DeleteBookmark {
+                partition,
+                id: bookmark,
+            },
+            GroupCommand::AdvanceRetention {
+                request: RetentionRequest::new(export_request(2), partition, RecordOffset::new(1)),
+                clock: ClockObservation::new(1_000, 2_000).unwrap(),
+            },
+            GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor: RecordOffset::new(0),
+                max_records: 8,
+                max_payload_bytes: 1_024,
+                clock: ClockObservation::new(1_000, 2_000).unwrap(),
+            },
+        ];
+        for (offset, command) in data_commands.into_iter().enumerate() {
+            assert_export_rejected(
+                apply_test_command(&data.reader.db, offset as u64 + 3, command),
+                token.export(),
+            );
+        }
+    }
+
+    #[test]
+    fn held_export_fence_allows_excluded_state_commands() {
+        let directory = ProjectTestDir::new("export-excluded-state");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let data = create_data_store(
+            &directory.0.join("data"),
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            },
+        );
+        apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Publish {
+                batch: PublishBatch::new(
+                    cluster,
+                    partition,
+                    ProducerRequestId::new(
+                        light_stream_core::PrincipalId::parse("producer").unwrap(),
+                        light_stream_core::ProducerSessionId::from_uuid(Uuid::from_u128(0x906)),
+                        light_stream_core::RequestSequence::new(1),
+                    ),
+                    vec![b"record".to_vec()],
+                )
+                .unwrap(),
+            },
+        );
+        let intent = export_intent(export_request(1), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        fence_observation(apply_test_command(
+            &data.reader.db,
+            3,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+
+        let checkpoint = apply_test_command(
+            &data.reader.db,
+            4,
+            GroupCommand::CompareAndSetCheckpoint {
+                mutation: CheckpointMutation::new(
+                    export_request(2),
+                    CheckpointKey::new(
+                        cluster,
+                        partition,
+                        light_stream_core::ConsumerId::parse("consumer").unwrap(),
+                    ),
+                    CheckpointExpectation::Missing,
+                    CommittedCursor::new(cluster, partition, RecordOffset::new(1)),
+                )
+                .unwrap(),
+            },
+        );
+        assert!(matches!(
+            checkpoint,
+            ApplyResult::Checkpoint(CheckpointCasResult::Advanced { .. })
+        ));
+
+        let lease_request = export_request(3);
+        let admitted = apply_test_command(
+            &data.reader.db,
+            5,
+            GroupCommand::AdmitReplayLease {
+                request: ReplayLeaseRequest::new(
+                    lease_request,
+                    cluster,
+                    light_stream_core::ReplayRange::new(
+                        partition,
+                        RecordOffset::new(0),
+                        RecordOffset::new(1),
+                    )
+                    .unwrap(),
+                    light_stream_core::LeaseDuration::from_millis(10_000).unwrap(),
+                    light_stream_core::ByteLimit::new(1_024).unwrap(),
+                ),
+                clock: ClockObservation::new(1_000, 2_000).unwrap(),
+            },
+        );
+        let lease = match admitted {
+            ApplyResult::ReplayLease(lease) => lease,
+            other => panic!("expected replay lease admission, got {other:?}"),
+        };
+        let renewed = apply_test_command(
+            &data.reader.db,
+            6,
+            GroupCommand::RenewReplayLease {
+                request: LeaseRenewal::new(
+                    export_request(4),
+                    partition,
+                    lease.id(),
+                    light_stream_core::LeaseDuration::from_millis(10_000).unwrap(),
+                ),
+                clock: ClockObservation::new(2_000, 3_000).unwrap(),
+            },
+        );
+        assert!(matches!(renewed, ApplyResult::ReplayLease(_)));
+        let released = apply_test_command(
+            &data.reader.db,
+            7,
+            GroupCommand::ReleaseReplayLease {
+                request: LeaseRelease::new(export_request(5), partition, lease.id()),
+                clock: ClockObservation::new(3_000, 4_000).unwrap(),
+            },
+        );
+        assert!(matches!(released, ApplyResult::ReplayLease(_)));
+        assert!(matches!(
+            apply_test_command(&data.reader.db, 8, GroupCommand::OperationalProbe { group },),
+            ApplyResult::OperationalProof(_)
+        ));
+
+        let control = create_control_store(
+            &directory.0.join("control"),
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let topology = test_topology();
+        let (policy, principal, _) = test_security_policy(cluster);
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+                topology: Some(topology.clone()),
+                security: Some(policy.clone()),
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        let administration = AdministrationRequestId::from_uuid(Uuid::from_u128(0x907));
+        let administration_intent = AdministrationIntent::TransferLeader {
+            request: administration,
+            group,
+            target: NodeId::new(1).unwrap(),
+        };
+        apply_test_command(
+            &control.reader.db,
+            2,
+            GroupCommand::BeginAdministration {
+                intent: administration_intent.clone(),
+            },
+        );
+        apply_test_command(
+            &control.reader.db,
+            3,
+            GroupCommand::CompleteAdministration {
+                request: administration,
+            },
+        );
+        apply_test_command(&control.reader.db, 4, begin_export(intent, 1_000, 2_000));
+
+        let topology_result = apply_test_command(
+            &control.reader.db,
+            5,
+            GroupCommand::InitializeClusterTopology {
+                topology: topology.clone(),
+            },
+        );
+        assert_not_export_rejected(&topology_result);
+        let security_initialization = apply_test_command(
+            &control.reader.db,
+            6,
+            GroupCommand::InitializeSecurityPolicy {
+                policy: policy.clone(),
+            },
+        );
+        assert_not_export_rejected(&security_initialization);
+        let security_mutation = apply_test_command(
+            &control.reader.db,
+            7,
+            GroupCommand::ApplySecurityMutation {
+                mutation: SecurityMutation::new(
+                    export_request(6),
+                    light_stream_core::PolicyRevision::initial(),
+                    light_stream_core::SecurityChange::ReplacePrincipalGrants {
+                        grants: policy.grants().get(&principal).unwrap().clone(),
+                        principal,
+                    },
+                ),
+            },
+        );
+        assert!(
+            matches!(security_mutation, ApplyResult::SecurityPolicy(_)),
+            "{security_mutation:?}"
+        );
+        for (offset, command) in [
+            GroupCommand::BeginAdministration {
+                intent: administration_intent.clone(),
+            },
+            GroupCommand::CompleteAdministration {
+                request: administration,
+            },
+            GroupCommand::AbortAdministration {
+                request: administration,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let result = apply_test_command(&control.reader.db, offset as u64 + 8, command);
+            assert!(matches!(result, ApplyResult::Administration(_)));
+        }
+    }
+
+    #[test]
+    fn held_export_fence_replays_committed_publish_and_retention_results() {
+        let directory = ProjectTestDir::new("export-replays-included-results");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let data = create_data_store(
+            &directory.0,
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            },
+        );
+        let publish = PublishBatch::new(
+            cluster,
+            partition,
+            ProducerRequestId::new(
+                light_stream_core::PrincipalId::parse("producer").unwrap(),
+                light_stream_core::ProducerSessionId::from_uuid(Uuid::from_u128(0x911)),
+                light_stream_core::RequestSequence::new(1),
+            ),
+            vec![b"record".to_vec()],
+        )
+        .unwrap();
+        let published = apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Publish {
+                batch: publish.clone(),
+            },
+        );
+        let retention_request =
+            RetentionRequest::new(export_request(2), partition, RecordOffset::new(1));
+        let retained = apply_test_command(
+            &data.reader.db,
+            3,
+            GroupCommand::AdvanceRetention {
+                request: retention_request.clone(),
+                clock: ClockObservation::new(1_000, 2_000).unwrap(),
+            },
+        );
+        let intent = export_intent(export_request(1), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        fence_observation(apply_test_command(
+            &data.reader.db,
+            4,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+
+        assert_eq!(
+            apply_test_command(&data.reader.db, 5, GroupCommand::Publish { batch: publish },),
+            published
+        );
+        assert_eq!(
+            apply_test_command(
+                &data.reader.db,
+                6,
+                GroupCommand::AdvanceRetention {
+                    request: retention_request,
+                    clock: ClockObservation::new(9_000, 10_000).unwrap(),
+                },
+            ),
+            retained
+        );
+    }
+
+    #[test]
+    fn export_and_administration_are_mutually_exclusive_but_recovery_is_allowed() {
+        let directory = ProjectTestDir::new("export-administration-exclusion");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let control = create_control_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+                topology: Some(test_topology()),
+                security: None,
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        let administration = AdministrationRequestId::from_uuid(Uuid::from_u128(0x908));
+        let replacement = light_stream_core::NodeDescriptor::new(
+            NodeId::new(2).unwrap(),
+            "http://127.0.0.1:7102",
+            "http://127.0.0.1:7202",
+        );
+        let original_intent = AdministrationIntent::ReplaceVoter {
+            request: administration,
+            expected_topology_revision: 1,
+            remove: NodeId::new(1).unwrap(),
+            add: replacement,
+        };
+        apply_test_command(
+            &control.reader.db,
+            2,
+            GroupCommand::BeginAdministration {
+                intent: original_intent.clone(),
+            },
+        );
+        let intent = export_intent(export_request(1), cluster, [stream]);
+        let blocked_export = apply_test_command(
+            &control.reader.db,
+            3,
+            begin_export(intent.clone(), 1_000, 2_000),
+        );
+        assert!(matches!(blocked_export, ApplyResult::Rejected(_)));
+        assert!(control.reader.active_export().unwrap().is_none());
+
+        apply_test_command(
+            &control.reader.db,
+            4,
+            GroupCommand::CompleteAdministration {
+                request: administration,
+            },
+        );
+        let begun = apply_test_command(
+            &control.reader.db,
+            5,
+            begin_export(intent.clone(), 1_000, 2_000),
+        );
+        assert!(matches!(
+            begun,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Active(_)))
+        ));
+        let token = export_token(&intent, 1);
+        assert!(matches!(
+            apply_test_command(
+                &control.reader.db,
+                6,
+                GroupCommand::BeginAdministration {
+                    intent: original_intent,
+                },
+            ),
+            ApplyResult::Administration(_)
+        ));
+        let blocked_administration = apply_test_command(
+            &control.reader.db,
+            7,
+            GroupCommand::BeginAdministration {
+                intent: AdministrationIntent::ReplaceVoter {
+                    request: AdministrationRequestId::from_uuid(Uuid::from_u128(0x909)),
+                    expected_topology_revision: 3,
+                    remove: NodeId::new(2).unwrap(),
+                    add: light_stream_core::NodeDescriptor::new(
+                        NodeId::new(3).unwrap(),
+                        "http://127.0.0.1:7103",
+                        "http://127.0.0.1:7203",
+                    ),
+                },
+            },
+        );
+        assert_export_rejected(blocked_administration, token.export());
+
+        let transfer = apply_test_command(
+            &control.reader.db,
+            8,
+            GroupCommand::BeginAdministration {
+                intent: AdministrationIntent::TransferLeader {
+                    request: AdministrationRequestId::from_uuid(Uuid::from_u128(0x90a)),
+                    group,
+                    target: NodeId::new(2).unwrap(),
+                },
+            },
+        );
+        assert_export_rejected(transfer, token.export());
+
+        for (offset, command) in [
+            GroupCommand::CompleteAdministration {
+                request: administration,
+            },
+            GroupCommand::AbortAdministration {
+                request: administration,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(matches!(
+                apply_test_command(&control.reader.db, offset as u64 + 9, command),
+                ApplyResult::Administration(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn terminal_export_receipts_replay_and_changed_intent_conflicts() {
+        let directory = ProjectTestDir::new("export-terminal-receipt");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let control = create_control_store(
+            &directory.0.join("control"),
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+                topology: Some(test_topology()),
+                security: None,
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        let data = create_data_store(
+            &directory.0.join("data"),
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            },
+        );
+        let request = export_request(1);
+        let intent = export_intent(request.clone(), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        apply_test_command(
+            &control.reader.db,
+            2,
+            begin_export(intent.clone(), 1_000, 2_000),
+        );
+        let observation = fence_observation(apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+        apply_test_command(
+            &control.reader.db,
+            3,
+            GroupCommand::Export(ExportCommand::RecordFence { token, observation }),
+        );
+        apply_test_command(
+            &control.reader.db,
+            4,
+            GroupCommand::Export(ExportCommand::RequestAbort {
+                request: request.clone(),
+                reason: ExportAbortReason::OperatorRequested,
+                observed_clock: ExportDeadline::new(1_500, 2_500).unwrap(),
+            }),
+        );
+        let release_observation = fence_observation(apply_test_command(
+            &data.reader.db,
+            3,
+            GroupCommand::Export(ExportCommand::ReleaseFence { token }),
+        ));
+        apply_test_command(
+            &control.reader.db,
+            5,
+            GroupCommand::Export(ExportCommand::RecordRelease {
+                token,
+                observation: release_observation,
+            }),
+        );
+        let terminal = apply_test_command(
+            &control.reader.db,
+            6,
+            GroupCommand::Export(ExportCommand::Finish { token }),
+        );
+        assert!(matches!(
+            terminal,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(_)))
+        ));
+
+        let replay = apply_test_command(&control.reader.db, 7, begin_export(intent, 9_000, 10_000));
+        assert_eq!(terminal, replay);
+        let conflict = apply_test_command(
+            &control.reader.db,
+            8,
+            begin_export(
+                export_intent(
+                    request.clone(),
+                    cluster,
+                    [StreamId::from_uuid(Uuid::from_u128(0x910))],
+                ),
+                9_000,
+                10_000,
+            ),
+        );
+        assert_eq!(conflict, ApplyResult::Rejected(DomainError::ExportConflict));
+        assert_eq!(
+            apply_test_command(
+                &control.reader.db,
+                9,
+                GroupCommand::Export(ExportCommand::RequestAbort {
+                    request,
+                    reason: ExportAbortReason::DeadlineExceeded,
+                    observed_clock: ExportDeadline::new(2_000, 3_000).unwrap(),
+                }),
+            ),
+            ApplyResult::Rejected(DomainError::ExportConflict)
+        );
+    }
+
+    #[test]
+    fn export_completion_requires_recorded_release_and_clears_the_control_fence() {
+        let directory = ProjectTestDir::new("export-completion");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let control = create_control_store(
+            &directory.0.join("control"),
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let data = create_data_store(
+            &directory.0.join("data"),
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let bootstrap =
+            BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap());
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: bootstrap.clone(),
+                topology: Some(test_topology()),
+                security: None,
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData { spec: bootstrap },
+        );
+        let request = export_request(1);
+        let intent = export_intent(request.clone(), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        apply_test_command(&control.reader.db, 2, begin_export(intent, 1_000, 2_000));
+        let observation = fence_observation(apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+        apply_test_command(
+            &control.reader.db,
+            3,
+            GroupCommand::Export(ExportCommand::RecordFence { token, observation }),
+        );
+        apply_test_command(
+            &control.reader.db,
+            4,
+            GroupCommand::Export(ExportCommand::BeginMaterialization { token }),
+        );
+        let cut = QuiescentCut::try_new(
+            GroupCut::new(
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                1,
+                NodeId::new(1).unwrap(),
+                2,
+            ),
+            [GroupCut::new(group, 1, NodeId::new(1).unwrap(), 2)],
+        )
+        .unwrap();
+        let artifact = ArtifactIdentity::new(42, [7; 32]).unwrap();
+        apply_test_command(
+            &control.reader.db,
+            5,
+            GroupCommand::Export(ExportCommand::PublishArtifact {
+                token,
+                artifact,
+                cut,
+            }),
+        );
+        let closing = apply_test_command(
+            &control.reader.db,
+            6,
+            GroupCommand::Export(ExportCommand::RequestCompletion {
+                request: request.clone(),
+                export: token.export(),
+                artifact,
+            }),
+        );
+        assert!(matches!(
+            closing,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Active(status)))
+                if status.phase() == ExportStatusPhase::Releasing
+        ));
+        let release = fence_observation(apply_test_command(
+            &data.reader.db,
+            3,
+            GroupCommand::Export(ExportCommand::ReleaseFence { token }),
+        ));
+        assert_eq!(
+            apply_test_command(
+                &control.reader.db,
+                7,
+                GroupCommand::Export(ExportCommand::Finish { token }),
+            ),
+            ApplyResult::Rejected(DomainError::ExportConflict)
+        );
+        apply_test_command(
+            &control.reader.db,
+            8,
+            GroupCommand::Export(ExportCommand::RecordRelease {
+                token,
+                observation: release,
+            }),
+        );
+        let terminal = apply_test_command(
+            &control.reader.db,
+            9,
+            GroupCommand::Export(ExportCommand::Finish { token }),
+        );
+        assert!(matches!(
+            terminal,
+            ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(ref receipt)))
+                if receipt.disposition()
+                    == light_stream_core::ExportTerminalDisposition::Completed
+        ));
+        assert!(control.reader.active_export().unwrap().is_none());
+        let fence = control.reader.mutation_fence_state().unwrap();
+        assert_eq!(fence.through_epoch(), 1);
+        assert!(fence.held().is_none());
+        assert!(control.reader.export_receipt(&request).unwrap().is_some());
+        assert_eq!(
+            apply_test_command(
+                &control.reader.db,
+                10,
+                GroupCommand::Export(ExportCommand::RequestCompletion {
+                    request,
+                    export: token.export(),
+                    artifact: ArtifactIdentity::new(43, [8; 32]).unwrap(),
+                }),
+            ),
+            ApplyResult::Rejected(DomainError::ExportConflict)
+        );
+    }
+
+    #[test]
+    fn released_export_epoch_cannot_be_reopened_by_a_delayed_acquire() {
+        let directory = ProjectTestDir::new("export-delayed-acquire");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let data = create_data_store(
+            &directory.0,
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            },
+        );
+        let intent = export_intent(export_request(1), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        let released = fence_observation(apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Export(ExportCommand::ReleaseFence { token }),
+        ));
+        assert_eq!(released.through_epoch(), 1);
+        assert!(released.held().is_none());
+        let delayed = fence_observation(apply_test_command(
+            &data.reader.db,
+            3,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+        assert_eq!(delayed.through_epoch(), 1);
+        assert!(delayed.held().is_none());
+        assert!(data.reader.mutation_fence_state().unwrap().held().is_none());
+    }
+
+    #[test]
+    fn replay_lease_release_defers_reclaim_cursor_changes_until_fence_release() {
+        let directory = ProjectTestDir::new("export-replay-reclaim");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let partition = PartitionKey::new(stream, PartitionId::new(0));
+        let data = create_data_store(
+            &directory.0,
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData {
+                spec: BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap()),
+            },
+        );
+        apply_test_command(
+            &data.reader.db,
+            2,
+            GroupCommand::Publish {
+                batch: PublishBatch::new(
+                    cluster,
+                    partition,
+                    ProducerRequestId::new(
+                        light_stream_core::PrincipalId::parse("producer").unwrap(),
+                        light_stream_core::ProducerSessionId::from_uuid(Uuid::from_u128(0x920)),
+                        light_stream_core::RequestSequence::new(1),
+                    ),
+                    vec![b"protected".to_vec(), b"expired".to_vec()],
+                )
+                .unwrap(),
+            },
+        );
+        let lease_request = export_request(1);
+        let admitted = apply_test_command(
+            &data.reader.db,
+            3,
+            GroupCommand::AdmitReplayLease {
+                request: ReplayLeaseRequest::new(
+                    lease_request,
+                    cluster,
+                    light_stream_core::ReplayRange::new(
+                        partition,
+                        RecordOffset::new(0),
+                        RecordOffset::new(1),
+                    )
+                    .unwrap(),
+                    light_stream_core::LeaseDuration::from_millis(10_000).unwrap(),
+                    light_stream_core::ByteLimit::new(1_024).unwrap(),
+                ),
+                clock: ClockObservation::new(1_000, 2_000).unwrap(),
+            },
+        );
+        let lease = match admitted {
+            ApplyResult::ReplayLease(lease) => lease,
+            other => panic!("expected replay lease, got {other:?}"),
+        };
+        apply_test_command(
+            &data.reader.db,
+            4,
+            GroupCommand::AdvanceRetention {
+                request: RetentionRequest::new(export_request(2), partition, RecordOffset::new(2)),
+                clock: ClockObservation::new(2_000, 3_000).unwrap(),
+            },
+        );
+        apply_test_command(
+            &data.reader.db,
+            5,
+            GroupCommand::MaintainRetention {
+                partition,
+                expected_cursor: RecordOffset::new(0),
+                max_records: 8,
+                max_payload_bytes: 1_024,
+                clock: ClockObservation::new(3_000, 4_000).unwrap(),
+            },
+        );
+        assert_eq!(
+            data.reader
+                .retention_status(partition)
+                .unwrap()
+                .reclaim_cursor(),
+            RecordOffset::new(2)
+        );
+
+        let intent = export_intent(export_request(3), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        fence_observation(apply_test_command(
+            &data.reader.db,
+            6,
+            GroupCommand::Export(ExportCommand::AcquireFence { token }),
+        ));
+        apply_test_command(
+            &data.reader.db,
+            7,
+            GroupCommand::ReleaseReplayLease {
+                request: LeaseRelease::new(export_request(4), partition, lease.id()),
+                clock: ClockObservation::new(4_000, 5_000).unwrap(),
+            },
+        );
+        assert_eq!(
+            data.reader
+                .retention_status(partition)
+                .unwrap()
+                .reclaim_cursor(),
+            RecordOffset::new(2)
+        );
+        fence_observation(apply_test_command(
+            &data.reader.db,
+            8,
+            GroupCommand::Export(ExportCommand::ReleaseFence { token }),
+        ));
+        assert_eq!(
+            data.reader
+                .retention_status(partition)
+                .unwrap()
+                .reclaim_cursor(),
+            RecordOffset::new(0)
+        );
+    }
+
+    #[test]
+    fn terminal_export_receipts_are_bounded_by_the_store_window() {
+        let directory = ProjectTestDir::new("export-receipt-window");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let control = create_control_store(
+            &directory.0.join("control"),
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            1,
+            test_budget(),
+        )
+        .unwrap();
+        let data = create_data_store(
+            &directory.0.join("data"),
+            GroupIdentity::new(cluster, group, GroupKind::Data),
+            1,
+            test_budget(),
+        )
+        .unwrap();
+        let bootstrap =
+            BootstrapSpec::new(cluster, stream, StreamName::parse("bootstrap").unwrap());
+        apply_test_command(
+            &control.reader.db,
+            1,
+            GroupCommand::BootstrapControl {
+                spec: bootstrap.clone(),
+                topology: Some(test_topology()),
+                security: None,
+                data_groups: vec![group],
+                max_streams: 8,
+                max_partitions_per_stream: 4,
+            },
+        );
+        apply_test_command(
+            &data.reader.db,
+            1,
+            GroupCommand::BootstrapData { spec: bootstrap },
+        );
+        let mut control_index = 2;
+        let mut requests = Vec::new();
+        for (data_index, sequence) in (2_u64..).zip(1..=2) {
+            let request = export_request(sequence);
+            let intent = export_intent(request.clone(), cluster, [stream]);
+            let token = export_token(&intent, sequence);
+            apply_test_command(
+                &control.reader.db,
+                control_index,
+                begin_export(intent, 1_000, 2_000),
+            );
+            control_index += 1;
+            apply_test_command(
+                &control.reader.db,
+                control_index,
+                GroupCommand::Export(ExportCommand::RequestAbort {
+                    request: request.clone(),
+                    reason: ExportAbortReason::OperatorRequested,
+                    observed_clock: ExportDeadline::new(1_000, 2_000).unwrap(),
+                }),
+            );
+            control_index += 1;
+            let release = fence_observation(apply_test_command(
+                &data.reader.db,
+                data_index,
+                GroupCommand::Export(ExportCommand::ReleaseFence { token }),
+            ));
+            apply_test_command(
+                &control.reader.db,
+                control_index,
+                GroupCommand::Export(ExportCommand::RecordRelease {
+                    token,
+                    observation: release,
+                }),
+            );
+            control_index += 1;
+            if sequence == 2 {
+                let state = control.reader.db.cf(CF_STATE).unwrap();
+                let mut write = WriteBatch::default();
+                write.put_cf(
+                    &state,
+                    export_session_key(&request),
+                    encode(&ExportSessionState {
+                        highest_sequence: Some(3),
+                    })
+                    .unwrap(),
+                );
+                control.reader.db.write_sync(write).unwrap();
+            }
+            apply_test_command(
+                &control.reader.db,
+                control_index,
+                GroupCommand::Export(ExportCommand::Finish { token }),
+            );
+            control_index += 1;
+            requests.push(request);
+        }
+        assert!(
+            control
+                .reader
+                .export_receipt(&requests[0])
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            control
+                .reader
+                .export_receipt(&requests[1])
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            control
+                .reader
+                .db
+                .get::<ExportSessionState>(CF_STATE, &export_session_key(&requests[1]))
+                .unwrap()
+                .unwrap()
+                .highest_sequence,
+            Some(3)
+        );
+
+        let expired = apply_test_command(
+            &control.reader.db,
+            control_index,
+            begin_export(
+                export_intent(requests[0].clone(), cluster, [stream]),
+                3_000,
+                4_000,
+            ),
+        );
+        control_index += 1;
+        assert_eq!(
+            expired,
+            ApplyResult::Rejected(DomainError::MutationReceiptExpired)
+        );
+        assert!(control.reader.active_export().unwrap().is_none());
+
+        let changed_retained = apply_test_command(
+            &control.reader.db,
+            control_index,
+            begin_export(
+                export_intent(
+                    requests[1].clone(),
+                    cluster,
+                    [StreamId::from_uuid(Uuid::from_u128(0x911))],
+                ),
+                3_000,
+                4_000,
+            ),
+        );
+        assert_eq!(
+            changed_retained,
+            ApplyResult::Rejected(DomainError::ExportConflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn export_commands_round_trip_as_thin_entries_without_payload_writes() {
+        let directory = ProjectTestDir::new("export-thin-entries");
+        let (cluster, stream) = ids();
+        let group = GroupId::new(DATA_GROUP_ID).unwrap();
+        let request = export_request(1);
+        let intent = export_intent(request.clone(), cluster, [stream]);
+        let token = export_token(&intent, 1);
+        let data_cut = GroupCut::new(group, 1, NodeId::new(1).unwrap(), 2);
+        let observation =
+            ExportFenceObservation::new(group, 0, Some(HeldExportFence::new(token, data_cut)))
+                .unwrap();
+        let control_cut = GroupCut::new(
+            GroupId::new(CONTROL_GROUP_ID).unwrap(),
+            1,
+            NodeId::new(1).unwrap(),
+            1,
+        );
+        let cut = QuiescentCut::try_new(control_cut, [data_cut]).unwrap();
+        let artifact = ArtifactIdentity::new(42, [7; 32]).unwrap();
+        let commands = vec![
+            ExportCommand::Begin {
+                intent,
+                deadline: ExportDeadline::new(1_000, 2_000).unwrap(),
+            },
+            ExportCommand::AcquireFence { token },
+            ExportCommand::RecordFence { token, observation },
+            ExportCommand::BeginMaterialization { token },
+            ExportCommand::PublishArtifact {
+                token,
+                artifact,
+                cut,
+            },
+            ExportCommand::RequestCompletion {
+                request: request.clone(),
+                export: token.export(),
+                artifact,
+            },
+            ExportCommand::RequestAbort {
+                request,
+                reason: ExportAbortReason::OperatorRequested,
+                observed_clock: ExportDeadline::new(1_500, 2_500).unwrap(),
+            },
+            ExportCommand::ReleaseFence { token },
+            ExportCommand::RecordRelease {
+                token,
+                observation: ExportFenceObservation::new(group, 1, None).unwrap(),
+            },
+            ExportCommand::Finish { token },
+        ];
+        let entries = commands
+            .into_iter()
+            .enumerate()
+            .map(|(index, command)| GroupEntry {
+                log_id: GroupLogId::new(
+                    GroupLeaderId {
+                        term: 1,
+                        node_id: 1,
+                    },
+                    index as u64 + 1,
+                ),
+                payload: EntryPayload::Normal(GroupCommand::Export(command)),
+            })
+            .collect::<Vec<_>>();
+        for entry in entries.iter().cloned() {
+            let (thin, payloads) = thin_entry(entry).unwrap();
+            assert!(payloads.is_empty());
+            let encoded = encode(&thin).unwrap();
+            assert_eq!(decode::<ThinEntry>(&encoded).unwrap(), thin);
+        }
+
+        let handles = create_control_store(
+            &directory.0,
+            GroupIdentity::new(
+                cluster,
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+                GroupKind::Control,
+            ),
+            DEFAULT_RECEIPT_WINDOW,
+            test_budget(),
+        )
+        .unwrap();
+        let mut log = handles.log_store;
+        log.append(entries.clone(), IOFlushed::noop())
+            .await
+            .unwrap();
+        let mut reader = log.get_log_reader().await;
+        assert_eq!(
+            reader
+                .try_get_log_entries(1..=entries.len() as u64)
+                .await
+                .unwrap(),
+            entries
+        );
+        assert_eq!(
+            handles
+                .reader
+                .db
+                .db
+                .iterator_cf(
+                    &handles.reader.db.raw_cf(CF_PAYLOAD).unwrap(),
+                    IteratorMode::Start,
+                )
+                .count(),
+            0
+        );
     }
 }

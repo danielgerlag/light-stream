@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    AmbiguousRequest, ConsensusGroup, LeaderHint, RecordOffset, ReplayLeaseId,
+    AmbiguousRequest, ConsensusGroup, ExportId, LeaderHint, RecordOffset, ReplayLeaseId,
     ReplayLeaseLifecycle, RequestOutcome,
 };
 
@@ -39,6 +39,8 @@ pub enum ErrorCode {
     ReplayLeaseLifetimeExhausted,
     MutationConflict,
     MutationReceiptExpired,
+    ExportConflict,
+    ExportInProgress,
     LeaseClockUnavailable,
     PublishOverloaded,
     ResourceLimit,
@@ -84,6 +86,8 @@ impl ErrorCode {
             Self::ReplayLeaseLifetimeExhausted => "replay_lease_lifetime_exhausted",
             Self::MutationConflict => "mutation_conflict",
             Self::MutationReceiptExpired => "mutation_receipt_expired",
+            Self::ExportConflict => "export_conflict",
+            Self::ExportInProgress => "export_in_progress",
             Self::LeaseClockUnavailable => "lease_clock_unavailable",
             Self::PublishOverloaded => "publish_overloaded",
             Self::ResourceLimit => "resource_limit",
@@ -180,6 +184,13 @@ pub enum DomainError {
     MutationConflict,
     #[error("mutation request identity is older than the retained receipt window")]
     MutationReceiptExpired,
+    #[error("export request identity was already used for another canonical intent")]
+    ExportConflict,
+    #[error("export {export} currently fences this mutation")]
+    ExportInProgress {
+        export: ExportId,
+        outcome: RequestOutcome,
+    },
     #[error("the configured lease clock guarantee is unavailable")]
     LeaseClockUnavailable,
     #[error("{resource} limit {limit} was exceeded before publish admission")]
@@ -238,6 +249,8 @@ impl DomainError {
             Self::ReplayLeaseLifetimeExhausted => ErrorCode::ReplayLeaseLifetimeExhausted,
             Self::MutationConflict => ErrorCode::MutationConflict,
             Self::MutationReceiptExpired => ErrorCode::MutationReceiptExpired,
+            Self::ExportConflict => ErrorCode::ExportConflict,
+            Self::ExportInProgress { .. } => ErrorCode::ExportInProgress,
             Self::LeaseClockUnavailable => ErrorCode::LeaseClockUnavailable,
             Self::PublishOverloaded { .. } => ErrorCode::PublishOverloaded,
             Self::ResourceLimit { .. } => ErrorCode::ResourceLimit,

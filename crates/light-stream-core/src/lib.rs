@@ -7,6 +7,7 @@ mod consensus;
 mod cursor;
 mod error;
 mod identity;
+mod operations;
 mod publish;
 mod recovery;
 mod replay;
@@ -42,6 +43,14 @@ pub use identity::{
     AdministrationRequestId, BookmarkId, BookmarkName, BookmarkPublicationSequence,
     CatalogRequestId, ClusterId, ConsumerId, GroupId, MutationSessionId, NodeId, PartitionId,
     PrincipalId, ProducerSessionId, ReplayLeaseId, RequestSequence, StreamId, StreamName,
+};
+pub use operations::{
+    AbortingExport, ActiveExport, ActiveExportPhase, ActiveExportStatus, ArtifactIdentity,
+    AvailableExport, ExportAbortReason, ExportDeadline, ExportEpoch, ExportFenceObservation,
+    ExportFenceToken, ExportFormatVersion, ExportId, ExportIntent, ExportReceipt,
+    ExportReceiptOutcome, ExportRequestDigest, ExportSelection, ExportSpec, ExportStatus,
+    ExportStatusPhase, ExportTerminalDisposition, GroupCut, HeldExportFence, MAX_EXPORT_STREAMS,
+    MutationFenceState, PreparingExport, QuiescentCut, ReleasingExport,
 };
 pub use publish::{
     MAX_PUBLISH_BYTES, MAX_RECORD_BYTES, MAX_RECORDS_PER_PUBLISH,

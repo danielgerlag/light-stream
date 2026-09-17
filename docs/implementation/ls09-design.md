@@ -308,13 +308,24 @@ pub struct QuiescentCut {
     pub data: BTreeMap<GroupId, GroupCut>,
 }
 
-pub enum MutationFence {
-    Open,
-    ExportHeld { export: ExportId, request_digest: [u8; 32] },
+pub struct MutationFenceState {
+    pub through_epoch: u64,
+    pub held: Option<HeldExportFence>,
+}
+
+pub struct HeldExportFence {
+    pub epoch: ExportEpoch,
+    pub export: ExportId,
+    pub request_digest: [u8; 32],
+    pub cut: GroupCut,
 }
 ```
 
 The control group and every configured data group apply the matching fence. The fence orders after earlier included-state mutations and rejects later included-state mutations.
+
+Fence release advances `through_epoch` even when the group did not acquire that export. A delayed acquire at or below the watermark remains open. This prevents an old reconciliation command from re-fencing a group after abort or completion.
+
+The apply path resolves an existing durable result before it rejects a command under the fence. A publish, retention mutation, stream operation, bookmark operation, bootstrap, or administration retry therefore returns its committed result. Only new exported-state mutations return `export_in_progress` with `definite_no_commit`.
 
 The fence blocks these operations:
 
