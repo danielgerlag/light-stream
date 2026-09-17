@@ -124,7 +124,7 @@ The first `SIGINT` or `SIGTERM` starts one drain:
 
 A repeated signal observes the same drain. A missed deadline exits nonzero and reports unresolved accepted work. It never reports a clean shutdown.
 
-`ActiveCluster` retains every maintenance task handle. Drain sets the maintenance shutdown flag and joins those tasks before it waits for public mutation permits. `OperationalProbe` is outside the mutation gate, but its task must stop before Raft shutdown.
+`ActiveCluster` retains every maintenance task handle. Drain closes public mutation admission first. It then joins maintenance tasks and waits for accepted mutations within the same deadline. Submitted Raft writes and bootstrap retain owned mutation permits after an RPC timeout or cancellation. `OperationalProbe` is outside the mutation gate, but its task stops before Raft shutdown.
 
 ### Export selected streams
 
@@ -229,7 +229,7 @@ No transition returns to `Running` after drain starts.
 
 ## Write readiness
 
-The readiness worker keeps one bounded sample per active group. It runs at a fixed interval with at most four concurrent probes. A sample expires after two probe intervals.
+The readiness worker runs at a fixed interval with at most four concurrent probes. Each remote probe has a 100 ms deadline. The complete sample has a 600 ms deadline. When the complete sample expires, readiness fails closed with stale control-group authority.
 
 A leader proves write authority with the existing operational-proof rule. A follower asks the current leader through one additive authenticated `ProbeWriteAuthority` peer RPC. The RPC reports an existing proof only after it matches the current leader, term, applied index, and durable state. It never invokes the write fallback that creates an `OperationalProbe`.
 
@@ -274,7 +274,6 @@ light_stream_publish_queue_resident_bytes{group_id}
 light_stream_publish_queue_limit{group_id,resource}
 light_stream_publish_rejections_total{group_id,reason}
 light_stream_export_state{state}
-light_stream_shutdown_drains_total{outcome}
 ```
 
 Labels use closed enums, configured group IDs, and configured node IDs. They never contain stream IDs, names, endpoints, filesystem paths, principals, request IDs, payloads, tokens, certificate subjects, or error strings.

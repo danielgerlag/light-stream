@@ -13,13 +13,14 @@ use light_stream_core::{
 };
 use light_stream_storage::{ApplyResult, GroupCommand};
 use openraft::errors::{ClientWriteError, RaftError};
+use serde::Serialize;
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, sleep, sleep_until},
 };
 
-use crate::runtime::DataRaft;
+use crate::{lifecycle::MutationPermit, runtime::DataRaft};
 
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_OVERHEAD_BYTES: usize = 256;
@@ -149,6 +150,19 @@ struct AdmissionUsage {
     requests: usize,
     records: usize,
     resident_bytes: usize,
+    rejected_total: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct PublishQueueSnapshot {
+    pub accepting: bool,
+    pub requests: usize,
+    pub records: usize,
+    pub resident_bytes: usize,
+    pub request_limit: usize,
+    pub record_limit: usize,
+    pub resident_byte_limit: usize,
+    pub rejected_total: u64,
 }
 
 struct Admission {
@@ -191,6 +205,7 @@ impl Admission {
             ),
         ] {
             if used > limit {
+                usage.rejected_total = usage.rejected_total.saturating_add(1);
                 return Err(DomainError::PublishOverloaded {
                     resource: resource.to_owned(),
                     limit: u64::try_from(limit).unwrap_or(u64::MAX),
@@ -212,6 +227,35 @@ impl Admission {
         usage.resident_bytes = usage.resident_bytes.saturating_sub(charge.resident_bytes);
     }
 
+    fn reject(&self) {
+        if let Ok(mut usage) = self.usage.lock() {
+            usage.rejected_total = usage.rejected_total.saturating_add(1);
+        }
+    }
+
+    fn snapshot(&self) -> PublishQueueSnapshot {
+        let usage = self.usage.lock().map_or_else(
+            |_| AdmissionUsage::default(),
+            |usage| AdmissionUsage {
+                accepting: usage.accepting,
+                requests: usage.requests,
+                records: usage.records,
+                resident_bytes: usage.resident_bytes,
+                rejected_total: usage.rejected_total,
+            },
+        );
+        PublishQueueSnapshot {
+            accepting: usage.accepting,
+            requests: usage.requests,
+            records: usage.records,
+            resident_bytes: usage.resident_bytes,
+            request_limit: self.config.queue_requests,
+            record_limit: self.config.queue_records,
+            resident_byte_limit: self.config.queue_resident_bytes,
+            rejected_total: usage.rejected_total,
+        }
+    }
+
     fn close(&self) {
         if let Ok(mut usage) = self.usage.lock() {
             usage.accepting = false;
@@ -224,12 +268,14 @@ struct QueuedPublish {
     charge: PublishCharge,
     batch: PublishBatch,
     reply: oneshot::Sender<Result<PublishReceipt, DomainError>>,
+    _permit: MutationPermit,
 }
 
 struct PublishCompletion {
     charge: PublishCharge,
     request: ProducerRequestId,
     reply: Option<oneshot::Sender<Result<PublishReceipt, DomainError>>>,
+    _permit: MutationPermit,
 }
 
 pub(crate) struct PublishWaiter {
@@ -281,7 +327,11 @@ impl PublishScheduler {
         }
     }
 
-    pub fn try_admit(&self, batch: PublishBatch) -> Result<PublishWaiter, DomainError> {
+    pub fn try_admit(
+        &self,
+        batch: PublishBatch,
+        permit: MutationPermit,
+    ) -> Result<PublishWaiter, DomainError> {
         let charge = PublishCharge::for_batch(&batch)?;
         self.admission.reserve(charge)?;
         let (reply, receiver) = oneshot::channel();
@@ -290,15 +340,21 @@ impl PublishScheduler {
             charge,
             batch,
             reply,
+            _permit: permit,
         };
         if self.sender.try_send(queued).is_err() {
             self.admission.release(charge);
+            self.admission.reject();
             return Err(DomainError::PublishOverloaded {
                 resource: "publish queue requests".to_owned(),
                 limit: u64::try_from(self.admission.config.queue_requests).unwrap_or(u64::MAX),
             });
         }
         Ok(PublishWaiter { reply: receiver })
+    }
+
+    pub fn snapshot(&self) -> PublishQueueSnapshot {
+        self.admission.snapshot()
     }
 
     pub async fn shutdown(&self) {
@@ -506,6 +562,7 @@ async fn submit_batch(
             charge: queued.charge,
             request: queued.batch.request().clone(),
             reply: Some(queued.reply),
+            _permit: queued._permit,
         });
         requests.push(queued.batch);
     }
@@ -681,16 +738,53 @@ mod tests {
     fn queued(batch: PublishBatch) -> QueuedPublish {
         let charge = PublishCharge::for_batch(&batch).unwrap();
         let (reply, _) = oneshot::channel();
+        let lifecycle = crate::lifecycle::LifecycleController::starting();
         QueuedPublish {
             admitted_at: Instant::now(),
             charge,
             batch,
             reply,
+            _permit: lifecycle.try_admit_mutation().unwrap(),
         }
     }
 
+    #[tokio::test]
+    async fn queued_publish_owns_mutation_admission_until_completion() {
+        let lifecycle = crate::lifecycle::LifecycleController::starting();
+        lifecycle.mark_running(light_stream_core::WriteReadiness::Ready);
+        let permit = lifecycle.try_admit_mutation().unwrap();
+        let batch = batch(1, 1, 8);
+        let charge = PublishCharge::for_batch(&batch).unwrap();
+        let (reply, receiver) = oneshot::channel();
+        let queued = QueuedPublish {
+            admitted_at: Instant::now(),
+            charge,
+            batch,
+            reply,
+            _permit: permit,
+        };
+        drop(receiver);
+
+        let draining = {
+            let lifecycle = lifecycle.clone();
+            tokio::spawn(async move {
+                lifecycle
+                    .begin_drain(Instant::now() + Duration::from_secs(1))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+
+        assert!(!draining.is_finished());
+        drop(queued);
+        assert_eq!(
+            draining.await.unwrap(),
+            crate::lifecycle::DrainOutcome::Completed { accepted: 1 }
+        );
+    }
+
     #[test]
-    fn admission_reserves_all_dimensions_without_waiting() {
+    fn admission_snapshot_tracks_reserve_release_rejection_and_close() {
         let config = PublishSchedulerConfig {
             queue_requests: 1,
             queue_records: 2,
@@ -705,7 +799,34 @@ mod tests {
             records: 2,
             resident_bytes: 1024,
         };
+        assert_eq!(
+            admission.snapshot(),
+            PublishQueueSnapshot {
+                accepting: true,
+                requests: 0,
+                records: 0,
+                resident_bytes: 0,
+                request_limit: 1,
+                record_limit: 2,
+                resident_byte_limit: 1024,
+                rejected_total: 0,
+            }
+        );
+
         admission.reserve(charge).unwrap();
+        assert_eq!(
+            admission.snapshot(),
+            PublishQueueSnapshot {
+                accepting: true,
+                requests: 1,
+                records: 2,
+                resident_bytes: 1024,
+                request_limit: 1,
+                record_limit: 2,
+                resident_byte_limit: 1024,
+                rejected_total: 0,
+            }
+        );
         assert!(matches!(
             admission.reserve(PublishCharge {
                 records: 1,
@@ -713,13 +834,26 @@ mod tests {
             }),
             Err(DomainError::PublishOverloaded { .. })
         ));
+        assert_eq!(admission.snapshot().rejected_total, 1);
+
         admission.release(charge);
-        admission
-            .reserve(PublishCharge {
+        let released = admission.snapshot();
+        assert_eq!(released.requests, 0);
+        assert_eq!(released.records, 0);
+        assert_eq!(released.resident_bytes, 0);
+
+        admission.reject();
+        assert_eq!(admission.snapshot().rejected_total, 2);
+
+        admission.close();
+        assert!(!admission.snapshot().accepting);
+        assert!(matches!(
+            admission.reserve(PublishCharge {
                 records: 1,
                 resident_bytes: 1,
-            })
-            .unwrap();
+            }),
+            Err(DomainError::ClusterForming)
+        ));
     }
 
     #[test]

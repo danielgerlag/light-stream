@@ -25,6 +25,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     BUILD_REVISION,
+    lifecycle::LifecycleController,
     runtime::ClusterManager,
     security::{Permit, RuntimeSecurityConfig, action},
 };
@@ -34,6 +35,7 @@ pub struct PublicApi {
     security: RuntimeSecurityConfig,
     public_address: String,
     peer_address: String,
+    lifecycle: LifecycleController,
 }
 
 impl PublicApi {
@@ -42,12 +44,14 @@ impl PublicApi {
         security: RuntimeSecurityConfig,
         public_address: String,
         peer_address: String,
+        lifecycle: LifecycleController,
     ) -> Self {
         Self {
             cluster,
             security,
             public_address,
             peer_address,
+            lifecycle,
         }
     }
 
@@ -147,8 +151,13 @@ impl LightStream for PublicApi {
             )
             .await?;
         let cluster_id = self.cluster.identity().await;
+        let operational = self.lifecycle.snapshot();
         Ok(Response::new(health_to_wire(
-            &HealthStatus::new(true, BUILD_REVISION, self.security.mode()),
+            &HealthStatus::new(true, BUILD_REVISION, self.security.mode()).with_operational(
+                operational.phase,
+                operational.generation,
+                operational.readiness,
+            ),
             &self.public_address,
             &self.peer_address,
             cluster_id.is_some(),

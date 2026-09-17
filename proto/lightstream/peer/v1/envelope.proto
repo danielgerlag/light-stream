@@ -63,6 +63,7 @@ service PeerService {
   rpc ActivateReplacement(PeerRequest) returns (PeerResponse);
   rpc RetireReplacement(PeerRequest) returns (PeerResponse);
   rpc TransferLeader(PeerRequest) returns (PeerResponse);
+  rpc ProbeWriteAuthority(PeerRequest) returns (PeerResponse);
   rpc BeginSnapshot(SnapshotBeginRequest) returns (SnapshotProgressResponse);
   rpc PutSnapshotChunk(SnapshotChunkRequest) returns (SnapshotProgressResponse);
   rpc FinishSnapshot(SnapshotFinishRequest) returns (SnapshotProgressResponse);

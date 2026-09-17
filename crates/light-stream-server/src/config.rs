@@ -141,6 +141,8 @@ pub struct ServerArgs {
     pub public_listen: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:7201")]
     pub peer_listen: SocketAddr,
+    #[arg(long, default_value = "127.0.0.1:0")]
+    pub operations_listen: SocketAddr,
     #[arg(long, default_value = ".light-stream")]
     pub data_dir: PathBuf,
     #[arg(long, default_value = "local-insecure")]
@@ -193,12 +195,15 @@ pub struct ServerArgs {
     pub verification_response_delay_group_id: Option<u64>,
     #[arg(long, default_value_t = 0)]
     pub verification_response_delay_ms: u64,
+    #[arg(long, default_value_t = 30000)]
+    pub shutdown_grace_ms: u64,
 }
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     public_listen: SocketAddr,
     peer_listen: SocketAddr,
+    operations_listen: SocketAddr,
     data_dir: PathBuf,
     security: RuntimeSecurityConfig,
     receipt_window: usize,
@@ -210,6 +215,7 @@ pub struct ServerConfig {
     publish_scheduler: PublishSchedulerConfig,
     verification_delay: Option<(u64, Duration)>,
     verification_response_delay: Option<(u64, Duration)>,
+    shutdown_grace: Duration,
 }
 
 impl TryFrom<ServerArgs> for ServerConfig {
@@ -218,9 +224,12 @@ impl TryFrom<ServerArgs> for ServerConfig {
     fn try_from(args: ServerArgs) -> Result<Self, Self::Error> {
         let security_mode = SecurityMode::from_str(&args.security_mode)
             .map_err(|error| StartupError::InvalidConfig(error.to_string()))?;
-        if args.public_listen == args.peer_listen && args.public_listen.port() != 0 {
+        if (args.public_listen == args.peer_listen && args.public_listen.port() != 0)
+            || (args.public_listen == args.operations_listen && args.public_listen.port() != 0)
+            || (args.peer_listen == args.operations_listen && args.peer_listen.port() != 0)
+        {
             return Err(StartupError::InvalidConfig(
-                "public and peer listeners must use different addresses".to_owned(),
+                "public, peer, and operations listeners must use different addresses".to_owned(),
             ));
         }
         if security_mode == SecurityMode::LocalInsecure
@@ -240,6 +249,11 @@ impl TryFrom<ServerArgs> for ServerConfig {
         if args.node_id == 0 {
             return Err(StartupError::InvalidConfig(
                 "node ID zero is reserved".to_owned(),
+            ));
+        }
+        if args.shutdown_grace_ms == 0 || args.shutdown_grace_ms > 300_000 {
+            return Err(StartupError::InvalidConfig(
+                "shutdown grace must be between 1 and 300000 ms".to_owned(),
             ));
         }
         let security = RuntimeSecurityConfig::load(
@@ -314,6 +328,7 @@ impl TryFrom<ServerArgs> for ServerConfig {
         Ok(Self {
             public_listen: args.public_listen,
             peer_listen: args.peer_listen,
+            operations_listen: args.operations_listen,
             data_dir: args.data_dir,
             security,
             receipt_window: args.receipt_window,
@@ -325,6 +340,7 @@ impl TryFrom<ServerArgs> for ServerConfig {
             publish_scheduler,
             verification_delay,
             verification_response_delay,
+            shutdown_grace: Duration::from_millis(args.shutdown_grace_ms),
         })
     }
 }
@@ -336,6 +352,10 @@ impl ServerConfig {
 
     pub const fn peer_listen(&self) -> SocketAddr {
         self.peer_listen
+    }
+
+    pub const fn operations_listen(&self) -> SocketAddr {
+        self.operations_listen
     }
 
     pub fn data_dir(&self) -> &std::path::Path {
@@ -384,6 +404,10 @@ impl ServerConfig {
 
     pub const fn verification_response_delay(&self) -> Option<(u64, Duration)> {
         self.verification_response_delay
+    }
+
+    pub const fn shutdown_grace(&self) -> Duration {
+        self.shutdown_grace
     }
 }
 
@@ -436,6 +460,7 @@ mod tests {
         ServerArgs {
             public_listen: "127.0.0.1:7101".parse().unwrap(),
             peer_listen: "127.0.0.1:7201".parse().unwrap(),
+            operations_listen: "127.0.0.1:0".parse().unwrap(),
             data_dir: PathBuf::from("data"),
             security_mode: "local-insecure".to_owned(),
             security_config: None,
@@ -462,6 +487,7 @@ mod tests {
             verification_delay_ms: 0,
             verification_response_delay_group_id: None,
             verification_response_delay_ms: 0,
+            shutdown_grace_ms: 30000,
         }
     }
 
@@ -470,6 +496,55 @@ mod tests {
         let mut value = args();
         value.public_listen = "0.0.0.0:7101".parse().unwrap();
         assert!(ServerConfig::try_from(value).is_err());
+    }
+
+    #[test]
+    fn operations_listener_must_not_collide_with_public_or_peer() {
+        for operations_listen in ["127.0.0.1:7101", "127.0.0.1:7201"] {
+            let mut value = args();
+            value.operations_listen = operations_listen.parse().unwrap();
+            assert!(matches!(
+                ServerConfig::try_from(value),
+                Err(StartupError::InvalidConfig(message))
+                    if message.contains("listeners must use different addresses")
+            ));
+        }
+    }
+
+    #[test]
+    fn zero_port_listeners_remain_compatible() {
+        let mut value = args();
+        value.public_listen = "127.0.0.1:0".parse().unwrap();
+        value.peer_listen = "127.0.0.1:0".parse().unwrap();
+        value.operations_listen = "127.0.0.1:0".parse().unwrap();
+
+        let config = ServerConfig::try_from(value).unwrap();
+
+        assert_eq!(config.public_listen().port(), 0);
+        assert_eq!(config.peer_listen().port(), 0);
+        assert_eq!(config.operations_listen().port(), 0);
+    }
+
+    #[test]
+    fn shutdown_grace_enforces_inclusive_bounds() {
+        for milliseconds in [1, 300_000] {
+            let mut value = args();
+            value.shutdown_grace_ms = milliseconds;
+            assert_eq!(
+                ServerConfig::try_from(value).unwrap().shutdown_grace(),
+                Duration::from_millis(milliseconds)
+            );
+        }
+
+        for milliseconds in [0, 300_001] {
+            let mut value = args();
+            value.shutdown_grace_ms = milliseconds;
+            assert!(matches!(
+                ServerConfig::try_from(value),
+                Err(StartupError::InvalidConfig(message))
+                    if message.contains("shutdown grace")
+            ));
+        }
     }
 
     #[test]

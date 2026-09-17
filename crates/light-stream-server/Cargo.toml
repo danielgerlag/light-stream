@@ -12,6 +12,7 @@ name = "light-streamd"
 path = "src/main.rs"
 
 [dependencies]
+axum.workspace = true
 base64.workspace = true
 clap.workspace = true
 crc32fast.workspace = true

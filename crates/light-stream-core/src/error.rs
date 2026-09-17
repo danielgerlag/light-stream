@@ -46,6 +46,7 @@ pub enum ErrorCode {
     SecurityPermissionDenied,
     SecurityPolicyConflict,
     SecurityPolicyStale,
+    ShuttingDown,
     StaleRoute,
     UnsupportedOperation,
 }
@@ -90,6 +91,7 @@ impl ErrorCode {
             Self::SecurityPermissionDenied => "security_permission_denied",
             Self::SecurityPolicyConflict => "security_policy_conflict",
             Self::SecurityPolicyStale => "security_policy_stale",
+            Self::ShuttingDown => "shutting_down",
             Self::StaleRoute => "stale_route",
             Self::UnsupportedOperation => "unsupported_operation",
         }
@@ -192,6 +194,8 @@ pub enum DomainError {
     SecurityPolicyConflict,
     #[error("the local security policy is too stale to authorize work")]
     SecurityPolicyStale,
+    #[error("the broker is draining and no longer accepts mutations")]
+    ShuttingDown { outcome: RequestOutcome },
     #[error("routing metadata is stale")]
     StaleRoute,
     #[error("{operation} is not supported until {available_phase}")]
@@ -241,6 +245,7 @@ impl DomainError {
             Self::SecurityPermissionDenied => ErrorCode::SecurityPermissionDenied,
             Self::SecurityPolicyConflict => ErrorCode::SecurityPolicyConflict,
             Self::SecurityPolicyStale => ErrorCode::SecurityPolicyStale,
+            Self::ShuttingDown { .. } => ErrorCode::ShuttingDown,
             Self::StaleRoute => ErrorCode::StaleRoute,
             Self::UnsupportedOperation { .. } => ErrorCode::UnsupportedOperation,
         }

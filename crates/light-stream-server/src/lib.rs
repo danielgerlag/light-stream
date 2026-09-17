@@ -1,11 +1,14 @@
 mod config;
+mod lifecycle;
 mod manifest;
 mod openraft_boundary;
+mod operations;
 mod peer;
 mod publish_scheduler;
 mod runtime;
 mod security;
 mod service;
+mod tasks;
 
 use std::{
     fs::{File, OpenOptions},
@@ -13,6 +16,7 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::Arc,
+    time::Duration,
 };
 
 use fs2::FileExt;
@@ -20,19 +24,30 @@ use light_stream_core::{MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor, NodeId, Securi
 use light_stream_proto::v1::light_stream_server::LightStreamServer;
 use serde::Serialize;
 use thiserror::Error;
-use tokio::{net::TcpListener, sync::watch};
+use tokio::{
+    net::TcpListener,
+    sync::watch,
+    task::{JoinError, JoinSet},
+    time::{Instant, MissedTickBehavior},
+};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 
 pub use config::{ServerArgs, ServerConfig};
+use lifecycle::LifecycleController;
 use peer::PeerApi;
-use runtime::{ClusterManager, ClusterManagerConfig};
+use runtime::{ClusterManager, ClusterManagerConfig, ShutdownPreparationError};
+use security::RuntimeSecurityConfig;
 use service::PublicApi;
+use tasks::{StopToken, TaskGroup, TaskGroupError};
 
 pub const BUILD_REVISION: &str = match option_env!("LIGHT_STREAM_BUILD_REVISION") {
     Some(value) => value,
     None => "UNVERSIONED",
 };
+
+const BACKGROUND_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 pub enum StartupError {
@@ -55,8 +70,16 @@ pub enum StartupError {
     },
     #[error("server failed: {0}")]
     Serve(#[from] tonic::transport::Error),
+    #[error("operations server failed: {0}")]
+    Operations(io::Error),
+    #[error("server task failed: {0}")]
+    Task(String),
     #[error("shutdown signal failed: {0}")]
     Signal(io::Error),
+    #[error(
+        "shutdown drain deadline expired after accepting {accepted} mutations with {unresolved} unresolved"
+    )]
+    DrainDeadline { accepted: u64, unresolved: u64 },
     #[error("cluster runtime failed: {0}")]
     Cluster(#[from] light_stream_core::DomainError),
 }
@@ -68,6 +91,7 @@ pub struct ReadyAnnouncement {
     pub security_mode: String,
     pub public_address: String,
     pub peer_address: String,
+    pub operations_address: String,
     pub advertised_public_uri: String,
     pub advertised_peer_uri: String,
     pub data_directory: String,
@@ -100,8 +124,197 @@ impl DataDirectoryLock {
     }
 }
 
+struct RefreshTasks {
+    tasks: TaskGroup,
+}
+
+enum ServerEvent {
+    Public(Result<(), StartupError>),
+    Peer(Result<(), StartupError>),
+    Operations(Result<(), StartupError>),
+}
+
+impl RefreshTasks {
+    fn start(
+        cluster: Arc<ClusterManager>,
+        security: RuntimeSecurityConfig,
+        lifecycle: LifecycleController,
+    ) -> Self {
+        let mut tasks = TaskGroup::new();
+        if security.mode() == SecurityMode::Secured {
+            let cluster = cluster.clone();
+            tasks.spawn("security-refresh", move |stop| {
+                security_refresh_loop(cluster, security, stop)
+            });
+        }
+        tasks.spawn("readiness-refresh", move |stop| {
+            readiness_refresh_loop(cluster, lifecycle, stop)
+        });
+        Self { tasks }
+    }
+
+    async fn stop_and_join(self, deadline: Instant) -> Result<(), TaskGroupError> {
+        self.tasks.stop_and_join(deadline).await
+    }
+}
+
+async fn security_refresh_loop(
+    cluster: Arc<ClusterManager>,
+    security: RuntimeSecurityConfig,
+    mut stop: StopToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let policy = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            policy = cluster.confirmed_security_policy() => policy,
+        };
+        if let Ok(policy) = policy {
+            let _ = security.renew_policy(policy);
+        }
+    }
+}
+
+async fn readiness_refresh_loop(
+    cluster: Arc<ClusterManager>,
+    lifecycle: LifecycleController,
+    mut stop: StopToken,
+) {
+    let mut interval = tokio::time::interval(READINESS_REFRESH_INTERVAL);
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = interval.tick() => {}
+        }
+        let Some(ticket) = lifecycle.begin_readiness_sample() else {
+            continue;
+        };
+        let readiness = tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            readiness = cluster.write_readiness() => readiness,
+        };
+        lifecycle.commit_readiness(ticket, readiness);
+    }
+}
+
+fn server_task_result(result: Result<ServerEvent, JoinError>) -> Result<(), StartupError> {
+    match result.map_err(|error| StartupError::Task(error.to_string()))? {
+        ServerEvent::Public(result)
+        | ServerEvent::Peer(result)
+        | ServerEvent::Operations(result) => result,
+    }
+}
+
+async fn join_server_tasks(
+    servers: &mut JoinSet<ServerEvent>,
+    deadline: Instant,
+) -> Result<(), StartupError> {
+    let mut failures = Vec::new();
+    loop {
+        match tokio::time::timeout_at(deadline, servers.join_next()).await {
+            Ok(Some(result)) => {
+                if let Err(error) = server_task_result(result) {
+                    failures.push(error);
+                }
+            }
+            Ok(None) => break,
+            Err(_) => {
+                failures.push(StartupError::Task(
+                    "server shutdown deadline expired".to_owned(),
+                ));
+                servers.abort_all();
+                while let Some(result) = servers.join_next().await {
+                    match result {
+                        Ok(event) => {
+                            if let Err(error) = server_task_result(Ok(event)) {
+                                failures.push(error);
+                            }
+                        }
+                        Err(error) if error.is_cancelled() => {}
+                        Err(error) => failures.push(StartupError::Task(error.to_string())),
+                    }
+                }
+                break;
+            }
+        }
+    }
+    finish_failures(failures)
+}
+
+async fn drain_and_stop_servers(
+    cluster: &Arc<ClusterManager>,
+    lifecycle: &LifecycleController,
+    servers: &mut JoinSet<ServerEvent>,
+    shutdown_tx: &watch::Sender<bool>,
+    maintenance_timeout: Duration,
+    drain_grace: Duration,
+    mut server_failures: Vec<StartupError>,
+) -> (Result<(), StartupError>, bool) {
+    let shutdown = cluster.begin_shutdown(maintenance_timeout, drain_grace);
+    tokio::pin!(shutdown);
+    let (maintenance, drain) = loop {
+        tokio::select! {
+            result = &mut shutdown => break result,
+            result = servers.join_next(), if !servers.is_empty() => {
+                match result {
+                    Some(result) => {
+                        if let Err(error) = server_task_result(result) {
+                            server_failures.push(error);
+                        }
+                    }
+                    None => server_failures.push(StartupError::Task(
+                        "server task set ended during drain".to_owned(),
+                    )),
+                }
+            }
+        }
+    };
+    let teardown_safe = maintenance
+        .as_ref()
+        .err()
+        .is_none_or(ShutdownPreparationError::teardown_safe)
+        && matches!(drain, lifecycle::DrainOutcome::Completed { .. });
+    lifecycle.mark_stopping();
+    let _ = shutdown_tx.send(true);
+    if let Err(error) =
+        join_server_tasks(servers, Instant::now() + BACKGROUND_TASK_STOP_TIMEOUT).await
+    {
+        server_failures.push(error);
+    }
+    let server_result = finish_failures(server_failures);
+    (
+        finish_shutdown(maintenance, drain, server_result),
+        teardown_safe,
+    )
+}
+
+fn finish_failures(mut failures: Vec<StartupError>) -> Result<(), StartupError> {
+    match failures.len() {
+        0 => Ok(()),
+        1 => Err(failures.pop().expect("one failure is present")),
+        _ => Err(StartupError::Task(
+            failures
+                .into_iter()
+                .map(|error| error.to_string())
+                .collect::<Vec<_>>()
+                .join("; "),
+        )),
+    }
+}
+
 pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
     openraft_boundary::assert_compile_boundary();
+    let lifecycle = LifecycleController::starting();
     let security = config.security().clone();
     let scheme = match security.mode() {
         SecurityMode::LocalInsecure => "http",
@@ -122,6 +335,13 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             address: config.peer_listen(),
             source,
         })?;
+    let operations_listener = TcpListener::bind(config.operations_listen())
+        .await
+        .map_err(|source| StartupError::Bind {
+            listener: "operations",
+            address: config.operations_listen(),
+            source,
+        })?;
     let public_address = public_listener
         .local_addr()
         .map_err(|source| StartupError::Bind {
@@ -136,6 +356,14 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             address: config.peer_listen(),
             source,
         })?;
+    let operations_address =
+        operations_listener
+            .local_addr()
+            .map_err(|source| StartupError::Bind {
+                listener: "operations",
+                address: config.operations_listen(),
+                source,
+            })?;
     let advertised_public_uri = config
         .advertise_public_uri()
         .map(str::to_owned)
@@ -165,6 +393,7 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
                     config.verification_response_delay(),
                 ),
                 security: security.clone(),
+                lifecycle: lifecycle.clone(),
             },
         )
         .await?,
@@ -174,21 +403,11 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
         security.clone(),
         advertised_public_uri.clone(),
         advertised_peer_uri.clone(),
+        lifecycle.clone(),
     );
     let peer_api = PeerApi::new(cluster.clone());
-    let security_refresh = (security.mode() == SecurityMode::Secured).then(|| {
-        let cluster = cluster.clone();
-        let security = security.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                if let Ok(policy) = cluster.confirmed_security_policy().await {
-                    let _ = security.renew_policy(policy);
-                }
-            }
-        })
-    });
+    lifecycle.mark_running(cluster.write_readiness().await);
+    let refresh_tasks = RefreshTasks::start(cluster.clone(), security.clone(), lifecycle.clone());
     let mut public_builder = Server::builder();
     if let Some(tls) = security.public_tls() {
         public_builder = public_builder.tls_config(tls)?;
@@ -206,6 +425,7 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             security_mode: security.mode().to_string(),
             public_address: public_address.to_string(),
             peer_address: peer_address.to_string(),
+            operations_address: operations_address.to_string(),
             advertised_public_uri,
             advertised_peer_uri,
             data_directory: config.data_dir().display().to_string(),
@@ -221,7 +441,8 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let public_shutdown = shutdown_rx.clone();
-    let peer_shutdown = shutdown_rx;
+    let peer_shutdown = shutdown_rx.clone();
+    let operations_shutdown = shutdown_rx;
     let public_server = public_builder
         .add_service(
             LightStreamServer::new(public_api)
@@ -242,30 +463,99 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
             TcpListenerStream::new(peer_listener),
             wait_for_shutdown(peer_shutdown),
         );
+    let operations_server = operations::serve(
+        operations_listener,
+        lifecycle.clone(),
+        cluster.clone(),
+        operations_shutdown,
+    );
 
-    let servers = async { tokio::try_join!(public_server, peer_server) };
-    tokio::pin!(servers);
-    let serve_result: Result<(), StartupError> = tokio::select! {
-        result = &mut servers => {
-            result.map(|_| ()).map_err(StartupError::from)
+    let mut servers = JoinSet::new();
+    servers
+        .spawn(async move { ServerEvent::Public(public_server.await.map_err(StartupError::from)) });
+    servers.spawn(async move { ServerEvent::Peer(peer_server.await.map_err(StartupError::from)) });
+    servers.spawn(async move {
+        ServerEvent::Operations(operations_server.await.map_err(StartupError::Operations))
+    });
+    let (serve_result, mut cluster_shutdown_safe) = tokio::select! {
+        result = servers.join_next() => {
+            let first = result
+                .ok_or_else(|| StartupError::Task("server task set ended unexpectedly".to_owned()))
+                .and_then(server_task_result);
+            drain_and_stop_servers(
+                &cluster,
+                &lifecycle,
+                &mut servers,
+                &shutdown_tx,
+                BACKGROUND_TASK_STOP_TIMEOUT,
+                config.shutdown_grace(),
+                first.err().into_iter().collect(),
+            )
+            .await
         }
         signal = shutdown_signal() => {
-            match signal {
-                Ok(()) => {
-                    let _ = shutdown_tx.send(true);
-                    servers.await.map(|_| ()).map_err(StartupError::from)
-                }
-                Err(error) => Err(error),
-            }
+            drain_and_stop_servers(
+                &cluster,
+                &lifecycle,
+                &mut servers,
+                &shutdown_tx,
+                BACKGROUND_TASK_STOP_TIMEOUT,
+                config.shutdown_grace(),
+                signal.err().into_iter().collect(),
+            )
+            .await
         }
     };
-    if let Some(task) = security_refresh {
-        task.abort();
-        let _ = task.await;
+    let mut failures = Vec::new();
+    if let Err(error) = serve_result {
+        failures.push(error);
     }
-    cluster.shutdown().await?;
-    serve_result?;
-    Ok(())
+    let refresh_shutdown_safe = if let Err(error) = refresh_tasks
+        .stop_and_join(Instant::now() + BACKGROUND_TASK_STOP_TIMEOUT)
+        .await
+    {
+        let all_joined = error.all_joined();
+        failures.push(StartupError::Task(error.to_string()));
+        all_joined
+    } else {
+        true
+    };
+    cluster_shutdown_safe &= refresh_shutdown_safe;
+    if cluster_shutdown_safe {
+        if let Err(error) = cluster.shutdown().await {
+            failures.push(StartupError::Cluster(error));
+        }
+    } else {
+        failures.push(StartupError::Task(
+            "cluster shutdown skipped because lifecycle tasks remained active".to_owned(),
+        ));
+    }
+    finish_failures(failures)
+}
+
+fn finish_shutdown(
+    maintenance: Result<(), ShutdownPreparationError>,
+    drain: lifecycle::DrainOutcome,
+    servers: Result<(), StartupError>,
+) -> Result<(), StartupError> {
+    let mut failures = Vec::new();
+    if let Err(error) = maintenance {
+        failures.push(StartupError::Task(error.to_string()));
+    }
+    if let lifecycle::DrainOutcome::DeadlineExceeded {
+        accepted,
+        unresolved,
+    } = drain
+    {
+        failures.push(StartupError::DrainDeadline {
+            accepted,
+            unresolved,
+        });
+    }
+    if let Err(error) = servers {
+        failures.push(error);
+    }
+    finish_failures(failures)
 }
 
 async fn wait_for_shutdown(mut receiver: watch::Receiver<bool>) {
@@ -295,6 +585,8 @@ async fn shutdown_signal() -> Result<(), StartupError> {
 
 #[cfg(test)]
 mod tests {
+    use std::{future, time::Duration};
+
     use super::*;
 
     #[test]
@@ -305,5 +597,53 @@ mod tests {
             DataDirectoryLock::acquire(directory.path()),
             Err(StartupError::DataDirectoryLocked(_))
         ));
+    }
+
+    #[test]
+    fn multiple_failures_are_accumulated() {
+        let error = finish_failures(vec![
+            StartupError::Task("public failed".to_owned()),
+            StartupError::Task("peer failed".to_owned()),
+        ])
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("public failed"));
+        assert!(error.contains("peer failed"));
+    }
+
+    #[test]
+    fn single_shutdown_failure_preserves_its_typed_error() {
+        assert!(matches!(
+            finish_shutdown(
+                Ok(()),
+                lifecycle::DrainOutcome::DeadlineExceeded {
+                    accepted: 3,
+                    unresolved: 1,
+                },
+                Ok(()),
+            ),
+            Err(StartupError::DrainDeadline {
+                accepted: 3,
+                unresolved: 1,
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn server_shutdown_deadline_aborts_and_joins_unfinished_tasks() {
+        let mut servers = JoinSet::new();
+        servers.spawn(future::pending::<ServerEvent>());
+
+        let error = join_server_tasks(&mut servers, Instant::now() + Duration::from_millis(10))
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("server shutdown deadline expired")
+        );
+        assert!(servers.is_empty());
     }
 }

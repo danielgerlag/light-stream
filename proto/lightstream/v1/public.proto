@@ -48,6 +48,16 @@ message HealthResponse {
   string peer_address = 5;
   bool bootstrapped = 6;
   string cluster_id = 7;
+  bool live = 8;
+  bool write_ready = 9;
+  string lifecycle = 10;
+  uint64 lifecycle_generation = 11;
+  repeated ReadinessReason readiness_reasons = 12;
+}
+
+message ReadinessReason {
+  string code = 1;
+  uint64 group_id = 2;
 }
 
 message CapabilitiesRequest {}

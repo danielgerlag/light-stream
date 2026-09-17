@@ -21,6 +21,8 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -47,6 +49,9 @@ KNOWN_SCENARIOS = {
     "process-isolation",
     "evidence-preservation",
     "package",
+    "lifecycle",
+    "drain",
+    "metrics",
 }
 PRODUCTION_PACKAGES = (
     "light-stream-server",
@@ -366,6 +371,8 @@ class OwnedServer:
         publish_batch_records=None,
         publish_batch_bytes=None,
         publish_coalesce_us=None,
+        operations_address="127.0.0.1:0",
+        shutdown_grace_ms=None,
         ready_timeout_seconds=5,
         cwd=ROOT,
     ):
@@ -384,11 +391,15 @@ class OwnedServer:
             public_address,
             "--peer-listen",
             peer_address,
+            "--operations-listen",
+            operations_address,
             "--security-mode",
             security_mode,
             "--node-id",
             str(node_id),
         ]
+        if shutdown_grace_ms is not None:
+            self.command.extend(["--shutdown-grace-ms", str(shutdown_grace_ms)])
         if security_config is not None:
             self.command.extend(["--security-config", str(security_config)])
         if advertise_public_uri is not None:
@@ -518,6 +529,7 @@ class OwnedServer:
             "command": self.command,
             "data_directory": str(self.data_dir),
             "label": self.label,
+            "operations_address": self.ready["operations_address"],
             "peer_address": self.ready["peer_address"],
             "pid": self.process.pid,
             "public_address": self.ready["public_address"],
@@ -903,6 +915,39 @@ def parse_json_output(result, name):
     if not isinstance(value, dict):
         raise VerificationError(f"{name} returned non-object JSON")
     return value
+
+
+def http_get(url, timeout=2):
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
+
+def http_json(url, timeout=2):
+    status, body = http_get(url, timeout=timeout)
+    try:
+        value = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise VerificationError(f"{url} did not return JSON") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"{url} returned non-object JSON")
+    return status, value
+
+
+def wait_for_http_status(url, expected, timeout, label):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = http_json(url)
+            if last[0] == expected:
+                return last
+        except (OSError, VerificationError):
+            pass
+        time.sleep(0.05)
+    raise VerificationError(f"{label} did not reach HTTP {expected}: {last}")
 
 
 def load_profile(name):
@@ -9530,6 +9575,806 @@ def run_ls08_scenario(artifacts, runner, binaries, revision, profile, seed):
                 pass
 
 
+def prepare_ls09_runtime_package(artifacts, runner, revision):
+    external = tempfile.TemporaryDirectory(prefix="light-stream-ls09-runtime-")
+    external_root = Path(external.name)
+    output = external_root / "package-output"
+    extracted = external_root / "package-root"
+    epoch = int(
+        runner.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            "ls09-runtime-source-date-epoch",
+            timeout=10,
+        ).stdout.strip()
+    )
+    archive, sidecar, manifest = package_release.create_release(
+        output,
+        package_release.native_target(),
+        revision,
+        epoch,
+    )
+    current_revision, _ = source_fingerprint()
+    if current_revision != revision:
+        external.cleanup()
+        raise VerificationError("source changed during the LS09 runtime package build")
+    package_root, extracted_manifest = package_release.extract_release(
+        archive,
+        extracted,
+        expected_sha256=sha256_file(archive),
+    )
+    if extracted_manifest != manifest:
+        external.cleanup()
+        raise VerificationError("LS09 runtime package manifest changed after extraction")
+    retained = artifacts / "ls09" / "release"
+    retained.mkdir(parents=True)
+    shutil.copy2(archive, retained / archive.name)
+    shutil.copy2(sidecar, retained / sidecar.name)
+    binaries = {
+        name: (package_root / "bin" / name).resolve()
+        for name in package_release.BINARIES
+    }
+    if any(ROOT in binary.parents for binary in binaries.values()):
+        external.cleanup()
+        raise VerificationError("LS09 runtime package resolved inside the checkout")
+    write_json(
+        artifacts / "binary-fingerprints.json",
+        {
+            name: {
+                "bytes": binary.stat().st_size,
+                "path": str(binary),
+                "sha256": sha256_file(binary),
+            }
+            for name, binary in binaries.items()
+        },
+    )
+    return external, external_root, package_root, binaries
+
+
+def ls09_node_config(root, node_id, used_ports):
+    public_port = free_port()
+    while public_port in used_ports:
+        public_port = free_port()
+    used_ports.add(public_port)
+    peer_port = free_port()
+    while peer_port in used_ports:
+        peer_port = free_port()
+    used_ports.add(peer_port)
+    return {
+        "node_id": node_id,
+        "public_address": f"127.0.0.1:{public_port}",
+        "peer_address": f"127.0.0.1:{peer_port}",
+        "endpoint": f"http://127.0.0.1:{public_port}",
+        "peer_uri": f"http://127.0.0.1:{peer_port}",
+        "data_dir": root / f"node-{node_id}",
+    }
+
+
+def start_ls09_node(binary, package_root, artifacts, label, config, configs, **kwargs):
+    return OwnedServer(
+        binary,
+        config["data_dir"],
+        artifacts / "node-logs",
+        label,
+        node_id=config["node_id"],
+        public_address=config["public_address"],
+        peer_address=config["peer_address"],
+        advertise_public_uri=config["endpoint"],
+        advertise_peer_uri=config["peer_uri"],
+        peer_routes={
+            node_id: peer["peer_uri"]
+            for node_id, peer in configs.items()
+            if node_id != config["node_id"]
+        },
+        max_data_groups=1,
+        cwd=package_root,
+        **kwargs,
+    )
+
+
+def bootstrap_ls09_three_voter(
+    artifacts,
+    runner,
+    binaries,
+    package_root,
+    root,
+    profile,
+    rng,
+    label,
+):
+    used_ports = set()
+    configs = {
+        node_id: ls09_node_config(root, node_id, used_ports)
+        for node_id in (1, 2, 3)
+    }
+    nodes = {}
+    try:
+        for node_id, config in configs.items():
+            nodes[node_id] = {
+                **config,
+                "server": start_ls09_node(
+                    binaries["light-streamd"],
+                    package_root,
+                    artifacts,
+                    f"{label}-node-{node_id}",
+                    config,
+                    configs,
+                ),
+            }
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        command = cli_endpoint_command(
+            binaries["light-streamctl"],
+            nodes[1]["endpoint"],
+            seeds=[nodes[2]["endpoint"], nodes[3]["endpoint"]],
+            deadline_ms=30000,
+        ) + [
+            "cluster",
+            "bootstrap",
+            "--cluster-id",
+            cluster,
+            "--stream-id",
+            stream,
+            "--stream-name",
+            label,
+            "--seed-node-id",
+            "1",
+        ]
+        for node_id in (1, 2, 3):
+            command.extend(
+                [
+                    "--member",
+                    (
+                        f"{node_id},{nodes[node_id]['endpoint']},"
+                        f"{nodes[node_id]['peer_uri']}"
+                    ),
+                ]
+            )
+        runner.run(command, f"{label}-bootstrap", timeout=60)
+        memberships = wait_for_uniform_active(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["write_readiness_seconds"] + 20,
+            f"{label}-active",
+        )
+        leader = wait_for_data_leader(
+            artifacts,
+            runner,
+            binaries["light-streamctl"],
+            nodes,
+            profile["leader_loss_seconds"],
+            f"{label}-leader",
+        )
+        return configs, nodes, cluster, stream, memberships, leader
+    except BaseException:
+        for node in nodes.values():
+            try:
+                node["server"].stop()
+            except VerificationError:
+                pass
+        raise
+
+
+def run_ls09_lifecycle_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    external, external_root, package_root, binaries = prepare_ls09_runtime_package(
+        artifacts, runner, revision
+    )
+    nodes = {}
+    try:
+        configs, nodes, cluster, stream, memberships, leader = (
+            bootstrap_ls09_three_voter(
+                artifacts,
+                runner,
+                binaries,
+                package_root,
+                external_root / "lifecycle",
+                profile,
+                rng,
+                "ls09-lifecycle",
+            )
+        )
+        initial = {}
+        for node_id, node in nodes.items():
+            operations = f"http://{node['server'].ready['operations_address']}"
+            status, value = wait_for_http_status(
+                f"{operations}/readyz",
+                200,
+                profile["write_readiness_seconds"] + 10,
+                f"LS09 node {node_id} write readiness",
+            )
+            initial[str(node_id)] = {"status": status, "body": value}
+
+        survivor = leader
+        stopped = [node_id for node_id in nodes if node_id != survivor]
+        for node_id in stopped:
+            nodes[node_id]["server"].stop()
+        lost_at = time.monotonic()
+        operations = f"http://{nodes[survivor]['server'].ready['operations_address']}"
+        unavailable_status, unavailable = wait_for_http_status(
+            f"{operations}/readyz",
+            503,
+            profile["leader_loss_seconds"] + 10,
+            "LS09 quorum-loss readiness",
+        )
+        unavailable_seconds = time.monotonic() - lost_at
+        if unavailable_seconds > profile["leader_loss_seconds"]:
+            raise VerificationError(
+                "LS09 quorum-loss readiness exceeded the profile budget: "
+                f"{unavailable_seconds:.3f}s"
+            )
+        live_status, live = http_json(f"{operations}/livez")
+        reasons = unavailable.get("readiness", {}).get("reasons", [])
+        if live_status != 200 or live.get("live") is not True:
+            raise VerificationError("LS09 quorum loss made the surviving process non-live")
+        if not reasons or not any("group" in reason for reason in reasons):
+            raise VerificationError(
+                f"LS09 quorum-loss readiness did not name a group: {unavailable}"
+            )
+        health = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    nodes[survivor]["endpoint"],
+                    no_retry=True,
+                    deadline_ms=3000,
+                )
+                + ["health"],
+                "ls09-lifecycle-quorum-loss-health",
+                timeout=5,
+            ),
+            "LS09 quorum-loss health",
+        )
+        status = health["health"]["status"]
+        health_write_ready = status.get("write_ready")
+        if health_write_ready is None:
+            health_write_ready = (
+                status.get("write_readiness", {}).get("status") == "ready"
+            )
+        if status["ready"] is not True or health_write_ready is not False:
+            raise VerificationError(
+                "LS09 health did not separate service availability from write readiness"
+            )
+
+        recovering = stopped[0]
+        nodes[recovering]["server"] = start_ls09_node(
+            binaries["light-streamd"],
+            package_root,
+            artifacts,
+            f"ls09-lifecycle-node-{recovering}-restart",
+            configs[recovering],
+            configs,
+        )
+        recovery_started = time.monotonic()
+        recovered_status, recovered = wait_for_http_status(
+            f"{operations}/readyz",
+            200,
+            profile["write_readiness_seconds"] + 20,
+            "LS09 quorum recovery readiness",
+        )
+        recovery_seconds = time.monotonic() - recovery_started
+        if recovery_seconds > profile["write_readiness_seconds"]:
+            raise VerificationError(
+                "LS09 quorum recovery readiness exceeded the profile budget: "
+                f"{recovery_seconds:.3f}s"
+            )
+        write_json(
+            artifacts / "l03.json",
+            {
+                "verdict": "PASS",
+                "cluster_id": cluster,
+                "stream_id": stream,
+                "memberships": memberships,
+                "survivor": survivor,
+                "stopped_nodes": stopped,
+                "initial_readiness": initial,
+                "quorum_loss": {
+                    "live_status": live_status,
+                    "live": live,
+                    "ready_status": unavailable_status,
+                    "ready": unavailable,
+                    "health": health,
+                    "detection_seconds": unavailable_seconds,
+                },
+                "recovery": {
+                    "restarted_node": recovering,
+                    "ready_status": recovered_status,
+                    "ready": recovered,
+                    "seconds": recovery_seconds,
+                },
+            },
+        )
+        write_json(
+            artifacts / "release-journey.json",
+            {
+                "implemented_unit": "lifecycle",
+                "package": "VERIFIED_BY_PACKAGE_SCENARIO",
+                "lifecycle": "PASS",
+                "export_restore": "NOT_IMPLEMENTED",
+                "verdict": "PASS",
+            },
+        )
+    finally:
+        for node in nodes.values():
+            try:
+                node["server"].stop()
+            except VerificationError:
+                pass
+        external.cleanup()
+
+
+def record_async_command(runner, command, name, started, process, stdout, stderr):
+    runner.counter += 1
+    stdout_path = (
+        runner.artifacts
+        / "command-output"
+        / f"{runner.counter:03d}-{name}.stdout.log"
+    )
+    stderr_path = (
+        runner.artifacts
+        / "command-output"
+        / f"{runner.counter:03d}-{name}.stderr.log"
+    )
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    stdout_path.write_text(stdout)
+    stderr_path.write_text(stderr)
+    append_jsonl(
+        runner.commands_path,
+        {
+            "command": [str(item) for item in command],
+            "cwd": str(runner.cwd),
+            "duration_seconds": time.monotonic() - started,
+            "expected_codes": [0],
+            "name": name,
+            "returncode": process.returncode,
+            "stderr": str(stderr_path.relative_to(runner.artifacts)),
+            "stdout": str(stdout_path.relative_to(runner.artifacts)),
+        },
+    )
+
+
+def wait_for_metric(url, metric, expected, timeout, label):
+    needle = f"{metric} {expected}"
+    deadline = time.monotonic() + timeout
+    last = ""
+    while time.monotonic() < deadline:
+        status, body = http_get(url)
+        last = body.decode()
+        if status == 200 and needle in last.splitlines():
+            return last
+        time.sleep(0.05)
+    raise VerificationError(f"{label} did not observe {needle}: {last[-1000:]}")
+
+
+def run_ls09_drain_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    external, external_root, package_root, binaries = prepare_ls09_runtime_package(
+        artifacts, runner, revision
+    )
+    server = None
+    restarted = None
+    accepted = None
+    try:
+        data_dir = external_root / "drain-node"
+        server = OwnedServer(
+            binaries["light-streamd"],
+            data_dir,
+            artifacts / "node-logs",
+            "ls09-drain",
+            verification_response_delay_group_id=2,
+            verification_response_delay_ms=5000,
+            shutdown_grace_ms=10000,
+            cwd=package_root,
+        )
+        endpoint = f"http://{server.ready['public_address']}"
+        operations = f"http://{server.ready['operations_address']}"
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        session = deterministic_uuid(rng)
+        runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"], endpoint, deadline_ms=30000
+            )
+            + [
+                "cluster",
+                "bootstrap",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--stream-name",
+                "drain",
+            ],
+            "ls09-drain-bootstrap",
+            timeout=60,
+        )
+        wait_for_http_status(
+            f"{operations}/readyz",
+            200,
+            profile["write_readiness_seconds"] + 10,
+            "LS09 drain readiness",
+        )
+        payload = artifacts / "samples" / "ls09-drain.bin"
+        payload.write_bytes(b"acknowledged-before-drain")
+        accepted_command = publish_command(
+            binaries["light-streamctl"],
+            endpoint,
+            cluster,
+            stream,
+            "drain-accepted",
+            session,
+            1,
+            payload,
+            deadline_ms=15000,
+        )
+        accepted_started = time.monotonic()
+        accepted = subprocess.Popen(
+            [str(item) for item in accepted_command],
+            cwd=package_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        server_command = list(server.command)
+        wait_for_metric(
+            f"{operations}/metrics",
+            'light_stream_publish_queue_requests{group_id="2"}',
+            1,
+            3,
+            "LS09 accepted publish admission",
+        )
+        drain_started = time.monotonic()
+        server.process.send_signal(signal.SIGTERM)
+        time.sleep(0.1)
+        live_status, live = http_json(f"{operations}/livez")
+        ready_status, ready = http_json(f"{operations}/readyz")
+        late_payload = artifacts / "samples" / "ls09-drain-late.bin"
+        late_payload.write_bytes(b"must-not-commit")
+        late = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    cluster,
+                    stream,
+                    "drain-late",
+                    deterministic_uuid(rng),
+                    1,
+                    late_payload,
+                    no_retry=True,
+                    deadline_ms=3000,
+                ),
+                "ls09-drain-late-publish",
+                expected_codes=(1,),
+                timeout=5,
+            ),
+            "LS09 late drain publish",
+        )
+        accepted_stdout, accepted_stderr = accepted.communicate(timeout=12)
+        record_async_command(
+            runner,
+            accepted_command,
+            "ls09-drain-accepted-publish",
+            accepted_started,
+            accepted,
+            accepted_stdout,
+            accepted_stderr,
+        )
+        if accepted.returncode != 0:
+            raise VerificationError(
+                f"LS09 accepted publish failed during drain: {accepted_stderr}"
+            )
+        accepted_value = json.loads(accepted_stdout)
+        server.process.wait(timeout=12)
+        exit_seconds = time.monotonic() - drain_started
+        server.stop()
+        server = None
+        if live_status != 200 or live.get("lifecycle") != "draining":
+            raise VerificationError("LS09 drain did not remain live")
+        if ready_status != 503 or ready.get("lifecycle") != "draining":
+            raise VerificationError("LS09 drain remained write-ready")
+        late_error = late.get("error", {})
+        if (
+            late_error.get("code") != "shutting_down"
+            or late_error.get("detail", {}).get("outcome") != "definite_no_commit"
+        ):
+            raise VerificationError(
+                f"LS09 late drain publish had the wrong outcome: {late}"
+            )
+        if exit_seconds > 10:
+            raise VerificationError(
+                f"LS09 drain exceeded its 10 second grace: {exit_seconds:.3f}"
+            )
+        restarted = OwnedServer(
+            binaries["light-streamd"],
+            data_dir,
+            artifacts / "node-logs",
+            "ls09-drain-restart",
+            cwd=package_root,
+        )
+        restart_endpoint = f"http://{restarted.ready['public_address']}"
+        fetched = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"],
+                    restart_endpoint,
+                    deadline_ms=30000,
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "8",
+                ],
+                "ls09-drain-restart-fetch",
+                timeout=40,
+            ),
+            "LS09 drain restart fetch",
+        )
+        expected_payload = list(payload.read_bytes())
+        fetched_payloads = [
+            record["payload"] for record in fetched["page"]["records"]
+        ]
+        if fetched_payloads != [expected_payload]:
+            raise VerificationError(
+                "LS09 drain restart did not contain exactly the accepted publish"
+            )
+        write_json(
+            artifacts / "l04.json",
+            {
+                "verdict": "PASS",
+                "server": {
+                    "command": server_command,
+                    "signal": "SIGTERM",
+                    "grace_seconds": 10,
+                    "exit_seconds": exit_seconds,
+                    "exit_code": 0,
+                },
+                "during_drain": {
+                    "live_status": live_status,
+                    "live": live,
+                    "ready_status": ready_status,
+                    "ready": ready,
+                },
+                "accepted_publish": accepted_value,
+                "late_publish": late,
+                "restart_fetch": fetched,
+                "acknowledged_data_survived": True,
+                "rejected_data_absent": True,
+            },
+        )
+        write_json(
+            artifacts / "release-journey.json",
+            {
+                "implemented_unit": "drain",
+                "package": "VERIFIED_BY_PACKAGE_SCENARIO",
+                "lifecycle": "PASS",
+                "export_restore": "NOT_IMPLEMENTED",
+                "verdict": "PASS",
+            },
+        )
+    finally:
+        if accepted is not None and accepted.poll() is None:
+            accepted.kill()
+            accepted.wait(timeout=5)
+        for candidate in (server, restarted):
+            if candidate is not None:
+                try:
+                    candidate.stop()
+                except VerificationError:
+                    pass
+        external.cleanup()
+
+
+def run_ls09_metrics_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    external, external_root, package_root, binaries = prepare_ls09_runtime_package(
+        artifacts, runner, revision
+    )
+    server = None
+    accepted = None
+    try:
+        server = OwnedServer(
+            binaries["light-streamd"],
+            external_root / "metrics-node",
+            artifacts / "node-logs",
+            "ls09-metrics",
+            verification_delay_group_id=2,
+            verification_delay_ms=3000,
+            publish_queue_requests=1,
+            publish_queue_records=128,
+            publish_queue_bytes=9 * 1024 * 1024,
+            publish_batch_requests=1,
+            publish_batch_records=128,
+            publish_batch_bytes=8 * 1024 * 1024,
+            cwd=package_root,
+        )
+        endpoint = f"http://{server.ready['public_address']}"
+        operations = f"http://{server.ready['operations_address']}"
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        stream_canary = f"stream-{secrets.token_hex(12)}"
+        principal_canary = f"principal-{secrets.token_hex(12)}"
+        path_canary = str((external_root / "metrics-node").resolve())
+        runner.run(
+            cli_endpoint_command(
+                binaries["light-streamctl"], endpoint, deadline_ms=30000
+            )
+            + [
+                "cluster",
+                "bootstrap",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--stream-name",
+                stream_canary,
+            ],
+            "ls09-metrics-bootstrap",
+            timeout=60,
+        )
+        wait_for_http_status(
+            f"{operations}/readyz",
+            200,
+            profile["write_readiness_seconds"] + 10,
+            "LS09 metrics readiness",
+        )
+        payload = artifacts / "samples" / "ls09-metrics.bin"
+        payload.write_bytes(b"q" * 512)
+        accepted_command = publish_command(
+            binaries["light-streamctl"],
+            endpoint,
+            cluster,
+            stream,
+            principal_canary,
+            deterministic_uuid(rng),
+            1,
+            payload,
+            deadline_ms=10000,
+        )
+        accepted_started = time.monotonic()
+        accepted = subprocess.Popen(
+            [str(item) for item in accepted_command],
+            cwd=package_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        queued_metrics = wait_for_metric(
+            f"{operations}/metrics",
+            'light_stream_publish_queue_requests{group_id="2"}',
+            1,
+            3,
+            "LS09 queue occupancy",
+        )
+        rejected = parse_json_output(
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    cluster,
+                    stream,
+                    f"{principal_canary}-rejected",
+                    deterministic_uuid(rng),
+                    1,
+                    payload,
+                    no_retry=True,
+                    deadline_ms=2000,
+                ),
+                "ls09-metrics-overload",
+                expected_codes=(4,),
+                timeout=4,
+            ),
+            "LS09 metrics overload",
+        )
+        accepted_stdout, accepted_stderr = accepted.communicate(timeout=12)
+        record_async_command(
+            runner,
+            accepted_command,
+            "ls09-metrics-accepted-publish",
+            accepted_started,
+            accepted,
+            accepted_stdout,
+            accepted_stderr,
+        )
+        if accepted.returncode != 0:
+            raise VerificationError(
+                f"LS09 metrics accepted publish failed: {accepted_stderr}"
+            )
+        _, settled_bytes = http_get(f"{operations}/metrics")
+        settled_metrics = settled_bytes.decode()
+        metrics = f"{queued_metrics}\n{settled_metrics}"
+        required = {
+            "light_stream_live",
+            "light_stream_write_ready",
+            "light_stream_lifecycle_state",
+            "light_stream_mutation_admission_open",
+            "light_stream_mutations_in_flight",
+            "light_stream_group_has_leader",
+            "light_stream_group_local_commit_index",
+            "light_stream_group_cluster_commit_index",
+            "light_stream_group_applied_index",
+            "light_stream_publish_queue_requests",
+            "light_stream_publish_queue_records",
+            "light_stream_publish_queue_resident_bytes",
+            "light_stream_publish_queue_limit",
+            "light_stream_publish_rejections_total",
+        }
+        names = {
+            line.split("{", 1)[0].split(" ", 1)[0]
+            for line in metrics.splitlines()
+            if line and not line.startswith("#")
+        }
+        missing = sorted(required.difference(names))
+        if missing:
+            raise VerificationError(f"LS09 metrics omitted required series: {missing}")
+        forbidden = (
+            stream_canary,
+            principal_canary,
+            path_canary,
+            cluster,
+            stream,
+            endpoint,
+        )
+        leaks = [value for value in forbidden if value in metrics]
+        if leaks:
+            raise VerificationError(f"LS09 metrics leaked canaries: {leaks}")
+        rejected_error = rejected.get("error", {})
+        if (
+            rejected_error.get("code") != "publish_overloaded"
+            or rejected_error.get("outcome") != "definite_no_commit"
+        ):
+            raise VerificationError(f"LS09 overload returned the wrong error: {rejected}")
+        rejection_values = []
+        for line in settled_metrics.splitlines():
+            if not line.startswith("light_stream_publish_rejections_total{"):
+                continue
+            sample, value = line.rsplit(" ", 1)
+            if 'group_id="2"' in sample and 'reason="overloaded"' in sample:
+                rejection_values.append(float(value))
+        if not rejection_values or max(rejection_values) < 1:
+            raise VerificationError("LS09 metrics omitted the overload rejection counter")
+        write_json(
+            artifacts / "l09.json",
+            {
+                "verdict": "PASS",
+                "required_series": sorted(required),
+                "observed_series": sorted(names),
+                "overload": rejected,
+                "forbidden_canaries": list(forbidden),
+                "canary_matches": leaks,
+                "queued_sample": queued_metrics,
+                "settled_sample": settled_metrics,
+            },
+        )
+        write_json(
+            artifacts / "release-journey.json",
+            {
+                "implemented_unit": "metrics",
+                "package": "VERIFIED_BY_PACKAGE_SCENARIO",
+                "lifecycle": "PASS",
+                "export_restore": "NOT_IMPLEMENTED",
+                "verdict": "PASS",
+            },
+        )
+    finally:
+        if accepted is not None and accepted.poll() is None:
+            accepted.kill()
+            accepted.wait(timeout=5)
+        if server is not None:
+            try:
+                server.stop()
+            except VerificationError:
+                pass
+        external.cleanup()
+
+
 def run_ls09_package_scenario(artifacts, runner, revision, profile, seed):
     rng = random.Random(seed)
     external = tempfile.TemporaryDirectory(prefix="light-stream-ls09-package-")
@@ -10202,13 +11047,26 @@ def run_ls09_package_scenario(artifacts, runner, revision, profile, seed):
 
 def run_selected(args, artifacts, runner, binaries, revision, profile):
     if args.phase == "LS09":
-        if args.scenario != "package":
+        if args.scenario == "package":
+            run_ls09_package_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        elif args.scenario == "lifecycle":
+            run_ls09_lifecycle_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        elif args.scenario == "drain":
+            run_ls09_drain_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        elif args.scenario == "metrics":
+            run_ls09_metrics_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        else:
             raise VerificationError(
                 "full LS09 verification is unavailable until lifecycle and restore are implemented"
             )
-        run_ls09_package_scenario(
-            artifacts, runner, revision, profile, args.seed
-        )
         return
     if args.phase == "LS08" or args.suite == "ls08-e2e":
         runner.run(
@@ -10691,7 +11549,12 @@ def main():
     error_message = None
     try:
         snapshot_source(artifacts, fingerprints)
-        if args.phase == "LS09" and args.scenario == "package":
+        if args.phase == "LS09" and args.scenario in (
+            "package",
+            "lifecycle",
+            "drain",
+            "metrics",
+        ):
             binaries = {}
         else:
             build_release(runner, revision)

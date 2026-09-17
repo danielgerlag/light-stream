@@ -1,37 +1,52 @@
 {
-  "checkpoint": "release-package",
+  "checkpoint": "lifecycle-operations",
   "verdict": "PASS",
-  "source_revision": "fa9d0e726094f0e3f6b21b9b0a774535cb82b5dd73b5d5e9bd77a27e1b80cb75",
-  "evidence": "artifacts/LS09/package-11",
-  "archive": {
-    "bytes": 12660723,
-    "sha256": "46109a2dcd3c8da4305115d51e76d87f397be96f24a7d4c6951aa1437b6e0e1f",
-    "exact_inventory": true,
-    "outside_checkout": true,
-    "reproducible_builds": 2
-  },
-  "image": {
-    "config_digest": "sha256:83086f29b48719a708a7c52304b02ffc411c09bd2ab3adc115e4751d8ff4cd93",
-    "compressed_bytes": 20093931,
-    "maximum_compressed_bytes": 52428800,
-    "reproducible_builds": 2,
-    "standalone_journey": "PASS"
-  },
-  "local_measurements": {
+  "source_revision": "3bbb866a34cdeb0ddd0b1cf4e3d6b9f7b4792323574d697a3b933d2f62fb13ce",
+  "package": {
+    "evidence": "artifacts/LS09/package-11",
+    "archive_bytes": 12660723,
+    "archive_sha256": "46109a2dcd3c8da4305115d51e76d87f397be96f24a7d4c6951aa1437b6e0e1f",
+    "image_bytes": 20093931,
     "process_liveness_seconds": 0.5128449169999953,
-    "maximum_process_liveness_seconds": 5.0,
     "write_ready_seconds": 1.616727458000014,
-    "target_write_ready_seconds": 1.0,
     "write_ready_target": "NOT_MET",
-    "idle_rss_peak_bytes": 58343424,
-    "target_idle_rss_bytes": 134217728,
-    "idle_rss_target": "PASS"
+    "idle_rss_peak_bytes": 58343424
   },
-  "three_voter_package_smoke": "PASS",
-  "success_data_removed": true,
+  "lifecycle": {
+    "evidence": "artifacts/LS09/lifecycle-final-2",
+    "quorum_loss_detection_seconds": 0.5993857910000031,
+    "quorum_recovery_seconds": 0.0528326669999899,
+    "live_during_quorum_loss": true,
+    "write_ready_during_quorum_loss": false,
+    "failed_groups": [1, 2]
+  },
+  "drain": {
+    "evidence": "artifacts/LS09/drain-final-2",
+    "exit_seconds": 4.981253415999987,
+    "grace_seconds": 10,
+    "late_write_outcome": "definite_no_commit",
+    "acknowledged_data_survived": true,
+    "rejected_data_absent": true
+  },
+  "metrics": {
+    "evidence": "artifacts/LS09/metrics-final-2",
+    "overload_code": "publish_overloaded",
+    "overload_outcome": "definite_no_commit",
+    "secret_canary_matches": [],
+    "bounded_labels": true
+  },
+  "binary_fingerprints": {
+    "light-streamd": "fc60267bb48037cb3bf25b98df009a31c2605dedb1b1243e1d5563badc158823",
+    "light-streamctl": "9dbd4b6ae3b2dfd74a11b9b9544467aa2af1043063bb70a2cde21514c8d5f322"
+  },
+  "validation": {
+    "workspace_tests": "PASS",
+    "workspace_clippy": "PASS",
+    "banked_state_access": "PASS",
+    "package_tests": "PASS"
+  },
   "pending": [
     "reduce ready-to-append below one second",
-    "lifecycle, readiness, metrics, and drain",
     "logical export",
     "offline restore and version fixtures",
     "full LS09 B4 comparison"

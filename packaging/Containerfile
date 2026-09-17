@@ -33,5 +33,5 @@ COPY --from=build /workspace/target/release/light-streamd /usr/local/bin/light-s
 USER nonroot:nonroot
 STOPSIGNAL SIGTERM
 VOLUME ["/var/lib/light-stream"]
-EXPOSE 7101 7201
+EXPOSE 7101 7201 9102
 ENTRYPOINT ["/usr/local/bin/light-streamd", "--data-dir", "/var/lib/light-stream"]

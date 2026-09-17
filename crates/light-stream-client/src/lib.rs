@@ -18,12 +18,13 @@ use light_stream_core::{
     CapabilitySupport, CheckpointCasResult, CheckpointExpectation, CheckpointKey,
     CheckpointMutation, ClusterId, CommittedBookmark, CommittedCheckpoint, CommittedRecord,
     CommittedRecordRange, CommittedStreamBookmark, ConsensusGroup, CreateStreamSpec, DomainError,
-    FetchPage, HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal, MAX_PUBLIC_MESSAGE_BYTES,
-    NodeDescriptor, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId,
-    ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, ReplayLease,
-    ReplayLeaseId, ReplayLeaseRequest, RequestOutcome, RequestSequence, RetentionRequest,
-    RetentionResult, RetentionStatus, SecurityMode, SecurityMutation, StreamBookmarkPage,
-    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamName,
+    FetchPage, GroupId, HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal,
+    MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor, NodePhase, PartitionId, PartitionKey, PartitionRoute,
+    ProducerRequestId, ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt,
+    ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome,
+    RequestSequence, RetentionRequest, RetentionResult, RetentionStatus, SecurityMode,
+    SecurityMutation, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
+    StreamDescriptor, StreamId, StreamName, WriteReadiness,
 };
 use light_stream_proto::{
     bookmark_from_wire, checkpoint_cas_from_wire, checkpoint_from_wire, checkpoint_key_to_wire,
@@ -530,9 +531,73 @@ impl Client {
         })
         .await
         .map_err(|error| request_attempt_error("health", error))?;
+        Self::server_health_from_wire(response)
+    }
+
+    fn server_health_from_wire(response: v1::HealthResponse) -> Result<ServerHealth, ClientError> {
         let security_mode = security_mode_from_wire(response.security_mode)?;
+        let legacy = response.lifecycle.is_empty();
+        let phase = match response.lifecycle.as_str() {
+            "" | "running" => NodePhase::Running,
+            "starting" => NodePhase::Starting,
+            "draining" => NodePhase::Draining,
+            "stopping" => NodePhase::Stopping,
+            "failed" => NodePhase::Failed,
+            value => {
+                return Err(ClientError::Protocol(format!(
+                    "unknown server lifecycle {value:?}"
+                )));
+            }
+        };
+        let reasons = response
+            .readiness_reasons
+            .into_iter()
+            .map(|reason| {
+                let group = if reason.group_id == 0 {
+                    None
+                } else {
+                    Some(GroupId::new(reason.group_id)?)
+                };
+                ReadinessReason::from_parts(&reason.code, group).ok_or_else(|| {
+                    ClientError::Protocol(format!("unknown readiness reason {:?}", reason.code))
+                })
+            })
+            .collect::<Result<Vec<_>, ClientError>>()?;
+        let write_ready = if legacy {
+            response.ready
+        } else {
+            response.write_ready
+        };
+        if !legacy && write_ready && phase != NodePhase::Running {
+            return Err(ClientError::Protocol(format!(
+                "write-ready health response used lifecycle {:?}",
+                response.lifecycle
+            )));
+        }
+        if write_ready && !reasons.is_empty() {
+            return Err(ClientError::Protocol(
+                "write-ready health response contained readiness reasons".to_owned(),
+            ));
+        }
+        if !legacy && !write_ready && reasons.is_empty() {
+            return Err(ClientError::Protocol(
+                "not-ready health response omitted readiness reasons".to_owned(),
+            ));
+        }
+        let write_readiness = if write_ready {
+            WriteReadiness::Ready
+        } else {
+            WriteReadiness::NotReady {
+                reasons: if legacy && reasons.is_empty() {
+                    vec![ReadinessReason::Starting]
+                } else {
+                    reasons
+                },
+            }
+        };
         Ok(ServerHealth {
-            status: HealthStatus::new(response.ready, response.revision, security_mode),
+            status: HealthStatus::new(response.ready, response.revision, security_mode)
+                .with_operational(phase, response.lifecycle_generation, write_readiness),
             public_address: response.public_address,
             peer_address: response.peer_address,
             bootstrapped: response.bootstrapped,
@@ -3997,12 +4062,147 @@ mod tests {
 
     use super::*;
 
+    fn health_response() -> v1::HealthResponse {
+        v1::HealthResponse {
+            ready: true,
+            revision: "revision".to_owned(),
+            security_mode: v1::SecurityMode::LocalInsecure as i32,
+            public_address: "127.0.0.1:7101".to_owned(),
+            peer_address: "127.0.0.1:7201".to_owned(),
+            bootstrapped: true,
+            cluster_id: String::new(),
+            live: false,
+            write_ready: false,
+            lifecycle: String::new(),
+            lifecycle_generation: 0,
+            readiness_reasons: Vec::new(),
+        }
+    }
+
     fn request_id() -> ProducerRequestId {
         ProducerRequestId::new(
             PrincipalId::parse("deadline-test").unwrap(),
             "018f3f7e-5b3b-7c11-98f7-b65ac15f65c0".parse().unwrap(),
             RequestSequence::new(42),
         )
+    }
+
+    #[test]
+    fn legacy_health_uses_service_availability_for_write_readiness() {
+        for ready in [true, false] {
+            let mut response = health_response();
+            response.ready = ready;
+
+            let health = Client::server_health_from_wire(response).unwrap();
+
+            assert_eq!(health.status.ready(), ready);
+            assert_eq!(health.status.phase(), NodePhase::Running);
+            assert_eq!(health.status.write_ready(), ready);
+            if !ready {
+                assert_eq!(
+                    health.status.readiness(),
+                    &WriteReadiness::NotReady {
+                        reasons: vec![ReadinessReason::Starting],
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn expanded_health_keeps_service_and_write_status_separate() {
+        let mut response = health_response();
+        response.lifecycle = "draining".to_owned();
+        response.lifecycle_generation = 9;
+        response.readiness_reasons = vec![v1::ReadinessReason {
+            code: "group_authority_stale".to_owned(),
+            group_id: 7,
+        }];
+
+        let health = Client::server_health_from_wire(response).unwrap();
+
+        assert!(health.status.ready());
+        assert!(!health.status.write_ready());
+        assert_eq!(health.status.phase(), NodePhase::Draining);
+        assert_eq!(health.status.generation(), 9);
+        assert_eq!(
+            health.status.readiness(),
+            &WriteReadiness::NotReady {
+                reasons: vec![ReadinessReason::GroupAuthorityStale {
+                    group: GroupId::new(7).unwrap(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn health_decoder_rejects_malformed_lifecycle_and_readiness() {
+        let mut unknown_lifecycle = health_response();
+        unknown_lifecycle.lifecycle = "paused".to_owned();
+        assert!(matches!(
+            Client::server_health_from_wire(unknown_lifecycle),
+            Err(ClientError::Protocol(message)) if message.contains("lifecycle")
+        ));
+
+        let mut unknown_reason = health_response();
+        unknown_reason.lifecycle = "running".to_owned();
+        unknown_reason.readiness_reasons = vec![v1::ReadinessReason {
+            code: "unknown".to_owned(),
+            group_id: 0,
+        }];
+        assert!(matches!(
+            Client::server_health_from_wire(unknown_reason),
+            Err(ClientError::Protocol(message)) if message.contains("readiness reason")
+        ));
+
+        let mut missing_group = health_response();
+        missing_group.lifecycle = "running".to_owned();
+        missing_group.readiness_reasons = vec![v1::ReadinessReason {
+            code: "group_authority_stale".to_owned(),
+            group_id: 0,
+        }];
+        assert!(matches!(
+            Client::server_health_from_wire(missing_group),
+            Err(ClientError::Protocol(message)) if message.contains("readiness reason")
+        ));
+
+        let mut unexpected_group = health_response();
+        unexpected_group.lifecycle = "running".to_owned();
+        unexpected_group.readiness_reasons = vec![v1::ReadinessReason {
+            code: "draining".to_owned(),
+            group_id: 7,
+        }];
+        assert!(matches!(
+            Client::server_health_from_wire(unexpected_group),
+            Err(ClientError::Protocol(message)) if message.contains("readiness reason")
+        ));
+
+        let mut ready_with_reasons = health_response();
+        ready_with_reasons.lifecycle = "running".to_owned();
+        ready_with_reasons.write_ready = true;
+        ready_with_reasons.readiness_reasons = vec![v1::ReadinessReason {
+            code: "draining".to_owned(),
+            group_id: 0,
+        }];
+        assert!(matches!(
+            Client::server_health_from_wire(ready_with_reasons),
+            Err(ClientError::Protocol(message)) if message.contains("write-ready")
+        ));
+
+        let mut ready_while_draining = health_response();
+        ready_while_draining.lifecycle = "draining".to_owned();
+        ready_while_draining.write_ready = true;
+        assert!(matches!(
+            Client::server_health_from_wire(ready_while_draining),
+            Err(ClientError::Protocol(message)) if message.contains("write-ready")
+        ));
+
+        let mut not_ready_without_reasons = health_response();
+        not_ready_without_reasons.lifecycle = "running".to_owned();
+        assert!(matches!(
+            Client::server_health_from_wire(not_ready_without_reasons),
+            Err(ClientError::Protocol(message)) if message.contains("omitted readiness reasons")
+        ));
     }
 
     #[test]

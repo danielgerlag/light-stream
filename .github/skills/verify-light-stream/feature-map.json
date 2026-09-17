@@ -68,6 +68,18 @@
     "release-package": {
       "command": "python3 scripts/verify.py --phase LS09 --scenario package --profile local --security local-insecure --artifacts artifacts/LS09/skill-package",
       "evidence": ["ls09/package-journey.json", "release-journey.json", "binary-fingerprints.json", "result.json", "cleanup.json"]
+    },
+    "runtime-lifecycle": {
+      "command": "python3 scripts/verify.py --phase LS09 --scenario lifecycle --profile local --security local-insecure --artifacts artifacts/LS09/skill-lifecycle",
+      "evidence": ["l03.json", "release-journey.json", "binary-fingerprints.json", "result.json", "cleanup.json"]
+    },
+    "graceful-drain": {
+      "command": "python3 scripts/verify.py --phase LS09 --scenario drain --profile local --security local-insecure --artifacts artifacts/LS09/skill-drain",
+      "evidence": ["l04.json", "release-journey.json", "binary-fingerprints.json", "result.json", "cleanup.json"]
+    },
+    "operations-metrics": {
+      "command": "python3 scripts/verify.py --phase LS09 --scenario metrics --profile local --security local-insecure --artifacts artifacts/LS09/skill-metrics",
+      "evidence": ["l09.json", "release-journey.json", "binary-fingerprints.json", "result.json", "cleanup.json"]
     }
   }
 }

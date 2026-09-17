@@ -11,7 +11,7 @@ use std::{
 };
 
 use crc32fast::Hasher as Crc32;
-use light_stream_core::{ClusterId, DomainError, NodeDescriptor};
+use light_stream_core::{ClusterId, DomainError, GroupId, NodeDescriptor, NodeId};
 use light_stream_storage::{
     CONTROL_GROUP_ID, ControlRaftConfig, DATA_GROUP_ID, DataRaftConfig, RocksStateMachine,
     SnapshotArtifact, SnapshotDigest,
@@ -1025,6 +1025,17 @@ impl wire::peer_service_server::PeerService for PeerApi {
         Ok(Response::new(response))
     }
 
+    async fn probe_write_authority(
+        &self,
+        request: Request<wire::PeerRequest>,
+    ) -> Result<Response<wire::PeerResponse>, Status> {
+        let envelope = self
+            .authenticated_envelope(PeerOperation::ProbeWriteAuthority, request)
+            .await?;
+        let ready = self.cluster.peer_write_authority(&envelope).await?;
+        Ok(Response::new(encode_response(&envelope, &ready)?))
+    }
+
     async fn vote(
         &self,
         request: Request<wire::PeerRequest>,
@@ -1491,6 +1502,79 @@ pub async fn retire_replacement_remote(
         security,
     )
     .await
+}
+
+pub async fn probe_write_authority_remote(
+    cluster_id: ClusterId,
+    group_id: GroupId,
+    sender_node_id: NodeId,
+    endpoint_uri: &str,
+    target: &NodeDescriptor,
+    security: &RuntimeSecurityConfig,
+    timeout: Duration,
+) -> Result<bool, Status> {
+    let deadline = RpcDeadline::after(timeout);
+    let remaining = deadline
+        .remaining()
+        .ok_or_else(|| Status::deadline_exceeded("write-authority probe timed out"))?;
+    let endpoint = Endpoint::from_shared(endpoint_uri.to_owned())
+        .map_err(|error| Status::unavailable(error.to_string()))?
+        .connect_timeout(remaining)
+        .timeout(remaining);
+    let endpoint = security
+        .configure_peer_endpoint(
+            endpoint,
+            target.peer_uri(),
+            target.node_id(),
+            PeerOperation::ProbeWriteAuthority,
+            crate::security::PeerRecoveryScope::None,
+        )
+        .map_err(Status::unavailable)?;
+    let channel = tokio::time::timeout_at(deadline.expires_at.into(), endpoint.connect())
+        .await
+        .map_err(|_| Status::deadline_exceeded("write-authority probe timed out"))?
+        .map_err(|error| Status::unavailable(error.to_string()))?;
+    let mut client = wire::peer_service_client::PeerServiceClient::new(channel)
+        .max_decoding_message_size(MAX_PEER_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_PEER_MESSAGE_BYTES);
+    let mut request = Request::new(wire::PeerRequest {
+        envelope: Some(wire::PeerEnvelope {
+            protocol_version: PEER_PROTOCOL_VERSION,
+            codec_version: PEER_CODEC_VERSION,
+            cluster_id: cluster_id.to_string(),
+            group_id: group_id.get(),
+            sender_node_id: sender_node_id.get(),
+            target_node_id: target.node_id().get(),
+            payload: Vec::new(),
+        }),
+    });
+    request.set_timeout(
+        deadline
+            .remaining()
+            .ok_or_else(|| Status::deadline_exceeded("write-authority probe timed out"))?,
+    );
+    let response = tokio::time::timeout_at(
+        deadline.expires_at.into(),
+        client.probe_write_authority(request),
+    )
+    .await
+    .map_err(|_| Status::deadline_exceeded("write-authority probe timed out"))??
+    .into_inner();
+    let envelope = response
+        .envelope
+        .ok_or_else(|| Status::internal("write-authority response omitted its envelope"))?;
+    if envelope.protocol_version != PEER_PROTOCOL_VERSION
+        || envelope.codec_version != PEER_CODEC_VERSION
+        || envelope.cluster_id != cluster_id.to_string()
+        || envelope.group_id != group_id.get()
+        || envelope.sender_node_id != target.node_id().get()
+        || envelope.target_node_id != sender_node_id.get()
+    {
+        return Err(Status::permission_denied(
+            "write-authority response identity is invalid",
+        ));
+    }
+    decode(&envelope)
 }
 
 async fn lifecycle_call(

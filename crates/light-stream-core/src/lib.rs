@@ -20,7 +20,10 @@ pub use bookmark::{
 pub use bootstrap::{
     BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology, NodeDescriptor,
 };
-pub use capability::{Capability, CapabilityReport, CapabilitySupport, HealthStatus};
+pub use capability::{
+    Capability, CapabilityReport, CapabilitySupport, HealthStatus, NodePhase, ReadinessReason,
+    WriteReadiness,
+};
 pub use catalog::{
     CreateStreamSpec, DEFAULT_MAX_DATA_GROUPS, DEFAULT_MAX_PARTITIONS_PER_STREAM,
     DEFAULT_MAX_STREAMS, MAX_DATA_GROUPS, MIN_DATA_GROUPS, PartitionPlacement, PartitionRoute,

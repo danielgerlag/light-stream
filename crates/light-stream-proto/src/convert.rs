@@ -49,6 +49,35 @@ pub fn health_to_wire(
         peer_address: peer_address.into(),
         bootstrapped,
         cluster_id: cluster_id.map_or_else(String::new, |value| value.to_string()),
+        live: matches!(
+            status.phase(),
+            light_stream_core::NodePhase::Starting
+                | light_stream_core::NodePhase::Running
+                | light_stream_core::NodePhase::Draining
+        ),
+        write_ready: status.write_ready(),
+        lifecycle: match status.phase() {
+            light_stream_core::NodePhase::Starting => "starting",
+            light_stream_core::NodePhase::Running => "running",
+            light_stream_core::NodePhase::Draining => "draining",
+            light_stream_core::NodePhase::Stopping => "stopping",
+            light_stream_core::NodePhase::Failed => "failed",
+        }
+        .to_owned(),
+        lifecycle_generation: status.generation(),
+        readiness_reasons: status
+            .readiness_reasons()
+            .iter()
+            .map(|reason| v1::ReadinessReason {
+                code: reason.code().to_owned(),
+                group_id: match reason {
+                    light_stream_core::ReadinessReason::GroupLeaderUnknown { group }
+                    | light_stream_core::ReadinessReason::GroupAuthorityStale { group }
+                    | light_stream_core::ReadinessReason::ProbeUnsupported { group } => group.get(),
+                    _ => 0,
+                },
+            })
+            .collect(),
     }
 }
 
@@ -1218,6 +1247,13 @@ pub fn domain_error_to_wire(error: &DomainError) -> v1::ErrorResult {
             None,
             String::new(),
         ),
+        DomainError::ShuttingDown { outcome } => (
+            v1::ConsensusGroup::Unspecified as i32,
+            None,
+            request_outcome_to_wire(*outcome) as i32,
+            None,
+            String::new(),
+        ),
         _ => (
             v1::ConsensusGroup::Unspecified as i32,
             None,
@@ -1299,6 +1335,9 @@ pub fn domain_error_from_wire(value: v1::ErrorResult) -> Result<DomainError, Dom
         | "security_permission_denied"
         | "security_policy_conflict"
         | "security_policy_stale" => decode_domain_error_detail(&value.detail_json, &value.code),
+        "shutting_down" => Ok(DomainError::ShuttingDown {
+            outcome: request_outcome_from_wire(value.outcome)?,
+        }),
         "stale_route" => Ok(DomainError::StaleRoute),
         "unsupported_operation" => Ok(DomainError::UnsupportedOperation {
             operation: "remote operation".to_owned(),
@@ -1530,6 +1569,121 @@ mod tests {
             bookmark_name: String::new(),
         };
         assert!(publish_probe_from_wire(request).is_err());
+    }
+
+    #[test]
+    fn health_conversion_preserves_service_and_write_status() {
+        let group = GroupId::new(7).unwrap();
+        let status = HealthStatus::new(true, "revision", SecurityMode::Secured).with_operational(
+            light_stream_core::NodePhase::Draining,
+            11,
+            light_stream_core::WriteReadiness::NotReady {
+                reasons: vec![
+                    light_stream_core::ReadinessReason::Draining,
+                    light_stream_core::ReadinessReason::GroupAuthorityStale { group },
+                ],
+            },
+        );
+
+        let wire = health_to_wire(&status, "127.0.0.1:7101", "127.0.0.1:7201", true, None);
+
+        assert!(wire.ready);
+        assert!(wire.live);
+        assert!(!wire.write_ready);
+        assert_eq!(wire.lifecycle, "draining");
+        assert_eq!(wire.lifecycle_generation, 11);
+        assert_eq!(
+            wire.readiness_reasons,
+            vec![
+                v1::ReadinessReason {
+                    code: "draining".to_owned(),
+                    group_id: 0,
+                },
+                v1::ReadinessReason {
+                    code: "group_authority_stale".to_owned(),
+                    group_id: 7,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn health_conversion_covers_every_lifecycle_phase() {
+        for (phase, lifecycle, live) in [
+            (light_stream_core::NodePhase::Starting, "starting", true),
+            (light_stream_core::NodePhase::Running, "running", true),
+            (light_stream_core::NodePhase::Draining, "draining", true),
+            (light_stream_core::NodePhase::Stopping, "stopping", false),
+            (light_stream_core::NodePhase::Failed, "failed", false),
+        ] {
+            let status = HealthStatus::new(true, "revision", SecurityMode::LocalInsecure)
+                .with_operational(phase, 1, light_stream_core::WriteReadiness::Ready);
+            let wire = health_to_wire(&status, "", "", false, None);
+
+            assert_eq!(wire.lifecycle, lifecycle);
+            assert_eq!(wire.live, live);
+        }
+    }
+
+    #[test]
+    fn request_outcome_conversion_covers_every_variant() {
+        for outcome in [
+            RequestOutcome::DefiniteNoCommit,
+            RequestOutcome::AmbiguousCommit,
+            RequestOutcome::NotApplicable,
+        ] {
+            let wire = request_outcome_to_wire(outcome);
+            assert_eq!(request_outcome_from_wire(wire as i32).unwrap(), outcome);
+        }
+    }
+
+    #[test]
+    fn request_outcome_rejects_unspecified_and_unknown_values() {
+        for value in [v1::RequestOutcome::Unspecified as i32, i32::MAX] {
+            assert!(matches!(
+                request_outcome_from_wire(value),
+                Err(DomainError::InvalidName { kind, .. }) if kind == "request outcome"
+            ));
+        }
+    }
+
+    #[test]
+    fn shutting_down_error_round_trip_preserves_outcome() {
+        for outcome in [
+            RequestOutcome::DefiniteNoCommit,
+            RequestOutcome::AmbiguousCommit,
+            RequestOutcome::NotApplicable,
+        ] {
+            let error = DomainError::ShuttingDown { outcome };
+            let wire = domain_error_to_wire(&error);
+            assert_eq!(wire.outcome, request_outcome_to_wire(outcome) as i32);
+            assert_eq!(domain_error_from_wire(wire).unwrap(), error);
+        }
+    }
+
+    #[test]
+    fn shutting_down_error_decodes_and_validates_the_wire_outcome() {
+        let wire = v1::ErrorResult {
+            code: "shutting_down".to_owned(),
+            outcome: v1::RequestOutcome::DefiniteNoCommit as i32,
+            ..Default::default()
+        };
+        assert_eq!(
+            domain_error_from_wire(wire).unwrap(),
+            DomainError::ShuttingDown {
+                outcome: RequestOutcome::DefiniteNoCommit,
+            }
+        );
+
+        let malformed = v1::ErrorResult {
+            code: "shutting_down".to_owned(),
+            outcome: v1::RequestOutcome::Unspecified as i32,
+            ..Default::default()
+        };
+        assert!(matches!(
+            domain_error_from_wire(malformed),
+            Err(DomainError::InvalidName { kind, .. }) if kind == "request outcome"
+        ));
     }
 
     #[test]

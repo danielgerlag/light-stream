@@ -145,6 +145,39 @@ python3 scripts/verify.py \
   --artifacts artifacts/LS09/skill-package
 ```
 
+For LS09 write readiness and quorum recovery, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS09 \
+  --scenario lifecycle \
+  --profile local \
+  --security local-insecure \
+  --artifacts artifacts/LS09/skill-lifecycle
+```
+
+For LS09 graceful drain, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS09 \
+  --scenario drain \
+  --profile local \
+  --security local-insecure \
+  --artifacts artifacts/LS09/skill-drain
+```
+
+For LS09 operations metrics, run:
+
+```sh
+python3 scripts/verify.py \
+  --phase LS09 \
+  --scenario metrics \
+  --profile local \
+  --security local-insecure \
+  --artifacts artifacts/LS09/skill-metrics
+```
+
 Inspect `result.json`. Accept only `PASS`. Inspect `cleanup.json` and confirm that `success_data_removed` is `true`. For the evidence-preservation feature, also confirm that `failed_data_retained` is `true`.
 
 For LS02a, inspect `durable-journey.json`, `receipt-evidence.json`, and `storage-test-evidence.json`. Confirm that the CLI and Rust client match the independent ledger before and after restart. Confirm that the discarded response retry returns offset `2` and the conflicting retry returns `receipt_conflict`.
@@ -175,6 +208,14 @@ For LS08, inspect `l01.json` through `l10.json`, `ls08/security-journey.json`, `
 
 For the LS08 B4 gate, run `scripts/compare_ls05_perf.py` against the LS07 release binaries and the current release binaries. Confirm publish throughput is at least 90% of the LS07 baseline and publish and fetch p99 ratios are at most 1.20.
 
-For the LS09 package journey, inspect `ls09/package-journey.json` and `release-journey.json`. Confirm that the archive contains only `light-streamd`, `light-streamctl`, `release.json`, and `SHA256SUMS`. Confirm that two clean native builds and two normalized OCI builds match. Confirm that the extracted binaries and runtime data live outside the checkout. Confirm standalone publish, fetch, restart, and the three-voter package smoke. Confirm process liveness is at most five seconds, ten-stream idle RSS is at most 128 MiB, and the compressed Linux image is at most 50 MiB. Record ready-to-append as a baseline. The package scenario does not close the one-second B6 target. Later LS09 lifecycle, export, and restore lanes remain `NOT_IMPLEMENTED`.
+For the LS09 package journey, inspect `ls09/package-journey.json` and `release-journey.json`. Confirm that the archive contains only `light-streamd`, `light-streamctl`, `release.json`, and `SHA256SUMS`. Confirm that two clean native builds and two normalized OCI builds match. Confirm that the extracted binaries and runtime data live outside the checkout. Confirm standalone publish, fetch, restart, and the three-voter package smoke. Confirm process liveness is at most five seconds, ten-stream idle RSS is at most 128 MiB, and the compressed Linux image is at most 50 MiB. Record ready-to-append as a baseline. The package scenario does not close the one-second B6 target.
+
+For LS09 lifecycle, inspect `l03.json`. Confirm that all three voters start write-ready. After two voters stop, confirm that `/livez` remains HTTP 200 and `/readyz` becomes HTTP 503 within `leader_loss_seconds`. Confirm that the authenticated health response keeps `ready: true`, reports write readiness as false, and names each stale group. Confirm that readiness recovers within `write_readiness_seconds` after one voter restarts.
+
+For LS09 drain, inspect `l04.json`. Confirm that the accepted delayed publish resolves, `/livez` remains HTTP 200 during drain, `/readyz` returns HTTP 503 with lifecycle `draining`, and a late publish returns `shutting_down` with `definite_no_commit`. Confirm that the process exits within its grace period. After restart, confirm that the accepted payload is present and the rejected payload is absent.
+
+For LS09 metrics, inspect `l09.json`. Confirm queue occupancy, queue limits, in-flight mutation count, replication lag, and an overload rejection count of at least one. Confirm that overload returns `publish_overloaded` with `definite_no_commit`. Confirm that stream, principal, cluster, endpoint, path, and payload canaries are absent.
+
+Later LS09 export and restore lanes remain `NOT_IMPLEMENTED`.
 
 Return the command, verdict, source revision, binary fingerprints, evidence files, and cleanup result. Report the optional independent security review as `NOT_REQUESTED` unless the execution manifest selected it. Report independent-host verification as `BLOCKED`.

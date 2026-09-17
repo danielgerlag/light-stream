@@ -1,10 +1,11 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, RwLock as StdRwLock,
+        Arc, RwLock as StdRwLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -17,12 +18,12 @@ use light_stream_core::{
     CheckpointCasResult, CheckpointKey, CheckpointMutation, ClusterId, ClusterTopology,
     CommittedBookmark, CommittedCheckpoint, CommittedStreamBookmark, ConsensusGroup,
     CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint,
-    LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, OperationalProof, PartitionId,
+    LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, NodePhase, OperationalProof, PartitionId,
     PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest, PublishBatch,
-    PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome,
-    RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation, SecurityPolicy,
-    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
-    StreamLifecycle, StreamName,
+    PublishReceipt, ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
+    RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation,
+    SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
+    StreamDescriptor, StreamId, StreamLifecycle, StreamName, WriteReadiness,
 };
 use light_stream_storage::{
     ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
@@ -31,28 +32,54 @@ use light_stream_storage::{
     create_data_store, open_control_store, open_control_store_with_topology, open_data_store,
 };
 use openraft::{
-    BasicNode, Config, Raft, ReadPolicy, ServerState, SnapshotPolicy,
+    BasicNode, Config, Instant as OpenRaftInstant, Raft, RaftMetrics, ReadPolicy, ServerState,
+    SnapshotPolicy,
     errors::{ClientWriteError, LinearizableReadError, RaftError},
+    raft::ClientWriteResponse,
     type_config::async_runtime::WatchReceiver,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    sync::{Mutex, RwLock},
+    task::JoinSet,
+};
 
 use crate::{
     config::PeerRoutes,
+    lifecycle::{DrainOutcome, LifecycleController, MutationPermit},
     manifest::{
         FormationSpec, GroupPoolConfig, LEGACY_NODE_MANIFEST_VERSION, LegacyNodeManifestV3,
         NODE_MANIFEST_VERSION, NodeManifestV1, NodeManifestV2, PREVIOUS_NODE_MANIFEST_VERSION,
         PersistedNodeState,
     },
     peer::{self, TonicNetworkFactory, wire},
-    publish_scheduler::{PublishScheduler, PublishSchedulerConfig, PublishVerificationDelays},
+    publish_scheduler::{
+        PublishQueueSnapshot, PublishScheduler, PublishSchedulerConfig, PublishVerificationDelays,
+    },
     security::{PeerRecoveryScope, RuntimeSecurityConfig},
+    tasks::{StopToken, TaskGroup, TaskGroupError},
 };
 
 pub(crate) type ControlRaft = Raft<ControlRaftConfig, RocksStateMachine<ControlRaftConfig>>;
 pub(crate) type DataRaft = Raft<DataRaftConfig, RocksStateMachine<DataRaftConfig>>;
 type VerificationDelayConfig = (Option<(u64, Duration)>, Option<(u64, Duration)>);
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ShutdownPreparationError {
+    #[error(transparent)]
+    Tasks(#[from] TaskGroupError),
+    #[error("bootstrap did not reach a shutdown-safe point before the drain deadline")]
+    BootstrapDeadline,
+}
+
+impl ShutdownPreparationError {
+    pub(crate) fn teardown_safe(&self) -> bool {
+        match self {
+            Self::Tasks(error) => error.all_joined(),
+            Self::BootstrapDeadline => false,
+        }
+    }
+}
 
 const ROOT_MANIFEST: &str = "cluster.json";
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -61,6 +88,15 @@ const FORMATION_TIMEOUT: Duration = Duration::from_secs(15);
 const SNAPSHOT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SNAPSHOT_TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const LEASE_CLOCK_SKEW: Duration = Duration::from_secs(2);
+const RAFT_ELECTION_TIMEOUT_MAX_MS: u64 = 600;
+const OPERATIONAL_QUORUM_MAX_AGE: Duration = Duration::from_millis(RAFT_ELECTION_TIMEOUT_MAX_MS);
+const READINESS_SAMPLE_TIMEOUT: Duration = OPERATIONAL_QUORUM_MAX_AGE;
+const MAX_READINESS_PROBES: usize = 4;
+const READINESS_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
+const READINESS_PROBE_POLICY: ReadinessProbePolicy = ReadinessProbePolicy {
+    max_in_flight: MAX_READINESS_PROBES,
+    per_probe_timeout: READINESS_PROBE_TIMEOUT,
+};
 
 #[derive(Clone, Debug)]
 enum ActiveManifest {
@@ -115,11 +151,12 @@ struct ActiveCluster {
     operational: RwLock<BTreeMap<u64, OperationalProof>>,
     peer_topology: Option<peer::PeerTopology>,
     topology_manifest_dirty: AtomicBool,
-    administration_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    maintenance: Mutex<Option<TaskGroup>>,
+    maintenance_unjoined: AtomicBool,
     administration_delay: Option<Duration>,
     publish_leader_hints: Arc<StdRwLock<BTreeMap<u64, LeaderHint>>>,
     security: RuntimeSecurityConfig,
-    maintenance_shutdown: AtomicBool,
+    lifecycle: LifecycleController,
 }
 
 struct DataGroup {
@@ -132,18 +169,152 @@ struct DataGroup {
 }
 
 impl ActiveCluster {
-    async fn shutdown(&self) -> Result<(), DomainError> {
-        self.maintenance_shutdown.store(true, Ordering::Release);
-        if let Some(task) = self.administration_task.lock().await.take() {
-            let _ = tokio::time::timeout(FORMATION_TIMEOUT, task).await;
-        }
-        self.control.shutdown().await.map_err(raft_fatal)?;
+    async fn start_maintenance(self: &Arc<Self>, data_dir: PathBuf) -> Result<(), DomainError> {
+        let mut tasks = TaskGroup::new();
+        let active = Arc::downgrade(self);
+        tasks.spawn("topology-sync", move |stop| {
+            topology_sync_loop(active, data_dir, stop)
+        });
+
+        let active = Arc::downgrade(self);
+        tasks.spawn("retention-maintenance", move |stop| {
+            retention_maintenance_loop(active, stop)
+        });
+
+        let active = Arc::downgrade(self);
+        let control = self.control.clone();
+        let reader = self.control_reader.clone();
+        tasks.spawn("operational-probe-control", move |stop| {
+            operational_probe_loop(
+                active,
+                GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
+                control,
+                reader,
+                stop,
+            )
+        });
         for group in self.data.values() {
-            group.publisher.shutdown().await;
-            group.raft.shutdown().await.map_err(raft_fatal)?;
+            let active = Arc::downgrade(self);
+            let group_id = group.group_id;
+            let raft = group.raft.clone();
+            let reader = group.reader.clone();
+            tasks.spawn(
+                format!("operational-probe-{}", group_id.get()),
+                move |stop| operational_probe_loop(active, group_id, raft, reader, stop),
+            );
         }
+
+        if !matches!(
+            &*self.manifest.read().await,
+            ActiveManifest::V2(NodeManifestV2 {
+                state: PersistedNodeState::Retired,
+                ..
+            })
+        ) {
+            let active = Arc::downgrade(self);
+            tasks.spawn("administration-reconciler", move |stop| {
+                administration_reconciler_loop(active, stop)
+            });
+        }
+
+        let mut maintenance = self.maintenance.lock().await;
+        if maintenance.is_some() {
+            return Err(DomainError::Storage {
+                reason: "cluster maintenance is already running".to_owned(),
+            });
+        }
+        *maintenance = Some(tasks);
         Ok(())
     }
+
+    async fn stop_maintenance(&self, deadline: tokio::time::Instant) -> Result<(), TaskGroupError> {
+        let tasks = self.maintenance.lock().await.take();
+        let result = match tasks {
+            Some(tasks) => tasks.stop_and_join(deadline).await,
+            None => Ok(()),
+        };
+        if result.as_ref().is_err_and(|error| !error.all_joined()) {
+            self.maintenance_unjoined.store(true, Ordering::Release);
+        }
+        result
+    }
+
+    async fn shutdown(&self) -> Result<(), DomainError> {
+        let mut failures = Vec::new();
+        if let Err(error) = self
+            .stop_maintenance(tokio::time::Instant::now() + FORMATION_TIMEOUT)
+            .await
+        {
+            failures.push(error.to_string());
+        }
+        if self.maintenance_unjoined.load(Ordering::Acquire) {
+            return Err(DomainError::Storage {
+                reason: "maintenance tasks remained active after abort".to_owned(),
+            });
+        }
+        if let Err(error) = self.control.shutdown().await {
+            failures.push(error.to_string());
+        }
+        for group in self.data.values() {
+            group.publisher.shutdown().await;
+            if let Err(error) = group.raft.shutdown().await {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(DomainError::Storage {
+                reason: format!("cluster shutdown failures: {}", failures.join("; ")),
+            })
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ReadinessProbePolicy {
+    max_in_flight: usize,
+    per_probe_timeout: Duration,
+}
+
+struct AuthorityProbe {
+    order: usize,
+    cluster: ClusterId,
+    group: GroupId,
+    sender: NodeId,
+    endpoint: String,
+    target: NodeDescriptor,
+    security: RuntimeSecurityConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AuthorityProbeOutcome {
+    Ready,
+    Stale,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AuthorityProbeResult {
+    order: usize,
+    group: GroupId,
+    outcome: AuthorityProbeOutcome,
+}
+
+fn has_recent_quorum<C>(metrics: &RaftMetrics<C>) -> bool
+where
+    C: openraft::RaftTypeConfig<NodeId = u64>,
+{
+    if metrics.state != ServerState::Leader {
+        return false;
+    }
+    let mut voters = metrics.committed_membership_config.membership().voter_ids();
+    if voters.next() == Some(metrics.id) && voters.next().is_none() {
+        return true;
+    }
+    metrics.last_quorum_acked.is_some_and(|acknowledged| {
+        OpenRaftInstant::elapsed(&acknowledged.into_inner()) <= OPERATIONAL_QUORUM_MAX_AGE
+    })
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -174,6 +345,7 @@ pub(crate) struct GroupDiagnostic {
     pub slot: Option<u16>,
     pub cache_budget_bytes: Option<usize>,
     pub write_buffer_budget_bytes: Option<usize>,
+    pub publish_queue: Option<PublishQueueSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -189,6 +361,25 @@ pub(crate) struct NodeDiagnostic {
     pub per_group_cache_bytes: usize,
     pub per_group_write_buffer_bytes: usize,
     pub unsupported_claims: Vec<String>,
+}
+
+#[cfg(test)]
+impl NodeDiagnostic {
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            node_id: 1,
+            lifecycle: "active".to_owned(),
+            peers: Vec::new(),
+            groups: Vec::new(),
+            data_group_slots: 1,
+            data_group_count: 0,
+            rocksdb_cache_budget_bytes: 0,
+            rocksdb_write_buffer_budget_bytes: 0,
+            per_group_cache_bytes: 0,
+            per_group_write_buffer_bytes: 0,
+            unsupported_claims: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -207,8 +398,9 @@ pub struct ClusterManager {
     publish_scheduler: PublishSchedulerConfig,
     verification_delays: VerificationDelayConfig,
     security: RuntimeSecurityConfig,
+    lifecycle: LifecycleController,
     active: RwLock<Option<Arc<ActiveCluster>>>,
-    bootstrap_lock: Mutex<()>,
+    bootstrap_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -219,6 +411,7 @@ pub(crate) struct ClusterManagerConfig {
     pub publish_scheduler: PublishSchedulerConfig,
     pub verification_delays: VerificationDelayConfig,
     pub security: RuntimeSecurityConfig,
+    pub lifecycle: LifecycleController,
 }
 
 impl ClusterManager {
@@ -246,8 +439,9 @@ impl ClusterManager {
             publish_scheduler: config.publish_scheduler,
             verification_delays: config.verification_delays,
             security: config.security,
+            lifecycle: config.lifecycle,
             active: RwLock::new(None),
-            bootstrap_lock: Mutex::new(()),
+            bootstrap_lock: Arc::new(Mutex::new(())),
         };
         if let Some(manifest) = manifest {
             let active = match manifest {
@@ -278,36 +472,51 @@ impl ClusterManager {
             if let ActiveManifest::V2(manifest) = &*active.manifest.read().await {
                 write_manifest(&manager.data_dir, manifest)?;
             }
-            spawn_retention_maintenance(active.clone());
-            spawn_operational_probes(active.clone());
-            spawn_topology_sync(active.clone(), manager.data_dir.clone());
-            start_administration_reconciler(active.clone()).await;
+            active.start_maintenance(manager.data_dir.clone()).await?;
             *manager.active.write().await = Some(active);
         }
         Ok(manager)
     }
 
     pub async fn bootstrap(
-        &self,
+        self: &Arc<Self>,
         command: BootstrapCommand,
     ) -> Result<BootstrapResult, DomainError> {
-        self.bootstrap_with_security(command, None).await
+        self.submit_bootstrap(command, None).await
     }
 
     pub async fn bootstrap_secured(
-        &self,
+        self: &Arc<Self>,
         command: BootstrapCommand,
         policy: SecurityPolicy,
     ) -> Result<BootstrapResult, DomainError> {
-        self.bootstrap_with_security(command, Some(policy)).await
+        self.submit_bootstrap(command, Some(policy)).await
     }
 
-    async fn bootstrap_with_security(
+    async fn submit_bootstrap(
+        self: &Arc<Self>,
+        command: BootstrapCommand,
+        security: Option<SecurityPolicy>,
+    ) -> Result<BootstrapResult, DomainError> {
+        let guard = self.bootstrap_lock.clone().lock_owned().await;
+        let permit = self.lifecycle.try_admit_mutation()?;
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            let _permit = permit;
+            manager.bootstrap_accepted(command, security).await
+        })
+        .await
+        .map_err(|error| DomainError::Storage {
+            reason: format!("accepted bootstrap task failed: {error}"),
+        })?
+    }
+
+    async fn bootstrap_accepted(
         &self,
         command: BootstrapCommand,
         security: Option<SecurityPolicy>,
     ) -> Result<BootstrapResult, DomainError> {
-        let _guard = self.bootstrap_lock.lock().await;
         if let Some(policy) = &security {
             self.security.validate_local_peer_policy(policy)?;
         }
@@ -349,7 +558,7 @@ impl ClusterManager {
         &self,
         spec: &BootstrapSpec,
     ) -> Result<BootstrapResult, DomainError> {
-        if let Some(active) = self.active.read().await.as_ref() {
+        if let Some(active) = self.active.read().await.as_ref().cloned() {
             let manifest = active.manifest.read().await;
             return match &*manifest {
                 ActiveManifest::V1(existing) if existing.bootstrap == *spec => {
@@ -372,10 +581,7 @@ impl ClusterManager {
         write_manifest(&self.data_dir, &manifest)?;
         let active = self.create_v1(manifest).await?;
         let active = Arc::new(active);
-        spawn_retention_maintenance(active.clone());
-        spawn_operational_probes(active.clone());
-        spawn_topology_sync(active.clone(), self.data_dir.clone());
-        start_administration_reconciler(active.clone()).await;
+        active.start_maintenance(self.data_dir.clone()).await?;
         *self.active.write().await = Some(active);
         bootstrap_result(spec)
     }
@@ -424,10 +630,7 @@ impl ClusterManager {
             )?;
             write_manifest(&self.data_dir, &manifest)?;
             let active = Arc::new(self.create_v2(manifest, true).await?);
-            spawn_retention_maintenance(active.clone());
-            spawn_operational_probes(active.clone());
-            spawn_topology_sync(active.clone(), self.data_dir.clone());
-            start_administration_reconciler(active.clone()).await;
+            active.start_maintenance(self.data_dir.clone()).await?;
             *self.active.write().await = Some(active.clone());
             active
         };
@@ -587,7 +790,11 @@ impl ClusterManager {
             ));
         }
         let _guard = self.bootstrap_lock.lock().await;
-        if let Some(active) = self.active.read().await.as_ref() {
+        let _permit = self
+            .lifecycle
+            .try_admit_mutation()
+            .map_err(internal_status)?;
+        if let Some(active) = self.active.read().await.as_ref().cloned() {
             let manifest = active.manifest.read().await;
             return match &*manifest {
                 ActiveManifest::V2(existing) if existing.formation == formation => Ok(()),
@@ -614,10 +821,10 @@ impl ClusterManager {
                 .await
                 .map_err(internal_status)?,
         );
-        spawn_retention_maintenance(active.clone());
-        spawn_operational_probes(active.clone());
-        spawn_topology_sync(active.clone(), self.data_dir.clone());
-        start_administration_reconciler(active.clone()).await;
+        active
+            .start_maintenance(self.data_dir.clone())
+            .await
+            .map_err(internal_status)?;
         *self.active.write().await = Some(active);
         Ok(())
     }
@@ -638,7 +845,11 @@ impl ClusterManager {
             .validate_topology(self.local.node_id(), &nodes)
             .map_err(internal_status)?;
         let _guard = self.bootstrap_lock.lock().await;
-        if let Some(active) = self.active.read().await.as_ref() {
+        let _permit = self
+            .lifecycle
+            .try_admit_mutation()
+            .map_err(internal_status)?;
+        if let Some(active) = self.active.read().await.as_ref().cloned() {
             let mut manifest = active.manifest.write().await;
             return match &mut *manifest {
                 ActiveManifest::V2(existing)
@@ -679,10 +890,10 @@ impl ClusterManager {
                 .await
                 .map_err(internal_status)?,
         );
-        spawn_retention_maintenance(active.clone());
-        spawn_operational_probes(active.clone());
-        spawn_topology_sync(active.clone(), self.data_dir.clone());
-        start_administration_reconciler(active.clone()).await;
+        active
+            .start_maintenance(self.data_dir.clone())
+            .await
+            .map_err(internal_status)?;
         *self.active.write().await = Some(active);
         Ok(())
     }
@@ -693,6 +904,11 @@ impl ClusterManager {
         formation: &FormationSpec,
     ) -> Result<(), tonic::Status> {
         validate_lifecycle_envelope(&self.local, envelope, formation)?;
+        let _guard = self.bootstrap_lock.lock().await;
+        let _permit = self
+            .lifecycle
+            .try_admit_mutation()
+            .map_err(internal_status)?;
         let active = self
             .active
             .read()
@@ -731,6 +947,11 @@ impl ClusterManager {
         preparation: &peer::ReplacementPreparation,
     ) -> Result<(), tonic::Status> {
         validate_replacement_envelope(&self.local, envelope, preparation)?;
+        let _guard = self.bootstrap_lock.lock().await;
+        let _permit = self
+            .lifecycle
+            .try_admit_mutation()
+            .map_err(internal_status)?;
         let active = self
             .active
             .read()
@@ -763,6 +984,11 @@ impl ClusterManager {
                 topology: retirement.transitional_topology,
             },
         )?;
+        let _guard = self.bootstrap_lock.lock().await;
+        let _permit = self
+            .lifecycle
+            .try_admit_mutation()
+            .map_err(internal_status)?;
         let active = self
             .active
             .read()
@@ -823,6 +1049,50 @@ impl ClusterManager {
             .ok_or_else(|| tonic::Status::invalid_argument("unknown data Raft group"))
     }
 
+    pub(crate) async fn peer_write_authority(
+        &self,
+        envelope: &wire::PeerEnvelope,
+    ) -> Result<bool, tonic::Status> {
+        let active = self.peer_cluster(envelope, envelope.group_id).await?;
+        if active.lifecycle.snapshot().phase != NodePhase::Running {
+            return Ok(false);
+        }
+        let proof = active
+            .operational
+            .read()
+            .await
+            .get(&envelope.group_id)
+            .cloned();
+        let ready = if envelope.group_id == CONTROL_GROUP_ID {
+            let metrics = active.control.metrics().borrow_watched().clone();
+            has_recent_quorum(&metrics)
+                && proof.is_some_and(|proof| {
+                    metrics.state == ServerState::Leader
+                        && proof.matches(
+                            self.local.node_id(),
+                            metrics.current_term,
+                            metrics.last_applied.map_or(0, |value| value.index),
+                        )
+                })
+        } else {
+            let group = active
+                .data
+                .get(&envelope.group_id)
+                .ok_or_else(|| tonic::Status::invalid_argument("unknown data Raft group"))?;
+            let metrics = group.raft.metrics().borrow_watched().clone();
+            has_recent_quorum(&metrics)
+                && proof.is_some_and(|proof| {
+                    metrics.state == ServerState::Leader
+                        && proof.matches(
+                            self.local.node_id(),
+                            metrics.current_term,
+                            metrics.last_applied.map_or(0, |value| value.index),
+                        )
+                })
+        };
+        Ok(ready)
+    }
+
     pub(crate) fn snapshot_incoming_directory(&self, group_id: u64) -> PathBuf {
         group_path(&self.data_dir, group_id).join("snapshots/incoming")
     }
@@ -878,6 +1148,7 @@ impl ClusterManager {
         cluster: ClusterId,
         spec: CreateStreamSpec,
     ) -> Result<StreamDescriptor, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         validate_cluster(&active, cluster).await?;
         let descriptor = control_write(
@@ -886,6 +1157,7 @@ impl ClusterManager {
                 spec,
                 stream_id: StreamId::from_uuid(uuid::Uuid::new_v4()),
             },
+            &permit,
         )
         .await?;
         let required = descriptor
@@ -916,6 +1188,7 @@ impl ClusterManager {
                     stream_id: descriptor.stream(),
                     group_id,
                 },
+                &permit,
             )
             .await?;
         }
@@ -924,6 +1197,7 @@ impl ClusterManager {
             GroupCommand::ActivateStream {
                 stream_id: descriptor.stream(),
             },
+            &permit,
         )
         .await
     }
@@ -969,10 +1243,21 @@ impl ClusterManager {
         cluster: ClusterId,
         stream_id: StreamId,
     ) -> Result<StreamDescriptor, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         validate_cluster(&active, cluster).await?;
-        control_write(&active, GroupCommand::BeginDeleteStream { stream_id }).await?;
-        control_write(&active, GroupCommand::FinishDeleteStream { stream_id }).await
+        control_write(
+            &active,
+            GroupCommand::BeginDeleteStream { stream_id },
+            &permit,
+        )
+        .await?;
+        control_write(
+            &active,
+            GroupCommand::FinishDeleteStream { stream_id },
+            &permit,
+        )
+        .await
     }
 
     pub async fn route(
@@ -1027,6 +1312,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<PublishReceipt, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let request = batch.request().clone();
         let active = self.application_cluster().await?;
         let route = resolve_data_route(
@@ -1052,7 +1338,7 @@ impl ClusterManager {
             }),
         )
         .await?;
-        group.publisher.try_admit(batch)?.wait().await
+        group.publisher.try_admit(batch, permit)?.wait().await
     }
 
     pub async fn fetch(
@@ -1123,6 +1409,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<CheckpointCasResult, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let request = mutation.request().clone();
         let active = self.application_cluster().await?;
         let route = resolve_data_route(
@@ -1148,19 +1435,14 @@ impl ClusterManager {
             }),
         )
         .await?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group
-                .raft
-                .client_write(GroupCommand::CompareAndSetCheckpoint { mutation }),
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::CompareAndSetCheckpoint { mutation },
+            &permit,
+            Some(AmbiguousRequest::Mutation { request }),
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Mutation { request }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::Checkpoint(result) => Ok(result),
             ApplyResult::Rejected(error) => Err(error),
@@ -1177,6 +1459,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<CommittedBookmark, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         let route = resolve_data_route(
             &active,
@@ -1190,22 +1473,19 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::CreateBookmark {
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::CreateBookmark {
                 id: spec.id(),
                 partition: spec.partition(),
                 name: spec.name().clone(),
                 offset: spec.offset(),
-            }),
+            },
+            &permit,
+            None,
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::Bookmark(bookmark) => Ok(bookmark),
             ApplyResult::Rejected(error) => Err(error),
@@ -1223,6 +1503,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<CommittedBookmark, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         let route =
             resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
@@ -1230,19 +1511,14 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group
-                .raft
-                .client_write(GroupCommand::DeleteBookmark { partition, id }),
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::DeleteBookmark { partition, id },
+            &permit,
+            None,
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::Bookmark(bookmark) => Ok(bookmark),
             ApplyResult::Rejected(error) => Err(error),
@@ -1302,6 +1578,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<RetentionResult, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         let route = resolve_data_route(
             &active,
@@ -1315,26 +1592,24 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        maintain_group_retention(&active, group, request.partition()).await?;
+        maintain_group_retention(&active, group, request.partition(), Some(&permit)).await?;
         let mutation = request.request().clone();
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::AdvanceRetention {
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::AdvanceRetention {
                 request,
                 clock: lease_clock_observation()?,
-            }),
+            },
+            &permit,
+            Some(AmbiguousRequest::Mutation { request: mutation }),
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Mutation { request: mutation }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::Retention(result) => {
                 if let Err(error) =
-                    maintain_group_retention(&active, group, result.partition()).await
+                    maintain_group_retention(&active, group, result.partition(), Some(&permit))
+                        .await
                 {
                     eprintln!(
                         "{}",
@@ -1361,6 +1636,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<RetentionStatus, DomainError> {
+        let _permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         let route =
             resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
@@ -1368,7 +1644,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        maintain_group_retention(&active, group, partition).await
+        maintain_group_retention(&active, group, partition, Some(&_permit)).await
     }
 
     pub async fn admit_replay_lease(
@@ -1378,6 +1654,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<ReplayLease, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let partition = request.range().partition();
         let mutation = request.request().clone();
         let active = self.application_cluster().await?;
@@ -1387,21 +1664,18 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        maintain_group_retention(&active, group, partition).await?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::AdmitReplayLease {
+        maintain_group_retention(&active, group, partition, Some(&permit)).await?;
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::AdmitReplayLease {
                 request,
                 clock: lease_clock_observation()?,
-            }),
+            },
+            &permit,
+            Some(AmbiguousRequest::Mutation { request: mutation }),
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Mutation { request: mutation }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::ReplayLease(lease) => Ok(lease),
             ApplyResult::Rejected(error) => Err(error),
@@ -1418,6 +1692,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<ReplayLease, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let partition = request.partition();
         let mutation = request.request().clone();
         let active = self.application_cluster().await?;
@@ -1427,21 +1702,18 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        maintain_group_retention(&active, group, partition).await?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::RenewReplayLease {
+        maintain_group_retention(&active, group, partition, Some(&permit)).await?;
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::RenewReplayLease {
                 request,
                 clock: lease_clock_observation()?,
-            }),
+            },
+            &permit,
+            Some(AmbiguousRequest::Mutation { request: mutation }),
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Mutation { request: mutation }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::ReplayLease(lease) => Ok(lease),
             ApplyResult::Rejected(error) => Err(error),
@@ -1458,6 +1730,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<ReplayLease, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let partition = request.partition();
         let mutation = request.request().clone();
         let active = self.application_cluster().await?;
@@ -1467,23 +1740,22 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::ReleaseReplayLease {
+        let response = submitted_data_write(
+            &active,
+            group,
+            GroupCommand::ReleaseReplayLease {
                 request,
                 clock: lease_clock_observation()?,
-            }),
+            },
+            &permit,
+            Some(AmbiguousRequest::Mutation { request: mutation }),
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Mutation { request: mutation }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Data))?;
+        .await?;
         match response.data {
             ApplyResult::ReplayLease(lease) => {
-                if let Err(error) = maintain_group_retention(&active, group, partition).await {
+                if let Err(error) =
+                    maintain_group_retention(&active, group, partition, Some(&permit)).await
+                {
                     eprintln!(
                         "{}",
                         serde_json::json!({
@@ -1510,6 +1782,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<ReplayLease, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         let route =
             resolve_data_route(&active, cluster, partition, route_group_id, route_revision).await?;
@@ -1517,7 +1790,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        maintain_group_retention(&active, group, partition).await?;
+        maintain_group_retention(&active, group, partition, Some(&permit)).await?;
         group.reader.replay_lease(partition, lease)
     }
 
@@ -1527,6 +1800,7 @@ impl ClusterManager {
         route_group_id: Option<GroupId>,
         route_revision: Option<u64>,
     ) -> Result<FetchPage, DomainError> {
+        let _permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         let route = resolve_data_route(
             &active,
@@ -1540,7 +1814,7 @@ impl ClusterManager {
             .data
             .get(&route.group().get())
             .ok_or(DomainError::StaleRoute)?;
-        maintain_group_retention(&active, group, request.partition()).await?;
+        maintain_group_retention(&active, group, request.partition(), Some(&_permit)).await?;
         group.reader.fetch_protected(
             request.cluster(),
             request.partition(),
@@ -1557,6 +1831,7 @@ impl ClusterManager {
         name: BookmarkName,
         vector: StreamCursorVector,
     ) -> Result<CommittedStreamBookmark, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         if vector.cluster() != cluster {
             return Err(DomainError::IdentityMismatch {
@@ -1583,19 +1858,13 @@ impl ClusterManager {
                 });
             }
         }
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            active
-                .control
-                .client_write(GroupCommand::CreateStreamBookmark { id, name, vector }),
+        let response = submitted_control_write(
+            &active,
+            GroupCommand::CreateStreamBookmark { id, name, vector },
+            &permit,
+            None,
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Control,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Control))?;
+        .await?;
         match response.data {
             ApplyResult::StreamBookmark(bookmark) => Ok(bookmark),
             ApplyResult::Rejected(error) => Err(error),
@@ -1611,21 +1880,16 @@ impl ClusterManager {
         stream_id: StreamId,
         id: BookmarkId,
     ) -> Result<CommittedStreamBookmark, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         validate_cluster(&active, cluster).await?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            active
-                .control
-                .client_write(GroupCommand::DeleteStreamBookmark { stream_id, id }),
+        let response = submitted_control_write(
+            &active,
+            GroupCommand::DeleteStreamBookmark { stream_id, id },
+            &permit,
+            None,
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Control,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Control))?;
+        .await?;
         match response.data {
             ApplyResult::StreamBookmark(bookmark) => Ok(bookmark),
             ApplyResult::Rejected(error) => Err(error),
@@ -1667,6 +1931,127 @@ impl ClusterManager {
             .then(|| manifest.cluster_id())
     }
 
+    pub(crate) async fn write_readiness(&self) -> WriteReadiness {
+        tokio::time::timeout(READINESS_SAMPLE_TIMEOUT, self.calculate_write_readiness())
+            .await
+            .unwrap_or_else(|_| WriteReadiness::NotReady {
+                reasons: vec![ReadinessReason::GroupAuthorityStale {
+                    group: GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
+                }],
+            })
+    }
+
+    async fn calculate_write_readiness(&self) -> WriteReadiness {
+        let Some(active) = self.active.read().await.as_ref().cloned() else {
+            return WriteReadiness::NotReady {
+                reasons: vec![ReadinessReason::NotBootstrapped],
+            };
+        };
+        let (cluster_id, peers) = {
+            let manifest = active.manifest.read().await;
+            if !manifest.is_application_active() {
+                return WriteReadiness::NotReady {
+                    reasons: vec![match manifest.lifecycle() {
+                        "retired" => ReadinessReason::Retired,
+                        _ => ReadinessReason::Forming,
+                    }],
+                };
+            }
+            let cluster_id = manifest.cluster_id();
+            let peers = match &*manifest {
+                ActiveManifest::V1(_) => {
+                    BTreeMap::from([(self.local.node_id().get(), self.local.clone())])
+                }
+                ActiveManifest::V2(manifest) => manifest
+                    .topology
+                    .authorized_nodes()
+                    .iter()
+                    .map(|(node, descriptor)| (node.get(), descriptor.clone()))
+                    .collect(),
+            };
+            (cluster_id, peers)
+        };
+        if matches!(
+            self.security.current_policy(),
+            Err(DomainError::SecurityPolicyStale)
+        ) {
+            return WriteReadiness::NotReady {
+                reasons: vec![ReadinessReason::SecurityPolicyStale],
+            };
+        }
+        let operational = active.operational.read().await.clone();
+        let control_group = GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero");
+        let control_metrics = active.control.metrics().borrow_watched().clone();
+        let mut groups = vec![(
+            control_group,
+            control_metrics.current_leader,
+            control_metrics.current_term,
+            control_metrics.last_applied.map_or(0, |value| value.index),
+            has_recent_quorum(&control_metrics),
+        )];
+        groups.extend(active.data.values().map(|group| {
+            let metrics = group.raft.metrics().borrow_watched().clone();
+            (
+                group.group_id,
+                metrics.current_leader,
+                metrics.current_term,
+                metrics.last_applied.map_or(0, |value| value.index),
+                has_recent_quorum(&metrics),
+            )
+        }));
+
+        let mut reasons = vec![None; groups.len()];
+        let mut probes = Vec::new();
+        for (order, (group, leader, term, applied, recent_quorum)) in groups.into_iter().enumerate()
+        {
+            let Some(leader) = leader else {
+                reasons[order] = Some(ReadinessReason::GroupLeaderUnknown { group });
+                continue;
+            };
+            if leader == self.local.node_id().get() {
+                if !recent_quorum
+                    || !operational
+                        .get(&group.get())
+                        .is_some_and(|proof| proof.matches(self.local.node_id(), term, applied))
+                {
+                    reasons[order] = Some(ReadinessReason::GroupAuthorityStale { group });
+                }
+                continue;
+            }
+            let Some(target) = peers.get(&leader) else {
+                reasons[order] = Some(ReadinessReason::GroupAuthorityStale { group });
+                continue;
+            };
+            probes.push(AuthorityProbe {
+                order,
+                cluster: cluster_id,
+                group,
+                sender: self.local.node_id(),
+                endpoint: readiness_probe_endpoint(&self.peer_routes, leader, target),
+                target: target.clone(),
+                security: self.security.clone(),
+            });
+        }
+
+        for result in sample_remote_authority(probes, READINESS_PROBE_POLICY).await {
+            reasons[result.order] = match result.outcome {
+                AuthorityProbeOutcome::Ready => None,
+                AuthorityProbeOutcome::Stale => Some(ReadinessReason::GroupAuthorityStale {
+                    group: result.group,
+                }),
+                AuthorityProbeOutcome::Unsupported => Some(ReadinessReason::ProbeUnsupported {
+                    group: result.group,
+                }),
+            };
+        }
+        let reasons = reasons.into_iter().flatten().collect::<Vec<_>>();
+        if reasons.is_empty() {
+            WriteReadiness::Ready
+        } else {
+            WriteReadiness::NotReady { reasons }
+        }
+    }
+
     pub(crate) fn peer_recovery_scope(&self, group_id: u64) -> PeerRecoveryScope {
         if group_id == CONTROL_GROUP_ID {
             PeerRecoveryScope::ControlGroup
@@ -1696,21 +2081,16 @@ impl ClusterManager {
         &self,
         mutation: SecurityMutation,
     ) -> Result<SecurityPolicy, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let request = mutation.request().clone();
         let active = self.application_cluster().await?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            active
-                .control
-                .client_write(GroupCommand::ApplySecurityMutation { mutation }),
+        let response = submitted_control_write(
+            &active,
+            GroupCommand::ApplySecurityMutation { mutation },
+            &permit,
+            Some(AmbiguousRequest::Mutation { request }),
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Control,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: Some(AmbiguousRequest::Mutation { request }),
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Control))?;
+        .await?;
         match response.data {
             ApplyResult::SecurityPolicy(policy) => Ok(policy),
             ApplyResult::Rejected(error) => Err(error),
@@ -1728,6 +2108,7 @@ impl ClusterManager {
         nodes: Vec<NodeDescriptor>,
         policy: SecurityPolicy,
     ) -> Result<SecurityPolicy, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         linearize_control(&active).await?;
         validate_cluster(&active, cluster).await?;
@@ -1746,23 +2127,17 @@ impl ClusterManager {
             nodes,
             current.desired_voters().iter().copied(),
         )?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            active
-                .control
-                .client_write(GroupCommand::ActivateSecuredTransport {
-                    request,
-                    topology,
-                    policy,
-                }),
+        let response = submitted_control_write(
+            &active,
+            GroupCommand::ActivateSecuredTransport {
+                request,
+                topology,
+                policy,
+            },
+            &permit,
+            None,
         )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Control,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, &active, ConsensusGroup::Control))?;
+        .await?;
         match response.data {
             ApplyResult::SecurityPolicy(policy) => Ok(policy),
             ApplyResult::Rejected(error) => Err(error),
@@ -1817,6 +2192,7 @@ impl ClusterManager {
             diagnostic.slot = Some(value.slot);
             diagnostic.cache_budget_bytes = Some(value.budget.cache_bytes);
             diagnostic.write_buffer_budget_bytes = Some(value.budget.write_buffer_bytes);
+            diagnostic.publish_queue = Some(value.publisher.snapshot());
             diagnostic
         }));
         NodeDiagnostic {
@@ -1840,6 +2216,7 @@ impl ClusterManager {
         group_id: u64,
         purge: bool,
     ) -> Result<SnapshotGroupResult, DomainError> {
+        let _permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         validate_cluster(&active, cluster).await?;
         match group_id {
@@ -1879,9 +2256,15 @@ impl ClusterManager {
         cluster: ClusterId,
         intent: AdministrationIntent,
     ) -> Result<AdministrationOperation, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         validate_cluster(&active, cluster).await?;
-        control_administration_write(&active, GroupCommand::BeginAdministration { intent }).await
+        control_administration_write(
+            &active,
+            GroupCommand::BeginAdministration { intent },
+            Some(&permit),
+        )
+        .await
     }
 
     pub async fn administration_operation(
@@ -1906,6 +2289,7 @@ impl ClusterManager {
         cluster: ClusterId,
         request: AdministrationRequestId,
     ) -> Result<AdministrationOperation, DomainError> {
+        let permit = self.lifecycle.try_admit_mutation()?;
         let active = self.application_cluster().await?;
         validate_cluster(&active, cluster).await?;
         if let Some(operation) = active.control_reader.administration_operation(request)?
@@ -1932,14 +2316,48 @@ impl ClusterManager {
                 });
             }
         }
-        control_administration_write(&active, GroupCommand::AbortAdministration { request }).await
+        control_administration_write(
+            &active,
+            GroupCommand::AbortAdministration { request },
+            Some(&permit),
+        )
+        .await
     }
 
     pub async fn shutdown(&self) -> Result<(), DomainError> {
-        if let Some(active) = self.active.read().await.as_ref() {
+        if let Some(active) = self.active.read().await.as_ref().cloned() {
             active.shutdown().await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn begin_shutdown(
+        &self,
+        maintenance_timeout: Duration,
+        drain_grace: Duration,
+    ) -> (Result<(), ShutdownPreparationError>, DrainOutcome) {
+        let drain_deadline = tokio::time::Instant::now() + drain_grace;
+        let drain = self.lifecycle.start_drain();
+        let guard = tokio::time::timeout_at(drain_deadline, self.bootstrap_lock.lock()).await;
+        let _guard = match guard {
+            Ok(guard) => guard,
+            Err(_) => {
+                let outcome = self.lifecycle.finish_drain(drain, drain_deadline).await;
+                return (Err(ShutdownPreparationError::BootstrapDeadline), outcome);
+            }
+        };
+        let maintenance_deadline =
+            (tokio::time::Instant::now() + maintenance_timeout).min(drain_deadline);
+        let maintenance = if let Some(active) = self.active.read().await.as_ref().cloned() {
+            active
+                .stop_maintenance(maintenance_deadline)
+                .await
+                .map_err(ShutdownPreparationError::from)
+        } else {
+            Ok(())
+        };
+        let outcome = self.lifecycle.finish_drain(drain, drain_deadline).await;
+        (maintenance, outcome)
     }
 
     async fn application_cluster(&self) -> Result<Arc<ActiveCluster>, DomainError> {
@@ -2079,11 +2497,12 @@ impl ClusterManager {
             operational: RwLock::new(BTreeMap::new()),
             peer_topology: None,
             topology_manifest_dirty: AtomicBool::new(false),
-            administration_task: Mutex::new(None),
+            maintenance: Mutex::new(None),
+            maintenance_unjoined: AtomicBool::new(false),
             administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
             publish_leader_hints,
             security: self.security.clone(),
-            maintenance_shutdown: AtomicBool::new(false),
+            lifecycle: self.lifecycle.clone(),
         })
     }
 
@@ -2217,11 +2636,12 @@ impl ClusterManager {
             operational: RwLock::new(BTreeMap::new()),
             peer_topology: None,
             topology_manifest_dirty: AtomicBool::new(false),
-            administration_task: Mutex::new(None),
+            maintenance: Mutex::new(None),
+            maintenance_unjoined: AtomicBool::new(false),
             administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
             publish_leader_hints,
             security: self.security.clone(),
-            maintenance_shutdown: AtomicBool::new(false),
+            lifecycle: self.lifecycle.clone(),
         })
     }
 
@@ -2437,13 +2857,123 @@ impl ClusterManager {
             operational: RwLock::new(BTreeMap::new()),
             peer_topology: Some(peer_topology),
             topology_manifest_dirty: AtomicBool::new(false),
-            administration_task: Mutex::new(None),
+            maintenance: Mutex::new(None),
+            maintenance_unjoined: AtomicBool::new(false),
             administration_delay: self.verification_delays.0.map(|(_, delay)| delay),
             publish_leader_hints,
             security: self.security.clone(),
-            maintenance_shutdown: AtomicBool::new(false),
+            lifecycle: self.lifecycle.clone(),
         })
     }
+}
+
+fn readiness_probe_endpoint(
+    peer_routes: &PeerRoutes,
+    leader: u64,
+    target: &NodeDescriptor,
+) -> String {
+    peer_routes
+        .get(leader)
+        .unwrap_or_else(|| target.peer_uri())
+        .to_owned()
+}
+
+async fn sample_remote_authority(
+    probes: Vec<AuthorityProbe>,
+    policy: ReadinessProbePolicy,
+) -> Vec<AuthorityProbeResult> {
+    sample_remote_authority_with(probes, policy, |probe, timeout| async move {
+        match peer::probe_write_authority_remote(
+            probe.cluster,
+            probe.group,
+            probe.sender,
+            &probe.endpoint,
+            &probe.target,
+            &probe.security,
+            timeout,
+        )
+        .await
+        {
+            Ok(true) => AuthorityProbeOutcome::Ready,
+            Ok(false) => AuthorityProbeOutcome::Stale,
+            Err(status) if status.code() == tonic::Code::Unimplemented => {
+                AuthorityProbeOutcome::Unsupported
+            }
+            Err(_) => AuthorityProbeOutcome::Stale,
+        }
+    })
+    .await
+}
+
+async fn sample_remote_authority_with<F, Fut>(
+    probes: Vec<AuthorityProbe>,
+    policy: ReadinessProbePolicy,
+    probe: F,
+) -> Vec<AuthorityProbeResult>
+where
+    F: Fn(AuthorityProbe, Duration) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = AuthorityProbeOutcome> + Send + 'static,
+{
+    let mut results = probes
+        .iter()
+        .map(|probe| {
+            (
+                probe.order,
+                AuthorityProbeResult {
+                    order: probe.order,
+                    group: probe.group,
+                    outcome: AuthorityProbeOutcome::Stale,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    if policy.max_in_flight == 0 {
+        return results.into_values().collect();
+    }
+
+    let mut pending = VecDeque::from(probes);
+    let mut in_flight = JoinSet::new();
+    while in_flight.len() < policy.max_in_flight {
+        let Some(next) = pending.pop_front() else {
+            break;
+        };
+        spawn_authority_probe(&mut in_flight, next, policy, probe.clone());
+    }
+    while let Some(joined) = in_flight.join_next().await {
+        if let Ok(result) = joined {
+            results.insert(result.order, result);
+        }
+        if let Some(next) = pending.pop_front() {
+            spawn_authority_probe(&mut in_flight, next, policy, probe.clone());
+        }
+    }
+    results.into_values().collect()
+}
+
+fn spawn_authority_probe<F, Fut>(
+    in_flight: &mut JoinSet<AuthorityProbeResult>,
+    authority: AuthorityProbe,
+    policy: ReadinessProbePolicy,
+    probe: F,
+) where
+    F: Fn(AuthorityProbe, Duration) -> Fut + Send + 'static,
+    Fut: Future<Output = AuthorityProbeOutcome> + Send + 'static,
+{
+    let order = authority.order;
+    let group = authority.group;
+    in_flight.spawn(async move {
+        let outcome = tokio::time::timeout(
+            policy.per_probe_timeout,
+            probe(authority, policy.per_probe_timeout),
+        )
+        .await
+        .unwrap_or(AuthorityProbeOutcome::Stale);
+        AuthorityProbeResult {
+            order,
+            group,
+            outcome,
+        }
+    });
 }
 
 fn leader_hints<'a>(
@@ -2526,124 +3056,123 @@ async fn sync_active_topology(
     Ok(())
 }
 
-fn spawn_topology_sync(active: Arc<ActiveCluster>, data_dir: PathBuf) {
-    tokio::spawn(async move {
-        while !active.maintenance_shutdown.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if active.maintenance_shutdown.load(Ordering::Acquire) {
-                break;
-            }
-
-            let topology = match active.control_reader.cluster_topology() {
-                Ok(Some(topology)) => topology,
-                Ok(None) => continue,
-                Err(error) => {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "event": "topology_sync_read_failed",
-                            "detail": error.to_string(),
-                        })
-                    );
-                    continue;
-                }
-            };
-            let changed = {
-                let manifest = active.manifest.read().await;
-                matches!(
-                    &*manifest,
-                    ActiveManifest::V2(manifest) if manifest.topology != topology
-                )
-            };
-            if !changed && !active.topology_manifest_dirty.load(Ordering::Acquire) {
-                continue;
-            }
-            if let Err(error) = sync_active_topology(&active, &topology).await {
+async fn topology_sync_loop(active: Weak<ActiveCluster>, data_dir: PathBuf, mut stop: StopToken) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        let Some(active) = active.upgrade() else {
+            return;
+        };
+        let topology = match active.control_reader.cluster_topology() {
+            Ok(Some(topology)) => topology,
+            Ok(None) => continue,
+            Err(error) => {
                 eprintln!(
                     "{}",
                     serde_json::json!({
-                        "event": "topology_sync_failed",
+                        "event": "topology_sync_read_failed",
                         "detail": error.to_string(),
                     })
                 );
                 continue;
             }
-            let manifest = active.manifest.read().await.clone();
-            if let ActiveManifest::V2(manifest) = manifest {
-                match write_manifest(&data_dir, &manifest) {
-                    Ok(()) => active
-                        .topology_manifest_dirty
-                        .store(false, Ordering::Release),
-                    Err(error) => {
-                        eprintln!(
-                            "{}",
-                            serde_json::json!({
-                                "event": "topology_manifest_write_failed",
-                                "detail": error.to_string(),
-                            })
-                        );
-                    }
+        };
+        let changed = {
+            let manifest = active.manifest.read().await;
+            matches!(
+                &*manifest,
+                ActiveManifest::V2(manifest) if manifest.topology != topology
+            )
+        };
+        if !changed && !active.topology_manifest_dirty.load(Ordering::Acquire) {
+            continue;
+        }
+        if let Err(error) = sync_active_topology(&active, &topology).await {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "topology_sync_failed",
+                    "detail": error.to_string(),
+                })
+            );
+            continue;
+        }
+        let manifest = active.manifest.read().await.clone();
+        if let ActiveManifest::V2(manifest) = manifest {
+            match write_manifest(&data_dir, &manifest) {
+                Ok(()) => active
+                    .topology_manifest_dirty
+                    .store(false, Ordering::Release),
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "topology_manifest_write_failed",
+                            "detail": error.to_string(),
+                        })
+                    );
                 }
             }
         }
-    });
+    }
 }
 
-async fn start_administration_reconciler(active: Arc<ActiveCluster>) {
-    if matches!(
-        &*active.manifest.read().await,
-        ActiveManifest::V2(NodeManifestV2 {
-            state: PersistedNodeState::Retired,
-            ..
-        })
-    ) {
-        return;
-    }
-    let task_active = active.clone();
-    let task = tokio::spawn(async move {
-        while !task_active.maintenance_shutdown.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            if task_active.maintenance_shutdown.load(Ordering::Acquire) {
-                break;
-            }
-            if matches!(
-                &*task_active.manifest.read().await,
-                ActiveManifest::V2(NodeManifestV2 {
-                    state: PersistedNodeState::Retired,
-                    ..
-                })
-            ) {
-                break;
-            }
-            let operation = match task_active.control_reader.active_administration() {
-                Ok(Some(operation)) => operation,
-                Ok(_) => continue,
-                Err(error) => {
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "event": "administration_read_failed",
-                            "detail": error.to_string(),
-                        })
-                    );
-                    continue;
-                }
-            };
-            if let Some(delay) = task_active.administration_delay {
-                tokio::time::sleep(delay).await;
-            }
-            if let Err(error) = reconcile_administration(&task_active, operation).await {
+async fn administration_reconciler_loop(active: Weak<ActiveCluster>, mut stop: StopToken) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+        let Some(active) = active.upgrade() else {
+            return;
+        };
+        if matches!(
+            &*active.manifest.read().await,
+            ActiveManifest::V2(NodeManifestV2 {
+                state: PersistedNodeState::Retired,
+                ..
+            })
+        ) {
+            return;
+        }
+        let operation = match active.control_reader.active_administration() {
+            Ok(Some(operation)) => operation,
+            Ok(_) => continue,
+            Err(error) => {
                 eprintln!(
                     "{}",
                     serde_json::json!({
-                        "event": "administration_reconcile_failed",
+                        "event": "administration_read_failed",
                         "detail": error.to_string(),
                     })
                 );
+                continue;
+            }
+        };
+        if let Some(delay) = active.administration_delay {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => return,
+                _ = tokio::time::sleep(delay) => {}
             }
         }
-    });
-    *active.administration_task.lock().await = Some(task);
+        if stop.is_stopping() {
+            return;
+        }
+        if let Err(error) = reconcile_administration(&active, operation).await {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "administration_reconcile_failed",
+                    "detail": error.to_string(),
+                })
+            );
+        }
+    }
 }
 
 async fn reconcile_administration(
@@ -2680,6 +3209,7 @@ async fn reconcile_administration(
                 GroupCommand::FinishAdministrationAbort {
                     request: operation.intent().request(),
                 },
+                None,
             )
             .await?;
         }
@@ -2781,6 +3311,7 @@ async fn reconcile_administration(
                 control_administration_write(
                     active,
                     GroupCommand::CompleteAdministration { request: *request },
+                    None,
                 )
                 .await?;
             }
@@ -2808,6 +3339,7 @@ async fn reconcile_administration(
                 control_administration_write(
                     active,
                     GroupCommand::CompleteAdministration { request: *request },
+                    None,
                 )
                 .await?;
             }
@@ -2974,7 +3506,7 @@ async fn ensure_control_topology(
         None => {}
     }
     let metrics = active.control.metrics().borrow_watched().clone();
-    if metrics.state != ServerState::Leader || metrics.last_quorum_acked.is_none() {
+    if metrics.state != ServerState::Leader || !has_recent_quorum(&metrics) {
         return Ok(());
     }
     let response = active
@@ -3352,9 +3884,65 @@ async fn linearize_control(active: &Arc<ActiveCluster>) -> Result<(), DomainErro
     .await
 }
 
+async fn submitted_control_write(
+    active: &Arc<ActiveCluster>,
+    command: GroupCommand,
+    permit: &MutationPermit,
+    request: Option<AmbiguousRequest>,
+) -> Result<ClientWriteResponse<ControlRaftConfig>, DomainError> {
+    let raft = active.control.clone();
+    let retained_permit = permit.clone();
+    let mut submitted = tokio::spawn(async move {
+        let _permit = retained_permit;
+        raft.client_write(command).await
+    });
+    match tokio::time::timeout(OPERATION_TIMEOUT, &mut submitted).await {
+        Ok(Ok(result)) => {
+            result.map_err(|error| map_write_error(error, active, ConsensusGroup::Control))
+        }
+        Ok(Err(error)) => Err(DomainError::Storage {
+            reason: format!("submitted control mutation task failed: {error}"),
+        }),
+        Err(_) => Err(DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Control,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request,
+        }),
+    }
+}
+
+async fn submitted_data_write(
+    active: &Arc<ActiveCluster>,
+    group: &DataGroup,
+    command: GroupCommand,
+    permit: &MutationPermit,
+    request: Option<AmbiguousRequest>,
+) -> Result<ClientWriteResponse<DataRaftConfig>, DomainError> {
+    let raft = group.raft.clone();
+    let retained_permit = permit.clone();
+    let mut submitted = tokio::spawn(async move {
+        let _permit = retained_permit;
+        raft.client_write(command).await
+    });
+    match tokio::time::timeout(OPERATION_TIMEOUT, &mut submitted).await {
+        Ok(Ok(result)) => {
+            result.map_err(|error| map_write_error(error, active, ConsensusGroup::Data))
+        }
+        Ok(Err(error)) => Err(DomainError::Storage {
+            reason: format!("submitted data mutation task failed: {error}"),
+        }),
+        Err(_) => Err(DomainError::QuorumUnavailable {
+            group: ConsensusGroup::Data,
+            outcome: RequestOutcome::AmbiguousCommit,
+            request,
+        }),
+    }
+}
+
 async fn control_write(
     active: &Arc<ActiveCluster>,
     command: GroupCommand,
+    permit: &MutationPermit,
 ) -> Result<StreamDescriptor, DomainError> {
     require_operational_leader(
         active,
@@ -3365,14 +3953,7 @@ async fn control_write(
         None,
     )
     .await?;
-    let response = tokio::time::timeout(OPERATION_TIMEOUT, active.control.client_write(command))
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Control,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, active, ConsensusGroup::Control))?;
+    let response = submitted_control_write(active, command, permit, None).await?;
     match response.data {
         ApplyResult::Stream(value) => Ok(value),
         ApplyResult::Rejected(error) => Err(error),
@@ -3385,6 +3966,7 @@ async fn control_write(
 async fn control_administration_write(
     active: &Arc<ActiveCluster>,
     command: GroupCommand,
+    permit: Option<&MutationPermit>,
 ) -> Result<AdministrationOperation, DomainError> {
     require_operational_leader(
         active,
@@ -3395,14 +3977,18 @@ async fn control_administration_write(
         None,
     )
     .await?;
-    let response = tokio::time::timeout(OPERATION_TIMEOUT, active.control.client_write(command))
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Control,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, active, ConsensusGroup::Control))?;
+    let response = if let Some(permit) = permit {
+        submitted_control_write(active, command, permit, None).await?
+    } else {
+        tokio::time::timeout(OPERATION_TIMEOUT, active.control.client_write(command))
+            .await
+            .map_err(|_| DomainError::QuorumUnavailable {
+                group: ConsensusGroup::Control,
+                outcome: RequestOutcome::AmbiguousCommit,
+                request: None,
+            })?
+            .map_err(|error| map_write_error(error, active, ConsensusGroup::Control))?
+    };
     match response.data {
         ApplyResult::Administration(operation) => Ok(operation),
         ApplyResult::Rejected(error) => Err(error),
@@ -3604,6 +4190,7 @@ async fn maintain_group_retention(
     active: &Arc<ActiveCluster>,
     group: &DataGroup,
     partition: PartitionKey,
+    permit: Option<&MutationPermit>,
 ) -> Result<RetentionStatus, DomainError> {
     for _ in 0..64 {
         let observation = lease_clock_observation()?;
@@ -3615,23 +4202,25 @@ async fn maintain_group_retention(
             return group.reader.retention_status(partition);
         }
         let status = group.reader.retention_status(partition)?;
-        let response = tokio::time::timeout(
-            OPERATION_TIMEOUT,
-            group.raft.client_write(GroupCommand::MaintainRetention {
-                partition,
-                expected_cursor: status.reclaim_cursor(),
-                max_records: 1024,
-                max_payload_bytes: 8 * 1024 * 1024,
-                clock: observation,
-            }),
-        )
-        .await
-        .map_err(|_| DomainError::QuorumUnavailable {
-            group: ConsensusGroup::Data,
-            outcome: RequestOutcome::AmbiguousCommit,
-            request: None,
-        })?
-        .map_err(|error| map_write_error(error, active, ConsensusGroup::Data))?;
+        let command = GroupCommand::MaintainRetention {
+            partition,
+            expected_cursor: status.reclaim_cursor(),
+            max_records: 1024,
+            max_payload_bytes: 8 * 1024 * 1024,
+            clock: observation,
+        };
+        let response = if let Some(permit) = permit {
+            submitted_data_write(active, group, command, permit, None).await?
+        } else {
+            tokio::time::timeout(OPERATION_TIMEOUT, group.raft.client_write(command))
+                .await
+                .map_err(|_| DomainError::QuorumUnavailable {
+                    group: ConsensusGroup::Data,
+                    outcome: RequestOutcome::AmbiguousCommit,
+                    request: None,
+                })?
+                .map_err(|error| map_write_error(error, active, ConsensusGroup::Data))?
+        };
         match response.data {
             ApplyResult::RetentionStatus(next) => {
                 if next.reclaim_cursor() == status.reclaim_cursor()
@@ -3656,102 +4245,97 @@ async fn maintain_group_retention(
     })
 }
 
-fn spawn_retention_maintenance(active: Arc<ActiveCluster>) {
-    tokio::spawn(async move {
-        while !active.maintenance_shutdown.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            if active.maintenance_shutdown.load(Ordering::Acquire) {
-                break;
+async fn retention_maintenance_loop(active: Weak<ActiveCluster>, mut stop: StopToken) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        }
+        let Some(active) = active.upgrade() else {
+            return;
+        };
+        for group in active.data.values() {
+            if stop.is_stopping() {
+                return;
             }
-            for group in active.data.values() {
-                if group.raft.metrics().borrow_watched().state != ServerState::Leader {
+            if group.raft.metrics().borrow_watched().state != ServerState::Leader {
+                continue;
+            }
+            let partitions = match group.reader.retention_partitions() {
+                Ok(partitions) => partitions,
+                Err(error) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "retention_partition_scan_failed",
+                            "detail": error.to_string(),
+                        })
+                    );
                     continue;
                 }
-                let partitions = match group.reader.retention_partitions() {
-                    Ok(partitions) => partitions,
+            };
+            for partition in partitions {
+                if stop.is_stopping() {
+                    return;
+                }
+                let observation = match lease_clock_observation() {
+                    Ok(observation) => observation,
                     Err(error) => {
                         eprintln!(
                             "{}",
                             serde_json::json!({
-                                "event": "retention_partition_scan_failed",
+                                "event": "retention_clock_unavailable",
                                 "detail": error.to_string(),
                             })
                         );
-                        continue;
+                        break;
                     }
                 };
-                for partition in partitions {
-                    let observation = match lease_clock_observation() {
-                        Ok(observation) => observation,
-                        Err(error) => {
+                match group
+                    .reader
+                    .retention_maintenance_needed(partition, observation.lower_bound())
+                {
+                    Ok(true) => {
+                        if stop.is_stopping() {
+                            return;
+                        }
+                        if let Err(error) =
+                            maintain_group_retention(&active, group, partition, None).await
+                        {
                             eprintln!(
                                 "{}",
                                 serde_json::json!({
-                                    "event": "retention_clock_unavailable",
-                                    "detail": error.to_string(),
-                                })
-                            );
-                            break;
-                        }
-                    };
-                    match group
-                        .reader
-                        .retention_maintenance_needed(partition, observation.lower_bound())
-                    {
-                        Ok(true) => {
-                            if let Err(error) =
-                                maintain_group_retention(&active, group, partition).await
-                            {
-                                eprintln!(
-                                    "{}",
-                                    serde_json::json!({
-                                        "event": "retention_background_maintenance_failed",
-                                        "partition": partition,
-                                        "detail": error.to_string(),
-                                    })
-                                );
-                            }
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            eprintln!(
-                                "{}",
-                                serde_json::json!({
-                                    "event": "retention_maintenance_probe_failed",
+                                    "event": "retention_background_maintenance_failed",
                                     "partition": partition,
                                     "detail": error.to_string(),
                                 })
                             );
                         }
                     }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "retention_maintenance_probe_failed",
+                                "partition": partition,
+                                "detail": error.to_string(),
+                            })
+                        );
+                    }
                 }
             }
         }
-    });
-}
-
-fn spawn_operational_probes(active: Arc<ActiveCluster>) {
-    spawn_operational_probe(
-        active.clone(),
-        GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
-        active.control.clone(),
-        active.control_reader.clone(),
-    );
-    for group in active.data.values() {
-        spawn_operational_probe(
-            active.clone(),
-            group.group_id,
-            group.raft.clone(),
-            group.reader.clone(),
-        );
     }
 }
 
-fn spawn_operational_probe<C>(
-    active: Arc<ActiveCluster>,
+async fn operational_probe_loop<C>(
+    active: Weak<ActiveCluster>,
     group: GroupId,
     raft: Raft<C, RocksStateMachine<C>>,
     reader: CommittedStateReader,
+    mut stop: StopToken,
 ) where
     C: openraft::RaftTypeConfig<
             D = GroupCommand,
@@ -3763,84 +4347,89 @@ fn spawn_operational_probe<C>(
     RocksStateMachine<C>:
         openraft::storage::RaftStateMachine<C, SnapshotData = SnapshotArtifact> + 'static,
 {
-    tokio::spawn(async move {
-        while !active.maintenance_shutdown.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            if active.maintenance_shutdown.load(Ordering::Acquire) {
-                break;
-            }
-            if !active.manifest.read().await.is_application_active() {
-                continue;
-            }
-            let metrics = raft.metrics().borrow_watched().clone();
-            if metrics.state != ServerState::Leader || metrics.last_quorum_acked.is_none() {
-                active.operational.write().await.remove(&group.get());
-                continue;
-            }
-            let leader = match NodeId::new(metrics.id) {
-                Ok(leader) => leader,
-                Err(_) => continue,
-            };
-            let applied = metrics.last_applied.map_or(0, |value| value.index);
-            if active
-                .operational
-                .read()
-                .await
-                .get(&group.get())
-                .is_some_and(|proof| proof.matches(leader, metrics.current_term, applied))
-            {
-                continue;
-            }
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+        let Some(active) = active.upgrade() else {
+            return;
+        };
+        if !active.manifest.read().await.is_application_active() {
+            continue;
+        }
+        let metrics = raft.metrics().borrow_watched().clone();
+        if metrics.state != ServerState::Leader || !has_recent_quorum(&metrics) {
             active.operational.write().await.remove(&group.get());
-            if let Ok(Some(proof)) = reader.operational_proof()
-                && proof.matches(leader, metrics.current_term, applied)
-                && matches!(
-                    tokio::time::timeout(
-                        OPERATION_TIMEOUT,
-                        raft.ensure_linearizable(ReadPolicy::ReadIndex),
-                    )
-                    .await,
-                    Ok(Ok(_))
-                )
-            {
-                active.operational.write().await.insert(group.get(), proof);
-                continue;
-            }
-            let response = tokio::time::timeout(
-                OPERATION_TIMEOUT,
-                raft.client_write(GroupCommand::OperationalProbe { group }),
-            )
-            .await;
-            let Ok(Ok(response)) = response else {
-                continue;
-            };
-            let ApplyResult::OperationalProof(proof) = response.data else {
-                continue;
-            };
-            if !matches!(
+            continue;
+        }
+        let leader = match NodeId::new(metrics.id) {
+            Ok(leader) => leader,
+            Err(_) => continue,
+        };
+        let applied = metrics.last_applied.map_or(0, |value| value.index);
+        if active
+            .operational
+            .read()
+            .await
+            .get(&group.get())
+            .is_some_and(|proof| proof.matches(leader, metrics.current_term, applied))
+        {
+            continue;
+        }
+        active.operational.write().await.remove(&group.get());
+        if let Ok(Some(proof)) = reader.operational_proof()
+            && proof.matches(leader, metrics.current_term, applied)
+            && matches!(
                 tokio::time::timeout(
                     OPERATION_TIMEOUT,
                     raft.ensure_linearizable(ReadPolicy::ReadIndex),
                 )
                 .await,
                 Ok(Ok(_))
-            ) {
-                continue;
-            }
-            let metrics = raft.metrics().borrow_watched().clone();
-            let applied = metrics.last_applied.map_or(0, |value| value.index);
-            let stored = match reader.operational_proof() {
-                Ok(Some(stored)) => stored,
-                _ => continue,
-            };
-            if stored == proof
-                && proof.matches(leader, metrics.current_term, applied)
-                && metrics.state == ServerState::Leader
-            {
-                active.operational.write().await.insert(group.get(), proof);
-            }
+            )
+        {
+            active.operational.write().await.insert(group.get(), proof);
+            continue;
         }
-    });
+        if stop.is_stopping() {
+            return;
+        }
+        let response = tokio::time::timeout(
+            OPERATION_TIMEOUT,
+            raft.client_write(GroupCommand::OperationalProbe { group }),
+        )
+        .await;
+        let Ok(Ok(response)) = response else {
+            continue;
+        };
+        let ApplyResult::OperationalProof(proof) = response.data else {
+            continue;
+        };
+        if !matches!(
+            tokio::time::timeout(
+                OPERATION_TIMEOUT,
+                raft.ensure_linearizable(ReadPolicy::ReadIndex),
+            )
+            .await,
+            Ok(Ok(_))
+        ) {
+            continue;
+        }
+        let metrics = raft.metrics().borrow_watched().clone();
+        let applied = metrics.last_applied.map_or(0, |value| value.index);
+        let stored = match reader.operational_proof() {
+            Ok(Some(stored)) => stored,
+            _ => continue,
+        };
+        if stored == proof
+            && proof.matches(leader, metrics.current_term, applied)
+            && metrics.state == ServerState::Leader
+        {
+            active.operational.write().await.insert(group.get(), proof);
+        }
+    }
 }
 
 fn map_write_error<C>(
@@ -3958,6 +4547,7 @@ where
         slot: None,
         cache_budget_bytes: None,
         write_buffer_budget_bytes: None,
+        publish_queue: None,
     }
 }
 
@@ -4113,7 +4703,7 @@ fn raft_config(cluster_name: String, replicated: bool) -> Result<Arc<Config>, Do
     let config = Config {
         cluster_name,
         election_timeout_min: 300,
-        election_timeout_max: 600,
+        election_timeout_max: RAFT_ELECTION_TIMEOUT_MAX_MS,
         heartbeat_interval: 75,
         enable_pre_vote: Some(true),
         snapshot_policy: if replicated {
@@ -4262,9 +4852,19 @@ fn internal_status(error: impl std::fmt::Display) -> tonic::Status {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
     use uuid::Uuid;
 
     use super::*;
+
+    struct ActiveProbe(Arc<AtomicUsize>);
+
+    impl Drop for ActiveProbe {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, AtomicOrdering::AcqRel);
+        }
+    }
 
     fn local(node_id: u64) -> NodeDescriptor {
         NodeDescriptor::new(
@@ -4282,7 +4882,196 @@ mod tests {
             publish_scheduler: PublishSchedulerConfig::default(),
             verification_delays: (None, None),
             security: RuntimeSecurityConfig::LocalInsecure,
+            lifecycle: LifecycleController::starting(),
         }
+    }
+
+    fn authority_probe(order: usize, group: u64) -> AuthorityProbe {
+        AuthorityProbe {
+            order,
+            cluster: ClusterId::from_uuid(Uuid::new_v4()),
+            group: GroupId::new(group).unwrap(),
+            sender: NodeId::new(1).unwrap(),
+            endpoint: local(2).peer_uri().to_owned(),
+            target: local(2),
+            security: RuntimeSecurityConfig::LocalInsecure,
+        }
+    }
+
+    #[tokio::test]
+    async fn remote_authority_sampling_is_bounded_timed_and_ordered() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let probes = (0..6)
+            .map(|order| authority_probe(order, order as u64 + 1))
+            .collect();
+        let results = sample_remote_authority_with(
+            probes,
+            ReadinessProbePolicy {
+                max_in_flight: 2,
+                per_probe_timeout: Duration::from_millis(20),
+            },
+            {
+                let active = active.clone();
+                let maximum = maximum.clone();
+                move |probe, _| {
+                    let active = active.clone();
+                    let maximum = maximum.clone();
+                    async move {
+                        let current = active.fetch_add(1, AtomicOrdering::AcqRel) + 1;
+                        let _active_probe = ActiveProbe(active);
+                        maximum.fetch_max(current, AtomicOrdering::AcqRel);
+                        let delay = if probe.order == 3 { 50 } else { 5 };
+                        tokio::time::sleep(Duration::from_millis(delay)).await;
+                        if probe.order == 4 {
+                            AuthorityProbeOutcome::Unsupported
+                        } else {
+                            AuthorityProbeOutcome::Ready
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert!(maximum.load(AtomicOrdering::Acquire) <= 2);
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.order)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(results[3].outcome, AuthorityProbeOutcome::Stale);
+        assert_eq!(results[4].outcome, AuthorityProbeOutcome::Unsupported);
+    }
+
+    #[test]
+    fn readiness_probe_uses_peer_route_without_changing_peer_identity() {
+        let target = local(2);
+        let routes = PeerRoutes::parse(vec!["2=http://127.0.0.1:8202".to_owned()], 1).unwrap();
+
+        assert_eq!(
+            readiness_probe_endpoint(&routes, 2, &target),
+            "http://127.0.0.1:8202"
+        );
+        assert_eq!(target.peer_uri(), "http://127.0.0.1:7202");
+    }
+
+    #[tokio::test]
+    async fn shutdown_blocks_late_cluster_activation() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/light-stream-server/shutdown-activation");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let manager = Arc::new(
+            ClusterManager::open(path.clone(), local(1), manager_config())
+                .await
+                .unwrap(),
+        );
+        let held = manager.bootstrap_lock.lock().await;
+        let shutdown_manager = manager.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_manager
+                .begin_shutdown(Duration::from_secs(1), Duration::from_secs(1))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let spec = BootstrapSpec::new(
+            ClusterId::from_uuid(Uuid::new_v4()),
+            light_stream_core::StreamId::from_uuid(Uuid::new_v4()),
+            light_stream_core::StreamName::parse("shutdown").unwrap(),
+        );
+        let bootstrap_manager = manager.clone();
+        let bootstrap = tokio::spawn(async move {
+            bootstrap_manager
+                .bootstrap(BootstrapCommand::standalone(spec))
+                .await
+        });
+        tokio::task::yield_now().await;
+        drop(held);
+
+        let (maintenance, drain) = shutdown.await.unwrap();
+        maintenance.unwrap();
+        assert_eq!(drain, DrainOutcome::Completed { accepted: 0 });
+        assert!(matches!(
+            bootstrap.await.unwrap(),
+            Err(DomainError::ShuttingDown { .. })
+        ));
+        assert!(manager.active.read().await.is_none());
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn shutdown_deadline_bounds_bootstrap_lock_wait() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/light-stream-server/shutdown-bootstrap-deadline");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let manager = Arc::new(
+            ClusterManager::open(path.clone(), local(1), manager_config())
+                .await
+                .unwrap(),
+        );
+        let held = manager.bootstrap_lock.lock().await;
+        let started = tokio::time::Instant::now();
+
+        let (maintenance, drain) = manager
+            .begin_shutdown(Duration::from_secs(1), Duration::from_millis(25))
+            .await;
+
+        assert!(matches!(
+            maintenance,
+            Err(ShutdownPreparationError::BootstrapDeadline)
+        ));
+        assert_eq!(drain, DrainOutcome::Completed { accepted: 0 });
+        assert!(started.elapsed() < Duration::from_secs(1));
+        drop(held);
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_waiting_for_lock_is_not_admitted() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/light-stream-server/cancelled-bootstrap");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let manager = Arc::new(
+            ClusterManager::open(path.clone(), local(1), manager_config())
+                .await
+                .unwrap(),
+        );
+        let held = manager.bootstrap_lock.lock().await;
+        let spec = BootstrapSpec::new(
+            ClusterId::from_uuid(Uuid::new_v4()),
+            light_stream_core::StreamId::from_uuid(Uuid::new_v4()),
+            light_stream_core::StreamName::parse("cancelled-bootstrap").unwrap(),
+        );
+        let bootstrap_manager = manager.clone();
+        let bootstrap = tokio::spawn(async move {
+            bootstrap_manager
+                .bootstrap(BootstrapCommand::standalone(spec))
+                .await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            manager
+                .lifecycle
+                .admission_drain_snapshot()
+                .mutations_in_flight,
+            0
+        );
+        bootstrap.abort();
+        let _ = bootstrap.await;
+        drop(held);
+        assert!(manager.identity().await.is_none());
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
     }
 
     #[tokio::test]
@@ -4291,9 +5080,11 @@ mod tests {
             .join("../../target/test-data/light-stream-server/bootstrap");
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
-        let manager = ClusterManager::open(path.clone(), local(1), manager_config())
-            .await
-            .unwrap();
+        let manager = Arc::new(
+            ClusterManager::open(path.clone(), local(1), manager_config())
+                .await
+                .unwrap(),
+        );
         assert!(manager.identity().await.is_none());
         let spec = BootstrapSpec::new(
             ClusterId::from_uuid(Uuid::new_v4()),
