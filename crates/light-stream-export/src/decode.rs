@@ -28,6 +28,7 @@ use crate::{
 
 const PROLOGUE_BYTES: u64 = 20;
 const SECTION_HEADER_BYTES: u64 = 52;
+const CANCELLABLE_IO_CHUNK_BYTES: usize = 64 * 1024;
 
 pub(crate) struct DecodeBudget {
     max_streams: u64,
@@ -142,9 +143,22 @@ fn model_count<T>(values: &[T], limit: &'static str) -> Result<u64, VerifyError>
 }
 
 pub(crate) fn verify<R: Read + Seek>(
-    mut reader: R,
+    reader: R,
     limits: &ExportLimits,
 ) -> Result<VerifiedExport<R>, VerifyError> {
+    verify_cancellable(reader, limits, || false)
+}
+
+pub(crate) fn verify_cancellable<R, C>(
+    mut reader: R,
+    limits: &ExportLimits,
+    mut cancelled: C,
+) -> Result<VerifiedExport<R>, VerifyError>
+where
+    R: Read + Seek,
+    C: FnMut() -> bool,
+{
+    check_cancelled(&mut cancelled)?;
     let actual_length = reader.seek(SeekFrom::End(0))?;
     if actual_length > limits.max_artifact_bytes {
         return Err(VerifyError::Limit {
@@ -166,7 +180,7 @@ pub(crate) fn verify<R: Read + Seek>(
         .ok_or(VerifyError::Truncated)?;
     reader.seek(SeekFrom::Start(trailer_start))?;
     let mut trailer = [0_u8; TRAILER_BYTES_V1 as usize];
-    reader.read_exact(&mut trailer).map_err(map_eof)?;
+    read_exact_cancellable(&mut reader, &mut trailer, &mut cancelled)?;
     let mut trailer_decoder = Decoder::new(&trailer);
     let manifest_offset = trailer_decoder.u64()?;
     let declared_length = trailer_decoder.u64()?;
@@ -195,9 +209,7 @@ pub(crate) fn verify<R: Read + Seek>(
 
     reader.seek(SeekFrom::Start(manifest_offset))?;
     let mut manifest_length_bytes = [0_u8; 8];
-    reader
-        .read_exact(&mut manifest_length_bytes)
-        .map_err(map_eof)?;
+    read_exact_cancellable(&mut reader, &mut manifest_length_bytes, &mut cancelled)?;
     let manifest_length = u64::from_be_bytes(manifest_length_bytes);
     if manifest_length > limits.max_manifest_bytes {
         return Err(VerifyError::Limit {
@@ -223,15 +235,15 @@ pub(crate) fn verify<R: Read + Seek>(
         limit: "manifest bytes",
     })?;
     let mut manifest_bytes = vec![0_u8; manifest_size];
-    reader.read_exact(&mut manifest_bytes).map_err(map_eof)?;
+    read_exact_cancellable(&mut reader, &mut manifest_bytes, &mut cancelled)?;
     let mut budget = DecodeBudget::new(limits);
-    let manifest = decode_manifest(&manifest_bytes, limits, &mut budget)?;
+    let manifest = decode_manifest(&manifest_bytes, limits, &mut budget, &mut cancelled)?;
     validate_manifest(&manifest, limits)?;
 
     reader.seek(SeekFrom::Start(0))?;
     let mut hashing_reader = HashingReader::new(&mut reader, manifest_end);
     let mut prologue = [0_u8; PROLOGUE_BYTES as usize];
-    hashing_reader.read_exact(&mut prologue).map_err(map_eof)?;
+    read_exact_cancellable(&mut hashing_reader, &mut prologue, &mut cancelled)?;
     let mut prologue_decoder = Decoder::new(&prologue);
     if prologue_decoder.take(8)? != MAGIC_V1 {
         return Err(VerifyError::Invalid {
@@ -264,19 +276,22 @@ pub(crate) fn verify<R: Read + Seek>(
         limits,
         &mut budget,
         &mut visitor,
+        &mut cancelled,
     ) {
         Ok(()) => {}
         Err(VisitError::Verify(error)) => return Err(error),
         Err(VisitError::Visitor(error)) => match error {},
     }
     let mut verified_manifest_length_bytes = [0_u8; 8];
-    hashing_reader
-        .read_exact(&mut verified_manifest_length_bytes)
-        .map_err(map_eof)?;
+    read_exact_cancellable(
+        &mut hashing_reader,
+        &mut verified_manifest_length_bytes,
+        &mut cancelled,
+    )?;
     if verified_manifest_length_bytes != manifest_length_bytes {
         return Err(VerifyError::Digest { scope: "artifact" });
     }
-    compare_bytes(&mut hashing_reader, &manifest_bytes)?;
+    compare_bytes(&mut hashing_reader, &manifest_bytes, &mut cancelled)?;
     let actual_digest = hashing_reader.finalize();
     if actual_digest != expected_digest {
         return Err(VerifyError::Digest { scope: "artifact" });
@@ -374,9 +389,21 @@ impl<R> Seek for HashingReader<'_, R> {
 }
 
 impl<R: Read + Seek> VerifiedExport<R> {
-    pub fn visit_sections<E, F>(self, mut visitor: F) -> Result<R, VisitError<E>>
+    pub fn visit_sections<E, F>(self, visitor: F) -> Result<R, VisitError<E>>
     where
         F: for<'a> FnMut(VerifiedSectionV1<'a>) -> Result<(), E>,
+    {
+        self.visit_sections_cancellable(visitor, || false)
+    }
+
+    pub fn visit_sections_cancellable<E, F, C>(
+        self,
+        mut visitor: F,
+        mut cancelled: C,
+    ) -> Result<R, VisitError<E>>
+    where
+        F: for<'a> FnMut(VerifiedSectionV1<'a>) -> Result<(), E>,
+        C: FnMut() -> bool,
     {
         let VerifiedExport {
             mut reader,
@@ -392,6 +419,7 @@ impl<R: Read + Seek> VerifiedExport<R> {
             &limits,
             &mut budget,
             &mut visitor,
+            &mut cancelled,
         )?;
         Ok(reader)
     }
@@ -404,10 +432,12 @@ fn walk_sections<R: Read + Seek, E, F>(
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
     visitor: &mut F,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(), VisitError<E>>
 where
     F: for<'a> FnMut(VerifiedSectionV1<'a>) -> Result<(), E>,
 {
+    check_cancelled(cancelled)?;
     let expected_sections = manifest
         .cut
         .data()
@@ -436,8 +466,9 @@ where
         offset,
         manifest_offset,
         limits,
+        cancelled,
     )?;
-    let control = decode_control(&control_payload, limits, budget)?;
+    let control = decode_control(&control_payload, limits, budget, cancelled)?;
     if u64::try_from(control.streams.len()).map_err(|_| VerifyError::Limit { limit: "streams" })?
         != control_descriptor.item_count
     {
@@ -454,6 +485,7 @@ where
     let mut validation = DataValidation::default();
 
     for (index, (expected_group, expected_cut)) in manifest.cut.data().iter().enumerate() {
+        check_cancelled(cancelled)?;
         let section_index = index.checked_add(1).ok_or(VerifyError::Limit {
             limit: "section count",
         })?;
@@ -477,8 +509,9 @@ where
             offset,
             manifest_offset,
             limits,
+            cancelled,
         )?;
-        let data = decode_data_group(&payload, limits, budget)?;
+        let data = decode_data_group(&payload, limits, budget, cancelled)?;
         if u64::try_from(data.partitions.len()).map_err(|_| VerifyError::Limit {
             limit: "partitions",
         })? != descriptor.item_count
@@ -531,7 +564,9 @@ fn read_section<R: Read + Seek>(
     offset: u64,
     manifest_offset: u64,
     limits: &ExportLimits,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<(Vec<u8>, u64), VerifyError> {
+    check_cancelled(cancelled)?;
     if descriptor.ordinal != expected.ordinal || descriptor.file_offset != offset {
         return Err(VerifyError::NonCanonical {
             field: "section descriptors",
@@ -547,7 +582,7 @@ fn read_section<R: Read + Seek>(
     }
     reader.seek(SeekFrom::Start(offset))?;
     let mut header = [0_u8; SECTION_HEADER_BYTES as usize];
-    reader.read_exact(&mut header).map_err(map_eof)?;
+    read_exact_cancellable(reader, &mut header, cancelled)?;
     let mut header_decoder = Decoder::new(&header);
     let kind = header_decoder.u16()?;
     let version = header_decoder.u16()?;
@@ -590,7 +625,8 @@ fn read_section<R: Read + Seek>(
         limit: "section bytes",
     })?;
     let mut payload = vec![0_u8; payload_size];
-    reader.read_exact(&mut payload).map_err(map_eof)?;
+    read_exact_cancellable(reader, &mut payload, cancelled)?;
+    check_cancelled(cancelled)?;
     if <[u8; 32]>::from(Sha256::digest(&payload)) != payload_digest {
         return Err(VerifyError::Digest {
             scope: match expected.kind {
@@ -606,7 +642,9 @@ fn decode_control(
     payload: &[u8],
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ControlSectionV1, VerifyError> {
+    check_cancelled(cancelled)?;
     let mut decoder = Decoder::new(payload);
     let source_cluster = decoder.cluster()?;
     let export_id = decoder.export()?;
@@ -618,13 +656,15 @@ fn decode_control(
     let group_count = count(&mut decoder, u64::from(MAX_DATA_GROUPS), "data groups", 8)?;
     let mut configured_data_groups = Vec::with_capacity(capacity(group_count, "data groups")?);
     for _ in 0..group_count {
+        check_cancelled(cancelled)?;
         configured_data_groups.push(decoder.group()?);
     }
     let stream_count = count(&mut decoder, limits.max_streams, "streams", 77)?;
     budget.reserve_streams(stream_count)?;
     let mut streams = Vec::with_capacity(capacity(stream_count, "streams")?);
     for _ in 0..stream_count {
-        streams.push(decode_stream(&mut decoder, limits, budget)?);
+        check_cancelled(cancelled)?;
+        streams.push(decode_stream(&mut decoder, limits, budget, cancelled)?);
     }
     decoder.finish("control payload")?;
     Ok(ControlSectionV1 {
@@ -644,7 +684,9 @@ fn decode_stream(
     decoder: &mut Decoder<'_>,
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ActiveStreamV1, VerifyError> {
+    check_cancelled(cancelled)?;
     let cluster = decoder.cluster()?;
     let stream = decoder.stream()?;
     let name = decoder.stream_name()?;
@@ -658,6 +700,7 @@ fn decode_stream(
     budget.reserve_partitions(placement_count)?;
     let mut placements = Vec::with_capacity(capacity(placement_count, "partitions")?);
     for _ in 0..placement_count {
+        check_cancelled(cancelled)?;
         placements.push(PartitionPlacement::new(
             PartitionId::new(decoder.u32()?),
             decoder.group()?,
@@ -666,6 +709,7 @@ fn decode_stream(
     let ready_count = count(decoder, u64::from(MAX_DATA_GROUPS), "ready data groups", 8)?;
     let mut ready_groups = Vec::with_capacity(capacity(ready_count, "ready data groups")?);
     for _ in 0..ready_count {
+        check_cancelled(cancelled)?;
         ready_groups.push(decoder.group()?);
     }
     let bookmark_publication_ceiling = BookmarkPublicationSequence::new(decoder.u64()?);
@@ -673,7 +717,8 @@ fn decode_stream(
     budget.reserve_bookmarks(bookmark_count)?;
     let mut bookmarks = Vec::with_capacity(capacity(bookmark_count, "bookmarks")?);
     for _ in 0..bookmark_count {
-        bookmarks.push(decode_stream_bookmark(decoder, limits, budget)?);
+        check_cancelled(cancelled)?;
+        bookmarks.push(decode_stream_bookmark(decoder, limits, budget, cancelled)?);
     }
     Ok(ActiveStreamV1 {
         descriptor: StreamDescriptor::new(
@@ -694,7 +739,9 @@ fn decode_stream_bookmark(
     decoder: &mut Decoder<'_>,
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<CommittedStreamBookmark, VerifyError> {
+    check_cancelled(cancelled)?;
     let cluster = decoder.cluster()?;
     let stream = decoder.stream()?;
     let id = decoder.bookmark()?;
@@ -710,6 +757,7 @@ fn decode_stream_bookmark(
     budget.reserve_partitions(position_count)?;
     let mut positions = Vec::with_capacity(capacity(position_count, "stream bookmark positions")?);
     for _ in 0..position_count {
+        check_cancelled(cancelled)?;
         positions.push(CommittedCursor::new(
             cluster,
             PartitionKey::new(stream, PartitionId::new(decoder.u32()?)),
@@ -738,7 +786,9 @@ fn decode_data_group(
     payload: &[u8],
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<DataGroupV1, VerifyError> {
+    check_cancelled(cancelled)?;
     let mut decoder = Decoder::new(payload);
     let source_cluster = decoder.cluster()?;
     let export_id = decoder.export()?;
@@ -748,7 +798,8 @@ fn decode_data_group(
     budget.reserve_partitions(partition_count)?;
     let mut partitions = Vec::with_capacity(capacity(partition_count, "partitions")?);
     for _ in 0..partition_count {
-        partitions.push(decode_partition(&mut decoder, limits, budget)?);
+        check_cancelled(cancelled)?;
+        partitions.push(decode_partition(&mut decoder, limits, budget, cancelled)?);
     }
     decoder.finish("data payload")?;
     Ok(DataGroupV1 {
@@ -764,7 +815,9 @@ fn decode_partition(
     decoder: &mut Decoder<'_>,
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<PartitionV1, VerifyError> {
+    check_cancelled(cancelled)?;
     let source_cluster = decoder.cluster()?;
     let stream = decoder.stream()?;
     let partition = PartitionId::new(decoder.u32()?);
@@ -775,6 +828,7 @@ fn decode_partition(
     budget.reserve_records(record_count)?;
     let mut records = Vec::with_capacity(capacity(record_count, "records")?);
     for _ in 0..record_count {
+        check_cancelled(cancelled)?;
         let offset = RecordOffset::new(decoder.u64()?);
         let payload_length = decoder.u64()?;
         if payload_length > limits.max_payload_bytes {
@@ -787,13 +841,19 @@ fn decode_partition(
             return Err(VerifyError::Truncated);
         }
         budget.reserve_payload_bytes(payload_length)?;
-        let payload = decoder.take(payload_size)?.to_vec();
+        let encoded_payload = decoder.take(payload_size)?;
+        let mut payload = Vec::with_capacity(payload_size);
+        for chunk in encoded_payload.chunks(CANCELLABLE_IO_CHUNK_BYTES) {
+            check_cancelled(cancelled)?;
+            payload.extend_from_slice(chunk);
+        }
         records.push(CommittedRecord::new(offset, payload));
     }
     let bookmark_count = count(decoder, limits.max_bookmarks, "bookmarks", 73)?;
     budget.reserve_bookmarks(bookmark_count)?;
     let mut bookmarks = Vec::with_capacity(capacity(bookmark_count, "bookmarks")?);
     for _ in 0..bookmark_count {
+        check_cancelled(cancelled)?;
         bookmarks.push(decode_partition_bookmark(decoder)?);
     }
     Ok(PartitionV1 {
@@ -833,7 +893,9 @@ fn decode_manifest(
     bytes: &[u8],
     limits: &ExportLimits,
     budget: &mut DecodeBudget,
+    cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<ExportManifestV1, VerifyError> {
+    check_cancelled(cancelled)?;
     let mut decoder = Decoder::new(bytes);
     let format_version = decoder.u32()?;
     let required_features = decoder.u64()?;
@@ -843,12 +905,14 @@ fn decode_manifest(
     budget.reserve_streams(selected_count)?;
     let mut selected_streams = Vec::with_capacity(capacity(selected_count, "streams")?);
     for _ in 0..selected_count {
+        check_cancelled(cancelled)?;
         selected_streams.push(decoder.stream()?);
     }
     let control_cut = decode_cut(&mut decoder)?;
     let data_count = count(&mut decoder, u64::from(MAX_DATA_GROUPS), "data groups", 32)?;
     let mut data_cuts = Vec::with_capacity(capacity(data_count, "data groups")?);
     for _ in 0..data_count {
+        check_cancelled(cancelled)?;
         data_cuts.push(decode_cut(&mut decoder)?);
     }
     let data_groups = data_cuts.iter().map(|cut| cut.group()).collect::<Vec<_>>();
@@ -863,6 +927,7 @@ fn decode_manifest(
     let section_count = count(&mut decoder, max_sections, "section count", 69)?;
     let mut sections = Vec::with_capacity(capacity(section_count, "section count")?);
     for _ in 0..section_count {
+        check_cancelled(cancelled)?;
         let ordinal = decoder.u64()?;
         let kind = match decoder.u16()? {
             SECTION_KIND_CONTROL_V1 => SectionKindV1::Control,
@@ -1035,18 +1100,43 @@ fn check_limit(value: u64, limit: u64, name: &'static str) -> Result<(), VerifyE
     }
 }
 
-fn compare_bytes<R: Read>(reader: &mut R, expected: &[u8]) -> Result<(), VerifyError> {
-    let mut buffer = [0_u8; 64 * 1024];
+fn compare_bytes<R: Read>(
+    reader: &mut R,
+    expected: &[u8],
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), VerifyError> {
+    let mut buffer = [0_u8; CANCELLABLE_IO_CHUNK_BYTES];
     let mut offset = 0;
     while offset < expected.len() {
+        check_cancelled(cancelled)?;
         let amount = (expected.len() - offset).min(buffer.len());
-        reader.read_exact(&mut buffer[..amount]).map_err(map_eof)?;
+        read_exact_cancellable(reader, &mut buffer[..amount], cancelled)?;
         if buffer[..amount] != expected[offset..offset + amount] {
             return Err(VerifyError::Digest { scope: "artifact" });
         }
         offset += amount;
     }
     Ok(())
+}
+
+fn read_exact_cancellable<R: Read>(
+    reader: &mut R,
+    output: &mut [u8],
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(), VerifyError> {
+    for chunk in output.chunks_mut(CANCELLABLE_IO_CHUNK_BYTES) {
+        check_cancelled(cancelled)?;
+        reader.read_exact(chunk).map_err(map_eof)?;
+    }
+    check_cancelled(cancelled)
+}
+
+fn check_cancelled(cancelled: &mut dyn FnMut() -> bool) -> Result<(), VerifyError> {
+    if cancelled() {
+        Err(VerifyError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn map_eof(error: std::io::Error) -> VerifyError {

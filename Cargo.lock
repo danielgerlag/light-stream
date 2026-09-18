@@ -1174,6 +1174,7 @@ dependencies = [
  "http",
  "libc",
  "light-stream-core",
+ "light-stream-export",
  "light-stream-proto",
  "light-stream-storage",
  "openraft",

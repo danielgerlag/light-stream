@@ -7,7 +7,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use light_stream_core::{ConsensusGroup, GroupId, NodePhase, ReadinessReason, WriteReadiness};
+use light_stream_core::{
+    ConsensusGroup, ExportStatusPhase, GroupId, NodePhase, ReadinessReason, WriteReadiness,
+};
 use serde::Serialize;
 use tokio::{net::TcpListener, sync::watch};
 
@@ -27,6 +29,7 @@ struct OperationalSnapshot {
     lifecycle: OperationalState,
     admission_drain: AdmissionDrainSnapshot,
     diagnostics: NodeDiagnostic,
+    export_state: Option<ExportStatusPhase>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -171,10 +174,12 @@ async fn collect_snapshot(state: &OperationsState) -> OperationalSnapshot {
     let lifecycle = state.lifecycle.snapshot();
     let admission_drain = state.lifecycle.admission_drain_snapshot();
     let diagnostics = state.cluster.diagnostics().await;
+    let export_state = state.cluster.export_state_snapshot().await;
     OperationalSnapshot {
         lifecycle,
         admission_drain,
         diagnostics,
+        export_state,
     }
 }
 
@@ -237,6 +242,12 @@ fn encode_metrics(snapshot: &OperationalSnapshot) -> String {
         "light_stream_mutations_in_flight",
         snapshot.admission_drain.mutations_in_flight,
     );
+    if let Some(state) = snapshot.export_state {
+        output.push_str(&format!(
+            "light_stream_export_state{{state=\"{}\"}} 1\n",
+            export_state_label(state)
+        ));
+    }
 
     let mut groups = snapshot.diagnostics.groups.iter().collect::<Vec<_>>();
     groups.sort_by_key(|group| (ConsensusKindLabel::from_group(group.group), group.group_id));
@@ -327,6 +338,7 @@ fn readiness_group_label(reason: &ReadinessReason) -> ReadinessGroupLabel {
         | ReadinessReason::Forming
         | ReadinessReason::Retired
         | ReadinessReason::SecurityPolicyStale
+        | ReadinessReason::ExportInProgress
         | ReadinessReason::Draining
         | ReadinessReason::StorageFailure => ReadinessGroupLabel::None,
         ReadinessReason::GroupLeaderUnknown { group }
@@ -346,6 +358,17 @@ fn phase_name(phase: NodePhase) -> &'static str {
         NodePhase::Draining => "draining",
         NodePhase::Stopping => "stopping",
         NodePhase::Failed => "failed",
+    }
+}
+
+fn export_state_label(phase: ExportStatusPhase) -> &'static str {
+    match phase {
+        ExportStatusPhase::Preparing => "preparing",
+        ExportStatusPhase::Frozen => "frozen",
+        ExportStatusPhase::Materializing => "materializing",
+        ExportStatusPhase::Available => "available",
+        ExportStatusPhase::Releasing => "releasing",
+        ExportStatusPhase::Aborting => "aborting",
     }
 }
 
@@ -464,6 +487,7 @@ mod tests {
                     "certificate_subject=CN=certificate-subject-canary".to_owned(),
                 ],
             },
+            export_state: None,
         };
 
         let encoded = encode_metrics(&snapshot);
@@ -541,6 +565,7 @@ mod tests {
                 mutations_in_flight: 0,
             },
             diagnostics: NodeDiagnostic::empty_for_test(),
+            export_state: Some(ExportStatusPhase::Available),
         };
 
         let encoded = encode_metrics(&snapshot);
@@ -552,6 +577,7 @@ mod tests {
             "light_stream_readiness_reason{reason=\"security_policy_stale\",group_id=\"none\"} 1\n"
         ));
         assert!(encoded.contains("light_stream_mutation_admission_open 0\n"));
+        assert!(encoded.contains("light_stream_export_state{state=\"available\"} 1\n"));
         assert!(!encoded.contains("group_id=\"0\""));
     }
 

@@ -863,6 +863,7 @@ impl ActiveExport {
             self.spec.request().clone(),
             self.spec.epoch(),
             self.spec.request_digest(),
+            self.spec.deadline(),
             outcome,
         ))
     }
@@ -950,6 +951,7 @@ pub struct ExportReceipt {
     export: ExportId,
     epoch: ExportEpoch,
     request_digest: ExportRequestDigest,
+    deadline: Option<ExportDeadline>,
     outcome: ExportReceiptOutcome,
 }
 
@@ -958,6 +960,7 @@ impl ExportReceipt {
         request: MutationRequestId,
         epoch: ExportEpoch,
         request_digest: ExportRequestDigest,
+        deadline: ExportDeadline,
         outcome: ExportReceiptOutcome,
     ) -> Self {
         Self {
@@ -965,6 +968,7 @@ impl ExportReceipt {
             export: export_id_from_digest(request_digest),
             epoch,
             request_digest,
+            deadline: Some(deadline),
             outcome,
         }
     }
@@ -983,6 +987,10 @@ impl ExportReceipt {
 
     pub const fn request_digest(&self) -> ExportRequestDigest {
         self.request_digest
+    }
+
+    pub const fn deadline(&self) -> Option<ExportDeadline> {
+        self.deadline
     }
 
     pub const fn outcome(&self) -> &ExportReceiptOutcome {
@@ -1008,11 +1016,20 @@ impl<'de> Deserialize<'de> for ExportReceipt {
             export: ExportId,
             epoch: ExportEpoch,
             request_digest: ExportRequestDigest,
+            #[serde(default)]
+            deadline: Option<ExportDeadline>,
             outcome: ExportReceiptOutcome,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        let receipt = Self::new(wire.request, wire.epoch, wire.request_digest, wire.outcome);
+        let receipt = Self {
+            request: wire.request,
+            export: export_id_from_digest(wire.request_digest),
+            epoch: wire.epoch,
+            request_digest: wire.request_digest,
+            deadline: wire.deadline,
+            outcome: wire.outcome,
+        };
         if receipt.export != wire.export {
             return Err(serde::de::Error::custom(
                 "export receipt ID does not match its request digest",
@@ -1521,12 +1538,34 @@ mod tests {
             receipt_intent.request().clone(),
             ExportEpoch::new(3).unwrap(),
             receipt_intent.request_digest(),
+            ExportDeadline::new(10, 20).unwrap(),
             ExportReceiptOutcome::Aborted(ExportAbortReason::OperatorRequested),
+        );
+        assert_eq!(
+            receipt.deadline(),
+            Some(ExportDeadline::new(10, 20).unwrap())
         );
         let mut invalid_receipt = serde_json::to_value(receipt).unwrap();
         invalid_receipt["export"] =
             serde_json::to_value(ExportId::from_uuid(Uuid::from_u128(999))).unwrap();
         assert!(serde_json::from_value::<ExportReceipt>(invalid_receipt).is_err());
+    }
+
+    #[test]
+    fn legacy_export_receipt_without_deadline_still_decodes() {
+        let receipt = ExportReceipt::new(
+            request("operator", 1, 1),
+            ExportEpoch::new(1).unwrap(),
+            ExportRequestDigest::from_bytes([7; 32]),
+            ExportDeadline::new(10, 20).unwrap(),
+            ExportReceiptOutcome::Aborted(ExportAbortReason::OperatorRequested),
+        );
+        let mut legacy = serde_json::to_value(receipt).unwrap();
+        legacy.as_object_mut().unwrap().remove("deadline");
+
+        let decoded: ExportReceipt = serde_json::from_value(legacy).unwrap();
+
+        assert_eq!(decoded.deadline(), None);
     }
 
     #[test]

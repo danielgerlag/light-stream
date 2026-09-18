@@ -1,4 +1,5 @@
 mod config;
+mod export;
 mod lifecycle;
 mod manifest;
 mod openraft_boundary;
@@ -392,6 +393,7 @@ pub async fn run(config: ServerConfig) -> Result<(), StartupError> {
                     config.verification_delay(),
                     config.verification_response_delay(),
                 ),
+                export_limits: config.export_limits(),
                 security: security.clone(),
                 lifecycle: lifecycle.clone(),
             },

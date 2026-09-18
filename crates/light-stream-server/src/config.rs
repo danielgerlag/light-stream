@@ -25,6 +25,7 @@ const DEFAULT_PUBLISH_BATCH_REQUESTS: usize = 64;
 const DEFAULT_PUBLISH_BATCH_RECORDS: usize = 512;
 const DEFAULT_PUBLISH_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_PUBLISH_COALESCE_US: u64 = 200;
+pub const DEFAULT_MAX_EXPORT_BYTES: u64 = 100 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PeerRoutes(BTreeMap<u64, String>);
@@ -185,6 +186,8 @@ pub struct ServerArgs {
     pub publish_batch_bytes: usize,
     #[arg(long, default_value_t = DEFAULT_PUBLISH_COALESCE_US)]
     pub publish_coalesce_us: u64,
+    #[arg(long, default_value_t = DEFAULT_MAX_EXPORT_BYTES)]
+    pub max_export_bytes: u64,
     #[arg(long)]
     pub verification_enable_fault_hooks: bool,
     #[arg(long)]
@@ -213,6 +216,7 @@ pub struct ServerConfig {
     peer_routes: PeerRoutes,
     group_pool: GroupPoolConfig,
     publish_scheduler: PublishSchedulerConfig,
+    export_limits: light_stream_export::ExportLimits,
     verification_delay: Option<(u64, Duration)>,
     verification_response_delay: Option<(u64, Duration)>,
     shutdown_grace: Duration,
@@ -254,6 +258,11 @@ impl TryFrom<ServerArgs> for ServerConfig {
         if args.shutdown_grace_ms == 0 || args.shutdown_grace_ms > 300_000 {
             return Err(StartupError::InvalidConfig(
                 "shutdown grace must be between 1 and 300000 ms".to_owned(),
+            ));
+        }
+        if args.max_export_bytes == 0 {
+            return Err(StartupError::InvalidConfig(
+                "export byte limit must be greater than zero".to_owned(),
             ));
         }
         let security = RuntimeSecurityConfig::load(
@@ -313,6 +322,13 @@ impl TryFrom<ServerArgs> for ServerConfig {
             Duration::from_micros(args.publish_coalesce_us),
         )
         .map_err(StartupError::InvalidConfig)?;
+        let mut export_limits = light_stream_export::ExportLimits::default();
+        export_limits.max_artifact_bytes = args.max_export_bytes;
+        export_limits.max_manifest_bytes =
+            export_limits.max_manifest_bytes.min(args.max_export_bytes);
+        export_limits.max_section_bytes =
+            export_limits.max_section_bytes.min(args.max_export_bytes);
+        export_limits.max_payload_bytes = args.max_export_bytes;
         let verification_delay = parse_verification_delay(
             args.verification_enable_fault_hooks,
             args.verification_delay_group_id,
@@ -338,6 +354,7 @@ impl TryFrom<ServerArgs> for ServerConfig {
             peer_routes,
             group_pool,
             publish_scheduler,
+            export_limits,
             verification_delay,
             verification_response_delay,
             shutdown_grace: Duration::from_millis(args.shutdown_grace_ms),
@@ -396,6 +413,10 @@ impl ServerConfig {
 
     pub(crate) const fn publish_scheduler(&self) -> PublishSchedulerConfig {
         self.publish_scheduler
+    }
+
+    pub(crate) const fn export_limits(&self) -> light_stream_export::ExportLimits {
+        self.export_limits
     }
 
     pub const fn verification_delay(&self) -> Option<(u64, Duration)> {
@@ -482,6 +503,7 @@ mod tests {
             publish_batch_records: DEFAULT_PUBLISH_BATCH_RECORDS,
             publish_batch_bytes: DEFAULT_PUBLISH_BATCH_BYTES,
             publish_coalesce_us: DEFAULT_PUBLISH_COALESCE_US,
+            max_export_bytes: DEFAULT_MAX_EXPORT_BYTES,
             verification_enable_fault_hooks: false,
             verification_delay_group_id: None,
             verification_delay_ms: 0,
@@ -545,6 +567,23 @@ mod tests {
                     if message.contains("shutdown grace")
             ));
         }
+    }
+
+    #[test]
+    fn export_limit_defaults_to_one_hundred_gib_and_rejects_zero() {
+        let config = ServerConfig::try_from(args()).unwrap();
+        assert_eq!(
+            config.export_limits().max_artifact_bytes,
+            100 * 1024 * 1024 * 1024
+        );
+
+        let mut value = args();
+        value.max_export_bytes = 0;
+        assert!(matches!(
+            ServerConfig::try_from(value),
+            Err(StartupError::InvalidConfig(message))
+                if message.contains("export byte limit")
+        ));
     }
 
     #[test]

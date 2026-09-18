@@ -33,6 +33,18 @@ pub fn verify<R: Read + Seek>(
     decode::verify(reader, limits)
 }
 
+pub fn verify_cancellable<R, C>(
+    reader: R,
+    limits: &ExportLimits,
+    cancelled: C,
+) -> Result<VerifiedExport<R>, VerifyError>
+where
+    R: Read + Seek,
+    C: FnMut() -> bool,
+{
+    decode::verify_cancellable(reader, limits, cancelled)
+}
+
 pub fn inspect<R>(verified: &VerifiedExport<R>) -> ExportInspection {
     verified.inspection.clone()
 }

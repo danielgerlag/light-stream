@@ -114,6 +114,7 @@ pub enum ReadinessReason {
     GroupAuthorityStale { group: GroupId },
     ProbeUnsupported { group: GroupId },
     SecurityPolicyStale,
+    ExportInProgress,
     Draining,
     StorageFailure,
 }
@@ -129,6 +130,7 @@ impl ReadinessReason {
             Self::GroupAuthorityStale { .. } => "group_authority_stale",
             Self::ProbeUnsupported { .. } => "probe_unsupported",
             Self::SecurityPolicyStale => "security_policy_stale",
+            Self::ExportInProgress => "export_in_progress",
             Self::Draining => "draining",
             Self::StorageFailure => "storage_failure",
         }
@@ -144,6 +146,7 @@ impl ReadinessReason {
             "group_authority_stale" => Some(Self::GroupAuthorityStale { group: group? }),
             "probe_unsupported" => Some(Self::ProbeUnsupported { group: group? }),
             "security_policy_stale" if group.is_none() => Some(Self::SecurityPolicyStale),
+            "export_in_progress" if group.is_none() => Some(Self::ExportInProgress),
             "draining" if group.is_none() => Some(Self::Draining),
             "storage_failure" if group.is_none() => Some(Self::StorageFailure),
             _ => None,
@@ -246,6 +249,7 @@ mod tests {
             ReadinessReason::GroupAuthorityStale { group },
             ReadinessReason::ProbeUnsupported { group },
             ReadinessReason::SecurityPolicyStale,
+            ReadinessReason::ExportInProgress,
             ReadinessReason::Draining,
             ReadinessReason::StorageFailure,
         ];

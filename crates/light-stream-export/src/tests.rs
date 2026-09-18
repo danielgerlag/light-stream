@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     convert::Infallible,
     io::{self, Cursor, Read, Seek, SeekFrom},
     rc::Rc,
@@ -18,7 +18,7 @@ use crate::{
     ExportLimits, ExportWriteError, FORMAT_VERSION_V1, MAGIC_V1, REQUIRED_FEATURES_V1,
     SectionKindV1, TRAILER_BYTES_V1, TRAILER_MAGIC_V1, VerifyError,
     fixtures::{FixtureV1, canonical_v1},
-    inspect, verify, write_v1,
+    inspect, verify, verify_cancellable, write_v1,
 };
 
 const SECTION_HEADER_BYTES: usize = 52;
@@ -195,6 +195,41 @@ fn verifier_hashes_the_same_bytes_it_decodes() {
         .is_err(),
         "verification accepted bytes that changed between covered reads"
     );
+}
+
+#[test]
+fn cancellation_interrupts_verification_of_a_large_reader() {
+    let limits = ExportLimits::default();
+    let mut fixture = canonical_v1();
+    data_one(&mut fixture).partitions[0].records[0] =
+        CommittedRecord::new(RecordOffset::new(2), vec![7; 8 * 1024 * 1024]);
+    let (bytes, _) = write_fixture(&mut fixture, &limits);
+    let bytes_read = Rc::new(Cell::new(0_u64));
+    let reader = CountingCursor::new(bytes.clone(), bytes_read.clone());
+
+    let error = match verify_cancellable(reader, &limits, || bytes_read.get() >= 1024 * 1024) {
+        Ok(_) => panic!("large verification should observe cancellation"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(error, VerifyError::Cancelled));
+    assert!(bytes_read.get() < 8 * 1024 * 1024);
+
+    let walk_bytes_read = Rc::new(Cell::new(0_u64));
+    let verified = verify(CountingCursor::new(bytes, walk_bytes_read.clone()), &limits).unwrap();
+    walk_bytes_read.set(0);
+    let error = match verified.visit_sections_cancellable(
+        |_| Ok::<_, Infallible>(()),
+        || walk_bytes_read.get() >= 1024 * 1024,
+    ) {
+        Ok(_) => panic!("large verified section walk should observe cancellation"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        crate::VisitError::Verify(VerifyError::Cancelled)
+    ));
+    assert!(walk_bytes_read.get() < 8 * 1024 * 1024);
 }
 
 #[test]
@@ -1461,6 +1496,38 @@ fn manifest_totals_offset(bytes: &[u8]) -> usize {
 struct SharedCursor {
     bytes: Rc<RefCell<Vec<u8>>>,
     position: u64,
+}
+
+struct CountingCursor {
+    inner: Cursor<Vec<u8>>,
+    bytes_read: Rc<Cell<u64>>,
+}
+
+impl CountingCursor {
+    fn new(bytes: Vec<u8>, bytes_read: Rc<Cell<u64>>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            bytes_read,
+        }
+    }
+}
+
+impl Read for CountingCursor {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let amount = self.inner.read(output)?;
+        self.bytes_read.set(
+            self.bytes_read
+                .get()
+                .saturating_add(u64::try_from(amount).unwrap()),
+        );
+        Ok(amount)
+    }
+}
+
+impl Seek for CountingCursor {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(position)
+    }
 }
 
 impl SharedCursor {

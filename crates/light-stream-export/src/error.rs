@@ -21,6 +21,8 @@ where
 
 #[derive(Debug, Error)]
 pub enum VerifyError {
+    #[error("export verification cancelled")]
+    Cancelled,
     #[error("export input I/O failed")]
     Io(#[from] io::Error),
     #[error("export artifact is truncated")]

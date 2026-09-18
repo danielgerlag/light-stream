@@ -2,7 +2,8 @@ mod logical_export;
 mod retention;
 mod snapshot;
 pub use logical_export::{
-    ControlPlanV1, LogicalExportError, LogicalExportSourceV1, PreparedLogicalExportV1,
+    ControlPlanV1, LogicalExportCancellation, LogicalExportError, LogicalExportSourceV1,
+    PreparedLogicalExportV1,
 };
 pub use retention::ClockObservation;
 use retention::{
@@ -4019,7 +4020,9 @@ impl GroupDb {
         if let Some(receipt) =
             self.get::<ExportReceipt>(CF_STATE, &export_receipt_key(intent.request())?)?
         {
-            return if receipt.request_digest() == intent.request_digest() {
+            return if receipt.request_digest() == intent.request_digest()
+                && receipt.deadline().is_none_or(|stored| stored == deadline)
+            {
                 Ok(ApplyResult::Export(ExportApplyResult::Status(
                     ExportStatus::Terminal(receipt),
                 )))
@@ -4029,7 +4032,9 @@ impl GroupDb {
         }
         if let Some(active) = self.get::<ActiveExport>(CF_STATE, KEY_ACTIVE_EXPORT)? {
             if active.spec().request() == intent.request() {
-                return if active.spec().request_digest() == intent.request_digest() {
+                return if active.spec().request_digest() == intent.request_digest()
+                    && active.spec().deadline() == deadline
+                {
                     Ok(ApplyResult::Export(ExportApplyResult::Status(
                         ExportStatus::active(&active),
                     )))
@@ -10386,6 +10391,14 @@ mod tests {
         let first = apply_test_command(&control.reader.db, 2, begin.clone());
         let retry = apply_test_command(&control.reader.db, 3, begin);
         assert_eq!(first, retry);
+        assert_eq!(
+            apply_test_command(
+                &control.reader.db,
+                4,
+                begin_export(intent.clone(), 1_001, 2_001),
+            ),
+            ApplyResult::Rejected(DomainError::ExportConflict)
+        );
         assert!(matches!(
             first,
             ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Active(active)))
@@ -10426,8 +10439,8 @@ mod tests {
             token,
             observation: first_group,
         });
-        let recorded = apply_test_command(&control.reader.db, 4, record_first.clone());
-        let recorded_retry = apply_test_command(&control.reader.db, 5, record_first);
+        let recorded = apply_test_command(&control.reader.db, 5, record_first.clone());
+        let recorded_retry = apply_test_command(&control.reader.db, 6, record_first);
         assert_eq!(recorded, recorded_retry);
         assert!(matches!(
             recorded,
@@ -10437,7 +10450,7 @@ mod tests {
 
         let unexpected = apply_test_command(
             &control.reader.db,
-            6,
+            7,
             GroupCommand::Export(ExportCommand::RecordFence {
                 token,
                 observation: unexpected_group,
@@ -10452,8 +10465,8 @@ mod tests {
             token,
             observation: second_group_observation,
         });
-        let frozen = apply_test_command(&control.reader.db, 7, freeze.clone());
-        let frozen_retry = apply_test_command(&control.reader.db, 8, freeze);
+        let frozen = apply_test_command(&control.reader.db, 8, freeze.clone());
+        let frozen_retry = apply_test_command(&control.reader.db, 9, freeze);
         assert_eq!(frozen, frozen_retry);
         assert!(matches!(
             frozen,
@@ -11258,11 +11271,19 @@ mod tests {
             ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(_)))
         ));
 
-        let replay = apply_test_command(&control.reader.db, 7, begin_export(intent, 9_000, 10_000));
+        let replay = apply_test_command(
+            &control.reader.db,
+            7,
+            begin_export(intent.clone(), 1_000, 2_000),
+        );
         assert_eq!(terminal, replay);
+        assert_eq!(
+            apply_test_command(&control.reader.db, 8, begin_export(intent, 9_000, 10_000),),
+            ApplyResult::Rejected(DomainError::ExportConflict)
+        );
         let conflict = apply_test_command(
             &control.reader.db,
-            8,
+            9,
             begin_export(
                 export_intent(
                     request.clone(),
@@ -11277,7 +11298,7 @@ mod tests {
         assert_eq!(
             apply_test_command(
                 &control.reader.db,
-                9,
+                10,
                 GroupCommand::Export(ExportCommand::RequestAbort {
                     request,
                     reason: ExportAbortReason::DeadlineExceeded,

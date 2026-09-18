@@ -2,7 +2,10 @@ use std::{
     borrow::Cow,
     collections::{BTreeMap, BTreeSet},
     mem,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use light_stream_core::{
@@ -30,12 +33,14 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum LogicalExportError {
+    #[error("logical export was cancelled")]
+    Cancelled,
     #[error("logical export requires a control-group reader, got {group}")]
     WrongControlGroup { group: GroupId },
     #[error("logical export requires a data-group reader, got {group}")]
     WrongDataGroup { group: GroupId },
-    #[error("no materializing logical export is active")]
-    NoMaterializingExport,
+    #[error("no rebuildable logical export is active")]
+    NoRebuildableExport,
     #[error("logical export data group {group} is not planned")]
     UnplannedGroup { group: GroupId },
     #[error("logical export data group {group} was supplied or read more than once")]
@@ -80,6 +85,33 @@ pub enum LogicalExportError {
     Limit { limit: &'static str },
     #[error("logical export storage read failed for group {group}: {reason}")]
     Storage { group: GroupId, reason: String },
+}
+
+#[derive(Clone, Default)]
+pub struct LogicalExportCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl LogicalExportCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    fn check(&self) -> Result<(), LogicalExportError> {
+        if self.is_cancelled() {
+            Err(LogicalExportError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -138,6 +170,7 @@ pub struct LogicalExportSourceV1 {
     token: ExportFenceToken,
     limits: ExportLimits,
     budget: ExportBudget,
+    cancellation: LogicalExportCancellation,
 }
 
 struct PlannedGroupV1 {
@@ -302,6 +335,7 @@ impl LogicalExportSourceV1 {
         cut: GroupCut,
         after_snapshot: impl FnOnce(),
     ) -> Result<Option<DataGroupV1>, LogicalExportError> {
+        self.cancellation.check()?;
         let planned = self
             .groups
             .get_mut(&group)
@@ -362,6 +396,7 @@ impl LogicalExportSourceV1 {
             };
             drop(state_bank);
             after_snapshot();
+            self.cancellation.check()?;
 
             self.materialize_data_group(&snapshot, group, cut, &partitions)
                 .map(Some)
@@ -382,6 +417,7 @@ impl LogicalExportSourceV1 {
         cut: GroupCut,
         planned_partitions: &[PartitionKey],
     ) -> Result<DataGroupV1, LogicalExportError> {
+        self.cancellation.check()?;
         let identity: GroupIdentity =
             required_value(&snapshot.snapshot, &snapshot.meta, KEY_IDENTITY, group)?;
         if identity.format_version != STORAGE_FORMAT_VERSION {
@@ -420,6 +456,7 @@ impl LogicalExportSourceV1 {
         let mut materialized = BTreeMap::new();
         let mut tails = BTreeMap::new();
         for partition in planned_partitions {
+            self.cancellation.check()?;
             let retention = snapshot_value::<PartitionRetentionState>(
                 &snapshot.snapshot,
                 &snapshot.state,
@@ -453,6 +490,7 @@ impl LogicalExportSourceV1 {
                 .map_err(|_| LogicalExportError::Limit { limit: "records" })?;
             let mut records = Vec::with_capacity(capacity);
             for offset in floor.get()..tail.get() {
+                self.cancellation.check()?;
                 let stored: StoredRecord = snapshot_value(
                     &snapshot.snapshot,
                     &snapshot.state,
@@ -474,6 +512,7 @@ impl LogicalExportSourceV1 {
                 self.budget
                     .ensure_payload_allocation(stored.payload_bytes, &self.limits)?;
                 section.charge(stored.payload_bytes)?;
+                self.cancellation.check()?;
                 let payload = if let Some(bytes) = payload_value.strip_prefix(PAYLOAD_MAGIC) {
                     Cow::Borrowed(bytes)
                 } else {
@@ -489,6 +528,7 @@ impl LogicalExportSourceV1 {
                             .map_err(|error| corruption(group, error.to_string()))?,
                     )
                 };
+                self.cancellation.check()?;
                 let payload_bytes =
                     u64::try_from(payload.len()).map_err(|_| LogicalExportError::Limit {
                         limit: "payload_bytes",
@@ -501,6 +541,7 @@ impl LogicalExportSourceV1 {
                 }
                 self.budget
                     .charge_payload_bytes(payload_bytes, &self.limits)?;
+                self.cancellation.check()?;
                 records.push(CommittedRecord::new(
                     RecordOffset::new(offset),
                     payload.into_owned(),
@@ -533,6 +574,7 @@ impl LogicalExportSourceV1 {
             &snapshot.state,
             IteratorMode::From(BOOKMARK_ID_PREFIX, Direction::Forward),
         ) {
+            self.cancellation.check()?;
             let (key, value) = item.map_err(|error| storage_error(group, error))?;
             if !key.starts_with(BOOKMARK_ID_PREFIX) {
                 break;
@@ -585,6 +627,7 @@ impl LogicalExportSourceV1 {
 
         let mut partitions = Vec::with_capacity(planned_partitions.len());
         for partition in planned_partitions {
+            self.cancellation.check()?;
             let key = (partition.stream(), partition.partition());
             let mut materialized = materialized
                 .remove(&key)
@@ -642,7 +685,20 @@ impl CommittedStateReader {
         data_groups: &[CommittedStateReader],
         limits: ExportLimits,
     ) -> Result<PreparedLogicalExportV1, LogicalExportError> {
-        self.prepare_logical_export_v1_with_hook(data_groups, limits, || {})
+        self.prepare_logical_export_v1_cancellable(
+            data_groups,
+            limits,
+            LogicalExportCancellation::new(),
+        )
+    }
+
+    pub fn prepare_logical_export_v1_cancellable(
+        &self,
+        data_groups: &[CommittedStateReader],
+        limits: ExportLimits,
+        cancellation: LogicalExportCancellation,
+    ) -> Result<PreparedLogicalExportV1, LogicalExportError> {
+        self.prepare_logical_export_v1_with_hook(data_groups, limits, cancellation, || {})
     }
 
     #[cfg(test)]
@@ -652,15 +708,22 @@ impl CommittedStateReader {
         limits: ExportLimits,
         after_snapshot: impl FnOnce(),
     ) -> Result<PreparedLogicalExportV1, LogicalExportError> {
-        self.prepare_logical_export_v1_with_hook(data_groups, limits, after_snapshot)
+        self.prepare_logical_export_v1_with_hook(
+            data_groups,
+            limits,
+            LogicalExportCancellation::new(),
+            after_snapshot,
+        )
     }
 
     fn prepare_logical_export_v1_with_hook(
         &self,
         data_groups: &[CommittedStateReader],
         limits: ExportLimits,
+        cancellation: LogicalExportCancellation,
         after_snapshot: impl FnOnce(),
     ) -> Result<PreparedLogicalExportV1, LogicalExportError> {
+        cancellation.check()?;
         let group = self.db.identity.group_id;
         let state_bank = self
             .db
@@ -685,8 +748,9 @@ impl CommittedStateReader {
         };
         drop(state_bank);
         after_snapshot();
+        cancellation.check()?;
 
-        prepare_from_control_snapshot(&snapshot, data_groups, limits, group)
+        prepare_from_control_snapshot(&snapshot, data_groups, limits, group, cancellation)
     }
 }
 
@@ -695,7 +759,9 @@ fn prepare_from_control_snapshot(
     data_readers: &[CommittedStateReader],
     limits: ExportLimits,
     reader_group: GroupId,
+    cancellation: LogicalExportCancellation,
 ) -> Result<PreparedLogicalExportV1, LogicalExportError> {
+    cancellation.check()?;
     let identity: GroupIdentity = required_value(
         &snapshot.snapshot,
         &snapshot.meta,
@@ -726,10 +792,11 @@ fn prepare_from_control_snapshot(
         KEY_ACTIVE_EXPORT,
         reader_group,
     )?
-    .ok_or(LogicalExportError::NoMaterializingExport)?;
+    .ok_or(LogicalExportError::NoRebuildableExport)?;
     let cut = match active.phase() {
-        ActiveExportPhase::Materializing(cut) => cut.clone(),
-        _ => return Err(LogicalExportError::NoMaterializingExport),
+        light_stream_core::ActiveExportPhase::Materializing(cut) => cut.clone(),
+        ActiveExportPhase::Available(available) => available.cut().clone(),
+        _ => return Err(LogicalExportError::NoRebuildableExport),
     };
     let spec = active.spec();
     if identity.cluster_id != spec.cluster() {
@@ -829,6 +896,7 @@ fn prepare_from_control_snapshot(
     let mut seen_partitions = BTreeSet::new();
 
     for stream in &selected_streams {
+        cancellation.check()?;
         let stored: StreamDescriptor = required_value(
             &snapshot.snapshot,
             &snapshot.state,
@@ -923,6 +991,7 @@ fn prepare_from_control_snapshot(
         );
     }
     for partitions in partitions_by_group.values_mut() {
+        cancellation.check()?;
         partitions.sort_by_key(|partition| (partition.stream(), partition.partition()));
     }
 
@@ -935,6 +1004,7 @@ fn prepare_from_control_snapshot(
         &snapshot.state,
         IteratorMode::From(STREAM_BOOKMARK_ID_PREFIX, Direction::Forward),
     ) {
+        cancellation.check()?;
         let (key, value) = item.map_err(|error| storage_error(identity.group_id, error))?;
         if !key.starts_with(STREAM_BOOKMARK_ID_PREFIX) {
             break;
@@ -1024,6 +1094,7 @@ fn prepare_from_control_snapshot(
 
     let mut streams = Vec::with_capacity(selected_streams.len());
     for stream in &selected_streams {
+        cancellation.check()?;
         let mut bookmarks = bookmarks_by_stream
             .remove(stream)
             .expect("selected stream initialized its bookmark collection");
@@ -1059,6 +1130,7 @@ fn prepare_from_control_snapshot(
     };
     let mut readers = BTreeMap::new();
     for reader in data_readers {
+        cancellation.check()?;
         let group = reader.db.identity.group_id;
         if reader.db.identity.kind != GroupKind::Data {
             return Err(LogicalExportError::WrongDataGroup { group });
@@ -1072,6 +1144,7 @@ fn prepare_from_control_snapshot(
     }
     let mut groups = BTreeMap::new();
     for (group, partitions) in partitions_by_group {
+        cancellation.check()?;
         let reader = readers
             .remove(&group)
             .ok_or(LogicalExportError::MissingGroup { group })?;
@@ -1108,6 +1181,7 @@ fn prepare_from_control_snapshot(
             token: spec.token(),
             limits,
             budget,
+            cancellation,
         },
         limits,
     })
@@ -1245,7 +1319,7 @@ mod tests {
     use rocksdb::{IteratorMode, WriteBatch};
     use uuid::Uuid;
 
-    use super::{LogicalExportError, PreparedLogicalExportV1};
+    use super::{LogicalExportCancellation, LogicalExportError, PreparedLogicalExportV1};
     use crate::{
         ApplyResult, BootstrapSpec, CF_META, CF_PAYLOAD, CF_STATE, CONTROL_GROUP_ID,
         ClockObservation, ControlRaftConfig, DATA_GROUP_ID, DEFAULT_RECEIPT_WINDOW,
@@ -1617,6 +1691,49 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_logical_export_stops_before_preparation() {
+        let fixture = Fixture::new("cancelled-before-preparation");
+        let cancellation = LogicalExportCancellation::new();
+        cancellation.cancel();
+
+        assert!(matches!(
+            fixture
+                .control
+                .reader
+                .prepare_logical_export_v1_cancellable(
+                    &fixture.readers(),
+                    ExportLimits::default(),
+                    cancellation,
+                ),
+            Err(LogicalExportError::Cancelled)
+        ));
+    }
+
+    #[test]
+    fn cancelled_logical_export_stops_after_data_snapshot() {
+        let fixture = Fixture::new("cancelled-after-data-snapshot");
+        let cancellation = LogicalExportCancellation::new();
+        let mut prepared = fixture
+            .control
+            .reader
+            .prepare_logical_export_v1_cancellable(
+                &fixture.readers(),
+                ExportLimits::default(),
+                cancellation.clone(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            prepared.source_mut().data_group_after_snapshot(
+                fixture.populated_group,
+                fixture.populated_cut,
+                || cancellation.cancel(),
+            ),
+            Err(LogicalExportError::Cancelled)
+        ));
+    }
+
+    #[test]
     fn reads_floor_to_tail_records_and_complete_bookmark_histories() {
         let fixture = Fixture::new("logical-data");
         let mut prepared = fixture.prepare(ExportLimits::default());
@@ -1937,8 +2054,35 @@ mod tests {
                 .control
                 .reader
                 .prepare_logical_export_v1(&no_export.readers(), ExportLimits::default()),
-            Err(LogicalExportError::NoMaterializingExport)
+            Err(LogicalExportError::NoRebuildableExport)
         ));
+    }
+
+    #[test]
+    fn available_export_can_rebuild_a_missing_local_artifact() {
+        let fixture = Fixture::new("available-rebuild");
+        let active = fixture.control.reader.active_export().unwrap().unwrap();
+        let cut = match active.phase() {
+            light_stream_core::ActiveExportPhase::Materializing(cut) => cut.clone(),
+            other => panic!("expected materializing export, got {other:?}"),
+        };
+        apply(
+            &fixture.control.reader.db,
+            12,
+            GroupCommand::Export(ExportCommand::PublishArtifact {
+                token: fixture.token,
+                artifact: light_stream_core::ArtifactIdentity::new(1, [7; 32]).unwrap(),
+                cut,
+            }),
+        );
+
+        assert!(
+            fixture
+                .control
+                .reader
+                .prepare_logical_export_v1(&fixture.readers(), ExportLimits::default())
+                .is_ok()
+        );
     }
 
     #[test]

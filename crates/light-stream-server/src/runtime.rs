@@ -12,24 +12,28 @@ use std::{
 };
 
 use light_stream_core::{
-    AdministrationIntent, AdministrationLifecycle, AdministrationOperation,
-    AdministrationRequestId, AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage,
-    BookmarkPageRequest, BootstrapCommand, BootstrapResult, BootstrapSpec, BootstrapTopology,
-    CheckpointCasResult, CheckpointKey, CheckpointMutation, ClusterId, ClusterTopology,
-    CommittedBookmark, CommittedCheckpoint, CommittedStreamBookmark, ConsensusGroup,
-    CreateBookmarkSpec, CreateStreamSpec, DomainError, FetchPage, GroupId, LeaderHint,
-    LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, NodePhase, OperationalProof, PartitionId,
-    PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest, PublishBatch,
-    PublishReceipt, ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
-    RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation,
-    SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
-    StreamDescriptor, StreamId, StreamLifecycle, StreamName, WriteReadiness,
+    ActiveExport, ActiveExportPhase, AdministrationIntent, AdministrationLifecycle,
+    AdministrationOperation, AdministrationRequestId, AmbiguousRequest, BookmarkId, BookmarkName,
+    BookmarkPage, BookmarkPageRequest, BootstrapCommand, BootstrapResult, BootstrapSpec,
+    BootstrapTopology, CheckpointCasResult, CheckpointKey, CheckpointMutation, ClusterId,
+    ClusterTopology, CommittedBookmark, CommittedCheckpoint, CommittedStreamBookmark,
+    ConsensusGroup, CreateBookmarkSpec, CreateStreamSpec, DomainError, ExportAbortReason,
+    ExportDeadline, ExportFenceObservation, ExportStatus, ExportStatusPhase, FetchPage, GroupId,
+    LeaderHint, LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, NodePhase, OperationalProof,
+    PartitionId, PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest,
+    PublishBatch, PublishReceipt, ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId,
+    ReplayLeaseRequest, RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus,
+    SecurityMutation, SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest,
+    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName, WriteReadiness,
 };
+#[cfg(test)]
+use light_stream_core::{ExportId, ExportIntent, MutationRequestId};
 use light_stream_storage::{
     ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
-    DATA_GROUP_ID, DataRaftConfig, GroupCommand, GroupIdentity, GroupKind, GroupStorageBudget,
-    NoRemoteNetworkFactory, RocksStateMachine, SnapshotArtifact, create_control_store,
-    create_data_store, open_control_store, open_control_store_with_topology, open_data_store,
+    DATA_GROUP_ID, DataRaftConfig, ExportApplyResult, ExportCommand, GroupCommand, GroupIdentity,
+    GroupKind, GroupStorageBudget, NoRemoteNetworkFactory, RocksStateMachine, SnapshotArtifact,
+    create_control_store, create_data_store, open_control_store, open_control_store_with_topology,
+    open_data_store,
 };
 use openraft::{
     BasicNode, Config, Instant as OpenRaftInstant, Raft, RaftMetrics, ReadPolicy, ServerState,
@@ -46,6 +50,10 @@ use tokio::{
 
 use crate::{
     config::PeerRoutes,
+    export::{
+        CoordinatorShutdownError, ExportCoordinator, MaterializationError, ProposalPoll,
+        ProposalStart, ReadyArtifactError,
+    },
     lifecycle::{DrainOutcome, LifecycleController, MutationPermit},
     manifest::{
         FormationSpec, GroupPoolConfig, LEGACY_NODE_MANIFEST_VERSION, LegacyNodeManifestV3,
@@ -68,6 +76,8 @@ type VerificationDelayConfig = (Option<(u64, Duration)>, Option<(u64, Duration)>
 pub(crate) enum ShutdownPreparationError {
     #[error(transparent)]
     Tasks(#[from] TaskGroupError),
+    #[error(transparent)]
+    Export(CoordinatorShutdownError),
     #[error("bootstrap did not reach a shutdown-safe point before the drain deadline")]
     BootstrapDeadline,
 }
@@ -76,6 +86,7 @@ impl ShutdownPreparationError {
     pub(crate) fn teardown_safe(&self) -> bool {
         match self {
             Self::Tasks(error) => error.all_joined(),
+            Self::Export(error) => error.teardown_safe(),
             Self::BootstrapDeadline => false,
         }
     }
@@ -97,6 +108,7 @@ const READINESS_PROBE_POLICY: ReadinessProbePolicy = ReadinessProbePolicy {
     max_in_flight: MAX_READINESS_PROBES,
     per_probe_timeout: READINESS_PROBE_TIMEOUT,
 };
+const EXPORT_RECONCILE_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Debug)]
 enum ActiveManifest {
@@ -157,6 +169,7 @@ struct ActiveCluster {
     publish_leader_hints: Arc<StdRwLock<BTreeMap<u64, LeaderHint>>>,
     security: RuntimeSecurityConfig,
     lifecycle: LifecycleController,
+    export: ExportCoordinator,
 }
 
 struct DataGroup {
@@ -170,6 +183,16 @@ struct DataGroup {
 
 impl ActiveCluster {
     async fn start_maintenance(self: &Arc<Self>, data_dir: PathBuf) -> Result<(), DomainError> {
+        let keep_ready =
+            self.control_reader
+                .active_export()?
+                .and_then(|export| match export.phase() {
+                    ActiveExportPhase::Available(_) | ActiveExportPhase::Releasing(_) => {
+                        Some(export.spec().export())
+                    }
+                    _ => None,
+                });
+        self.export.cleanup_spool_files(keep_ready)?;
         let mut tasks = TaskGroup::new();
         let active = Arc::downgrade(self);
         tasks.spawn("topology-sync", move |stop| {
@@ -215,6 +238,11 @@ impl ActiveCluster {
             tasks.spawn("administration-reconciler", move |stop| {
                 administration_reconciler_loop(active, stop)
             });
+
+            let active = Arc::downgrade(self);
+            tasks.spawn("export-reconciler", move |stop| {
+                export_reconciler_loop(active, stop)
+            });
         }
 
         let mut maintenance = self.maintenance.lock().await;
@@ -227,16 +255,22 @@ impl ActiveCluster {
         Ok(())
     }
 
-    async fn stop_maintenance(&self, deadline: tokio::time::Instant) -> Result<(), TaskGroupError> {
+    async fn stop_maintenance(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), ShutdownPreparationError> {
+        self.export.cancel_materialization().await;
         let tasks = self.maintenance.lock().await.take();
-        let result = match tasks {
+        let task_result = match tasks {
             Some(tasks) => tasks.stop_and_join(deadline).await,
             None => Ok(()),
         };
-        if result.as_ref().is_err_and(|error| !error.all_joined()) {
+        if task_result.as_ref().is_err_and(|error| !error.all_joined()) {
             self.maintenance_unjoined.store(true, Ordering::Release);
         }
-        result
+        let export_result = self.export.stop_and_join(deadline).await;
+        task_result.map_err(ShutdownPreparationError::Tasks)?;
+        export_result.map_err(ShutdownPreparationError::Export)
     }
 
     async fn shutdown(&self) -> Result<(), DomainError> {
@@ -303,7 +337,7 @@ struct AuthorityProbeResult {
 
 fn has_recent_quorum<C>(metrics: &RaftMetrics<C>) -> bool
 where
-    C: openraft::RaftTypeConfig<NodeId = u64>,
+    C: openraft::RaftTypeConfig<NodeId = u64, Term = u64>,
 {
     if metrics.state != ServerState::Leader {
         return false;
@@ -397,6 +431,7 @@ pub struct ClusterManager {
     group_pool: GroupPoolConfig,
     publish_scheduler: PublishSchedulerConfig,
     verification_delays: VerificationDelayConfig,
+    export_limits: light_stream_export::ExportLimits,
     security: RuntimeSecurityConfig,
     lifecycle: LifecycleController,
     active: RwLock<Option<Arc<ActiveCluster>>>,
@@ -410,6 +445,7 @@ pub(crate) struct ClusterManagerConfig {
     pub group_pool: GroupPoolConfig,
     pub publish_scheduler: PublishSchedulerConfig,
     pub verification_delays: VerificationDelayConfig,
+    pub export_limits: light_stream_export::ExportLimits,
     pub security: RuntimeSecurityConfig,
     pub lifecycle: LifecycleController,
 }
@@ -438,6 +474,7 @@ impl ClusterManager {
             group_pool: config.group_pool,
             publish_scheduler: config.publish_scheduler,
             verification_delays: config.verification_delays,
+            export_limits: config.export_limits,
             security: config.security,
             lifecycle: config.lifecycle,
             active: RwLock::new(None),
@@ -1057,44 +1094,62 @@ impl ClusterManager {
         if active.lifecycle.snapshot().phase != NodePhase::Running {
             return Ok(false);
         }
-        let proof = active
-            .operational
-            .read()
-            .await
-            .get(&envelope.group_id)
-            .cloned();
-        let ready = if envelope.group_id == CONTROL_GROUP_ID {
-            let metrics = active.control.metrics().borrow_watched().clone();
-            has_recent_quorum(&metrics)
-                && proof.is_some_and(|proof| {
-                    metrics.state == ServerState::Leader
-                        && proof.matches(
-                            self.local.node_id(),
-                            metrics.current_term,
-                            metrics.last_applied.map_or(0, |value| value.index),
-                        )
-                })
-        } else {
-            let group = active
-                .data
-                .get(&envelope.group_id)
-                .ok_or_else(|| tonic::Status::invalid_argument("unknown data Raft group"))?;
-            let metrics = group.raft.metrics().borrow_watched().clone();
-            has_recent_quorum(&metrics)
-                && proof.is_some_and(|proof| {
-                    metrics.state == ServerState::Leader
-                        && proof.matches(
-                            self.local.node_id(),
-                            metrics.current_term,
-                            metrics.last_applied.map_or(0, |value| value.index),
-                        )
-                })
-        };
-        Ok(ready)
+        if active
+            .control_reader
+            .active_export()
+            .map_err(internal_status)?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        Self::active_group_write_authority(
+            &active,
+            self.local.node_id(),
+            GroupId::new(envelope.group_id).map_err(internal_status)?,
+        )
+        .await
+        .map_err(internal_status)
     }
 
     pub(crate) fn snapshot_incoming_directory(&self, group_id: u64) -> PathBuf {
         group_path(&self.data_dir, group_id).join("snapshots/incoming")
+    }
+
+    async fn active_group_write_authority(
+        active: &ActiveCluster,
+        local: NodeId,
+        group: GroupId,
+    ) -> Result<bool, DomainError> {
+        if active.control_reader.active_export()?.is_some() {
+            return Ok(false);
+        }
+        let proof = active.operational.read().await.get(&group.get()).cloned();
+        if group.get() == CONTROL_GROUP_ID {
+            let metrics = active.control.metrics().borrow_watched().clone();
+            return Ok(has_recent_quorum(&metrics)
+                && proof.is_some_and(|proof| {
+                    metrics.state == ServerState::Leader
+                        && proof.matches(
+                            local,
+                            metrics.current_term,
+                            metrics.last_applied.as_ref().map_or(0, |value| value.index),
+                        )
+                }));
+        }
+        let data = active
+            .data
+            .get(&group.get())
+            .ok_or_else(|| storage_error(format!("unknown data Raft group {group}")))?;
+        let metrics = data.raft.metrics().borrow_watched().clone();
+        Ok(has_recent_quorum(&metrics)
+            && proof.is_some_and(|proof| {
+                metrics.state == ServerState::Leader
+                    && proof.matches(
+                        local,
+                        metrics.current_term,
+                        metrics.last_applied.map_or(0, |value| value.index),
+                    )
+            }))
     }
 
     pub(crate) fn snapshot_verification_delay(&self, group_id: u64) -> Option<Duration> {
@@ -1931,6 +1986,122 @@ impl ClusterManager {
             .then(|| manifest.cluster_id())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn begin_export(
+        &self,
+        intent: ExportIntent,
+        deadline: ExportDeadline,
+    ) -> Result<ExportStatus, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_export_control(&active).await?;
+        let request = intent.request().clone();
+        export_status_from_apply(
+            export_control_write(
+                &active,
+                GroupCommand::Export(ExportCommand::Begin { intent, deadline }),
+                Some(AmbiguousRequest::Mutation { request }),
+            )
+            .await?,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn export_status(
+        &self,
+        request: &MutationRequestId,
+    ) -> Result<Option<ExportStatus>, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_export_control(&active).await?;
+        if let Some(export) = active.control_reader.active_export()?
+            && export.spec().request() == request
+        {
+            return Ok(Some(ExportStatus::active(&export)));
+        }
+        Ok(active
+            .control_reader
+            .export_receipt(request)?
+            .map(ExportStatus::Terminal))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn open_export_artifact(
+        &self,
+        export: ExportId,
+        expected: light_stream_core::ArtifactIdentity,
+    ) -> Result<File, DomainError> {
+        let active = self.application_cluster().await?;
+        active
+            .export
+            .open_ready(export, expected)
+            .map_err(ready_artifact_domain_error)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn request_export_completion(
+        &self,
+        request: MutationRequestId,
+        export: ExportId,
+        artifact: light_stream_core::ArtifactIdentity,
+    ) -> Result<ExportStatus, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_export_control(&active).await?;
+        export_status_from_apply(
+            export_control_write(
+                &active,
+                GroupCommand::Export(ExportCommand::RequestCompletion {
+                    request: request.clone(),
+                    export,
+                    artifact,
+                }),
+                Some(AmbiguousRequest::Mutation { request }),
+            )
+            .await?,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn request_export_abort(
+        &self,
+        request: MutationRequestId,
+        reason: ExportAbortReason,
+        observed_clock: ExportDeadline,
+    ) -> Result<ExportStatus, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_export_control(&active).await?;
+        export_status_from_apply(
+            export_control_write(
+                &active,
+                GroupCommand::Export(ExportCommand::RequestAbort {
+                    request: request.clone(),
+                    reason,
+                    observed_clock,
+                }),
+                Some(AmbiguousRequest::Mutation { request }),
+            )
+            .await?,
+        )
+    }
+
+    pub(crate) async fn export_state_snapshot(&self) -> Option<ExportStatusPhase> {
+        let active = self.active.read().await.as_ref().cloned()?;
+        active
+            .control_reader
+            .active_export()
+            .ok()
+            .flatten()
+            .map(|export| ExportStatus::active(&export))
+            .and_then(|status| match status {
+                ExportStatus::Active(status) => Some(status.phase()),
+                ExportStatus::Terminal(_) => None,
+            })
+    }
+
+    #[cfg(test)]
+    async fn reconcile_export_once(&self) -> Result<(), DomainError> {
+        let active = self.application_cluster().await?;
+        reconcile_export_tick(&active, None).await
+    }
+
     pub(crate) async fn write_readiness(&self) -> WriteReadiness {
         tokio::time::timeout(READINESS_SAMPLE_TIMEOUT, self.calculate_write_readiness())
             .await
@@ -1971,6 +2142,19 @@ impl ClusterManager {
             };
             (cluster_id, peers)
         };
+        match active.control_reader.active_export() {
+            Ok(Some(_)) => {
+                return WriteReadiness::NotReady {
+                    reasons: vec![ReadinessReason::ExportInProgress],
+                };
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return WriteReadiness::NotReady {
+                    reasons: vec![ReadinessReason::StorageFailure],
+                };
+            }
+        }
         if matches!(
             self.security.current_policy(),
             Err(DomainError::SecurityPolicyStale)
@@ -2349,10 +2533,7 @@ impl ClusterManager {
         let maintenance_deadline =
             (tokio::time::Instant::now() + maintenance_timeout).min(drain_deadline);
         let maintenance = if let Some(active) = self.active.read().await.as_ref().cloned() {
-            active
-                .stop_maintenance(maintenance_deadline)
-                .await
-                .map_err(ShutdownPreparationError::from)
+            active.stop_maintenance(maintenance_deadline).await
         } else {
             Ok(())
         };
@@ -2503,6 +2684,7 @@ impl ClusterManager {
             publish_leader_hints,
             security: self.security.clone(),
             lifecycle: self.lifecycle.clone(),
+            export: ExportCoordinator::open(&self.data_dir, self.export_limits)?,
         })
     }
 
@@ -2642,6 +2824,7 @@ impl ClusterManager {
             publish_leader_hints,
             security: self.security.clone(),
             lifecycle: self.lifecycle.clone(),
+            export: ExportCoordinator::open(&self.data_dir, self.export_limits)?,
         })
     }
 
@@ -2863,6 +3046,7 @@ impl ClusterManager {
             publish_leader_hints,
             security: self.security.clone(),
             lifecycle: self.lifecycle.clone(),
+            export: ExportCoordinator::open(&self.data_dir, self.export_limits)?,
         })
     }
 }
@@ -3118,6 +3302,593 @@ async fn topology_sync_loop(active: Weak<ActiveCluster>, data_dir: PathBuf, mut 
             }
         }
     }
+}
+
+async fn export_reconciler_loop(active: Weak<ActiveCluster>, mut stop: StopToken) {
+    loop {
+        tokio::select! {
+            biased;
+            _ = stop.cancelled() => return,
+            _ = tokio::time::sleep(EXPORT_RECONCILE_INTERVAL) => {}
+        }
+        let Some(active) = active.upgrade() else {
+            return;
+        };
+        if let Err(error) = reconcile_export_tick(&active, Some(&stop)).await {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "export_reconciliation_failed",
+                    "detail": error.to_string(),
+                })
+            );
+        }
+    }
+}
+
+async fn reconcile_export_tick(
+    active: &Arc<ActiveCluster>,
+    stop: Option<&StopToken>,
+) -> Result<(), DomainError> {
+    let Some(export) = active.control_reader.active_export()? else {
+        let materialization = active.export.cancel_and_join_materialization().await;
+        active.export.cleanup_spool_files(None)?;
+        materialization.map_err(materialization_domain_error)?;
+        match active.export.poll_proposal().await? {
+            ProposalPoll::Idle => {}
+            ProposalPoll::Pending(_) => return Ok(()),
+            ProposalPoll::Resolved(result) => match *result {
+                Ok(_) => {}
+                Err(error) => return Err(error),
+            },
+        }
+        return Ok(());
+    };
+    if stop_requested(stop) {
+        return Ok(());
+    }
+    if matches!(
+        export.phase(),
+        ActiveExportPhase::Materializing(_) | ActiveExportPhase::Available(_)
+    ) && !has_export_materialization_authority(active).await
+    {
+        active
+            .export
+            .cancel_and_join_materialization()
+            .await
+            .map_err(materialization_domain_error)?;
+        return Ok(());
+    }
+    if !matches!(
+        export.phase(),
+        ActiveExportPhase::Materializing(_) | ActiveExportPhase::Available(_)
+    ) {
+        active
+            .export
+            .cancel_and_join_materialization()
+            .await
+            .map_err(materialization_domain_error)?;
+    }
+    match active.export.poll_proposal().await? {
+        ProposalPoll::Idle => {}
+        ProposalPoll::Pending(_) => return Ok(()),
+        ProposalPoll::Resolved(result) => {
+            return match *result {
+                Ok(_) => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
+    }
+    if !matches!(
+        export.phase(),
+        ActiveExportPhase::Releasing(_) | ActiveExportPhase::Aborting(_)
+    ) && export_deadline_observation()?.lower_bound_unix_ms()
+        >= export.spec().deadline().upper_bound_unix_ms()
+    {
+        if is_control_leader(active) {
+            propose_control_export(
+                active,
+                stop,
+                ExportCommand::RequestAbort {
+                    request: export.spec().request().clone(),
+                    reason: ExportAbortReason::DeadlineExceeded,
+                    observed_clock: export_deadline_observation()?,
+                },
+            )
+            .await?;
+        }
+        return Ok(());
+    }
+
+    match export.phase() {
+        ActiveExportPhase::Preparing(preparing) => {
+            let missing = export
+                .spec()
+                .configured_data_groups()
+                .iter()
+                .filter(|group| !preparing.fenced_groups().contains_key(group))
+                .copied()
+                .collect::<Vec<_>>();
+            if is_control_leader(active) {
+                for group_id in &missing {
+                    let Some(group) = active.data.get(&group_id.get()) else {
+                        continue;
+                    };
+                    let fence = group.reader.mutation_fence_state()?;
+                    let observation = ExportFenceObservation::new(
+                        *group_id,
+                        fence.through_epoch(),
+                        fence.held().copied(),
+                    )?;
+                    if observation
+                        .held()
+                        .is_some_and(|held| held.token() == export.spec().token())
+                    {
+                        propose_control_export(
+                            active,
+                            stop,
+                            ExportCommand::RecordFence {
+                                token: export.spec().token(),
+                                observation,
+                            },
+                        )
+                        .await?;
+                        break;
+                    }
+                }
+            }
+            for group_id in missing {
+                let Some(group) = active.data.get(&group_id.get()) else {
+                    continue;
+                };
+                let fence = group.reader.mutation_fence_state()?;
+                if fence
+                    .held()
+                    .is_some_and(|held| held.token() == export.spec().token())
+                {
+                    continue;
+                }
+                if is_data_leader(group) {
+                    propose_data_export(
+                        active,
+                        group,
+                        stop,
+                        ExportCommand::AcquireFence {
+                            token: export.spec().token(),
+                        },
+                    )
+                    .await?;
+                }
+            }
+        }
+        ActiveExportPhase::Frozen(_) => {
+            if is_control_leader(active) {
+                propose_control_export(
+                    active,
+                    stop,
+                    ExportCommand::BeginMaterialization {
+                        token: export.spec().token(),
+                    },
+                )
+                .await?;
+            }
+        }
+        ActiveExportPhase::Materializing(cut) => {
+            if !has_export_materialization_authority(active).await {
+                active
+                    .export
+                    .cancel_and_join_materialization()
+                    .await
+                    .map_err(materialization_domain_error)?;
+                return Ok(());
+            }
+            let export_id = export.spec().export();
+            let artifact = if active.export.owns_materialization(export_id).await {
+                let Some(artifact) = poll_export_materialization(active, stop, &export).await?
+                else {
+                    return Ok(());
+                };
+                artifact
+            } else {
+                match active.export.recover_ready(export_id, None) {
+                    Ok(Some(artifact)) => artifact,
+                    Ok(None) => {
+                        let Some(artifact) =
+                            poll_export_materialization(active, stop, &export).await?
+                        else {
+                            return Ok(());
+                        };
+                        artifact
+                    }
+                    Err(ReadyArtifactError::Retryable(detail)) => {
+                        return Err(storage_error(detail));
+                    }
+                    Err(ReadyArtifactError::Deterministic(detail)) => {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({
+                                "event": "export_materialization_invalid",
+                                "detail": detail,
+                            })
+                        );
+                        request_materialization_abort(active, stop, &export).await?;
+                        return Ok(());
+                    }
+                    Err(ReadyArtifactError::Missing) => {
+                        unreachable!("recovery maps missing to none")
+                    }
+                }
+            };
+            if stop_requested(stop) {
+                return Ok(());
+            }
+            if export_deadline_expired(&export)? {
+                request_deadline_abort(active, stop, &export).await?;
+                return Ok(());
+            }
+            if !has_export_materialization_authority(active).await || stop_requested(stop) {
+                active
+                    .export
+                    .cancel_and_join_materialization()
+                    .await
+                    .map_err(materialization_domain_error)?;
+                return Ok(());
+            }
+            if export_deadline_expired(&export)? {
+                request_deadline_abort(active, stop, &export).await?;
+                return Ok(());
+            }
+            propose_control_export(
+                active,
+                stop,
+                ExportCommand::PublishArtifact {
+                    token: export.spec().token(),
+                    artifact,
+                    cut: cut.clone(),
+                },
+            )
+            .await?;
+        }
+        ActiveExportPhase::Available(available) => {
+            if !has_export_materialization_authority(active).await {
+                active
+                    .export
+                    .cancel_and_join_materialization()
+                    .await
+                    .map_err(materialization_domain_error)?;
+                return Ok(());
+            }
+            if active
+                .export
+                .owns_materialization(export.spec().export())
+                .await
+            {
+                match poll_export_materialization(active, stop, &export).await? {
+                    Some(artifact) if artifact == available.artifact() => {}
+                    Some(_) => {
+                        active.export.remove_ready(export.spec().export())?;
+                        request_materialization_abort(active, stop, &export).await?;
+                        return Ok(());
+                    }
+                    None => {
+                        if !has_export_materialization_authority(active).await {
+                            active
+                                .export
+                                .cancel_and_join_materialization()
+                                .await
+                                .map_err(materialization_domain_error)?;
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+            match active
+                .export
+                .recover_ready(export.spec().export(), Some(available.artifact()))
+            {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    if !has_export_materialization_authority(active).await {
+                        active
+                            .export
+                            .cancel_and_join_materialization()
+                            .await
+                            .map_err(materialization_domain_error)?;
+                        return Ok(());
+                    }
+                    match poll_export_materialization(active, stop, &export).await? {
+                        Some(artifact) if artifact == available.artifact() => {
+                            if export_deadline_expired(&export)? {
+                                request_deadline_abort(active, stop, &export).await?;
+                            }
+                        }
+                        Some(_) => {
+                            eprintln!(
+                                "{}",
+                                serde_json::json!({
+                                    "event": "export_rebuild_mismatch",
+                                })
+                            );
+                            active.export.remove_ready(export.spec().export())?;
+                            request_materialization_abort(active, stop, &export).await?;
+                        }
+                        None => {}
+                    }
+                }
+                Err(ReadyArtifactError::Retryable(detail)) => {
+                    return Err(storage_error(detail));
+                }
+                Err(ReadyArtifactError::Deterministic(detail)) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "event": "export_artifact_invalid",
+                            "detail": detail,
+                        })
+                    );
+                    if is_control_leader(active) {
+                        request_materialization_abort(active, stop, &export).await?;
+                    } else {
+                        return Err(storage_error(detail));
+                    }
+                }
+                Err(ReadyArtifactError::Missing) => unreachable!("recovery maps missing to none"),
+            }
+            if !has_export_materialization_authority(active).await {
+                active
+                    .export
+                    .cancel_and_join_materialization()
+                    .await
+                    .map_err(materialization_domain_error)?;
+            }
+        }
+        ActiveExportPhase::Releasing(_) | ActiveExportPhase::Aborting(_) => {
+            reconcile_export_release(active, &export, stop).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_export_release(
+    active: &Arc<ActiveCluster>,
+    export: &ActiveExport,
+    stop: Option<&StopToken>,
+) -> Result<(), DomainError> {
+    if export.is_ready_to_finish() {
+        if is_control_leader(active) {
+            let result = propose_control_export(
+                active,
+                stop,
+                ExportCommand::Finish {
+                    token: export.spec().token(),
+                },
+            )
+            .await?;
+            if matches!(
+                result,
+                ApplyResult::Export(ExportApplyResult::Status(ExportStatus::Terminal(ref receipt)))
+                    if receipt.export() == export.spec().export()
+                        && receipt.request() == export.spec().request()
+            ) {
+                active.export.remove_ready(export.spec().export())?;
+            }
+        }
+        return Ok(());
+    }
+    for group_id in export.spec().configured_data_groups() {
+        let Some(group) = active.data.get(&group_id.get()) else {
+            continue;
+        };
+        let fence = group.reader.mutation_fence_state()?;
+        let release_needed = fence
+            .held()
+            .is_some_and(|held| held.token() == export.spec().token())
+            || (fence.held().is_none() && fence.through_epoch() < export.spec().epoch().get());
+        if release_needed && is_data_leader(group) {
+            propose_data_export(
+                active,
+                group,
+                stop,
+                ExportCommand::ReleaseFence {
+                    token: export.spec().token(),
+                },
+            )
+            .await?;
+        }
+    }
+    if is_control_leader(active)
+        && let Some(group_id) = active
+            .export
+            .next_release_candidate(
+                export.spec().export(),
+                export.spec().configured_data_groups(),
+            )
+            .await
+        && let Some(group) = active.data.get(&group_id.get())
+    {
+        let fence = group.reader.mutation_fence_state()?;
+        if fence.held().is_none() && fence.through_epoch() >= export.spec().epoch().get() {
+            let observation = ExportFenceObservation::new(group_id, fence.through_epoch(), None)?;
+            propose_control_export(
+                active,
+                stop,
+                ExportCommand::RecordRelease {
+                    token: export.spec().token(),
+                    observation,
+                },
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+fn stop_requested(stop: Option<&StopToken>) -> bool {
+    stop.is_some_and(StopToken::is_stopping)
+}
+
+fn materialization_domain_error(error: MaterializationError) -> DomainError {
+    match error {
+        MaterializationError::Cancelled => storage_error("export materialization cancelled"),
+        MaterializationError::Retryable(detail)
+        | MaterializationError::Limit(detail)
+        | MaterializationError::Deterministic(detail) => storage_error(detail),
+    }
+}
+
+fn is_control_leader(active: &ActiveCluster) -> bool {
+    active.control.metrics().borrow_watched().state == ServerState::Leader
+}
+
+fn is_data_leader(group: &DataGroup) -> bool {
+    group.raft.metrics().borrow_watched().state == ServerState::Leader
+}
+
+async fn has_export_materialization_authority(active: &ActiveCluster) -> bool {
+    let metrics = active.control.metrics().borrow_watched().clone();
+    let proof = active
+        .operational
+        .read()
+        .await
+        .get(&CONTROL_GROUP_ID)
+        .cloned();
+    has_materialization_authority(
+        &metrics,
+        proof,
+        NodeId::new(metrics.id).expect("Raft node ID is nonzero"),
+    )
+}
+
+fn has_materialization_authority<C>(
+    metrics: &RaftMetrics<C>,
+    proof: Option<OperationalProof>,
+    local: NodeId,
+) -> bool
+where
+    C: openraft::RaftTypeConfig<NodeId = u64, Term = u64>,
+{
+    has_materialization_authority_evidence(
+        has_recent_quorum(metrics),
+        proof.is_some_and(|proof| {
+            proof.matches(
+                local,
+                metrics.current_term,
+                metrics.last_applied.as_ref().map_or(0, |value| value.index),
+            )
+        }),
+    )
+}
+
+fn has_materialization_authority_evidence(recent_quorum: bool, operational: bool) -> bool {
+    recent_quorum && operational
+}
+
+fn export_deadline_expired(export: &ActiveExport) -> Result<bool, DomainError> {
+    Ok(export_deadline_observation()?.lower_bound_unix_ms()
+        >= export.spec().deadline().upper_bound_unix_ms())
+}
+
+async fn request_deadline_abort(
+    active: &Arc<ActiveCluster>,
+    stop: Option<&StopToken>,
+    export: &ActiveExport,
+) -> Result<(), DomainError> {
+    if is_control_leader(active) {
+        propose_control_export(
+            active,
+            stop,
+            ExportCommand::RequestAbort {
+                request: export.spec().request().clone(),
+                reason: ExportAbortReason::DeadlineExceeded,
+                observed_clock: export_deadline_observation()?,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn request_materialization_abort(
+    active: &Arc<ActiveCluster>,
+    stop: Option<&StopToken>,
+    export: &ActiveExport,
+) -> Result<(), DomainError> {
+    if is_control_leader(active) {
+        propose_control_export(
+            active,
+            stop,
+            ExportCommand::RequestAbort {
+                request: export.spec().request().clone(),
+                reason: ExportAbortReason::MaterializationFailed,
+                observed_clock: export_deadline_observation()?,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn poll_export_materialization(
+    active: &Arc<ActiveCluster>,
+    stop: Option<&StopToken>,
+    export: &ActiveExport,
+) -> Result<Option<light_stream_core::ArtifactIdentity>, DomainError> {
+    let readers = active
+        .data
+        .values()
+        .map(|group| group.reader.clone())
+        .collect();
+    match active
+        .export
+        .poll_materialization(
+            export.spec().export(),
+            active.control_reader.clone(),
+            readers,
+        )
+        .await
+    {
+        Ok(artifact) => Ok(artifact),
+        Err(MaterializationError::Cancelled) => Ok(None),
+        Err(MaterializationError::Retryable(detail)) => Err(storage_error(detail)),
+        Err(MaterializationError::Limit(detail) | MaterializationError::Deterministic(detail)) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "event": "export_materialization_invalid",
+                    "detail": detail,
+                })
+            );
+            request_materialization_abort(active, stop, export).await?;
+            Ok(None)
+        }
+    }
+}
+
+async fn propose_control_export(
+    active: &Arc<ActiveCluster>,
+    stop: Option<&StopToken>,
+    command: ExportCommand,
+) -> Result<ApplyResult, DomainError> {
+    if stop_requested(stop) {
+        return Err(DomainError::ShuttingDown {
+            outcome: RequestOutcome::DefiniteNoCommit,
+        });
+    }
+    export_control_write(active, GroupCommand::Export(command), None).await
+}
+
+async fn propose_data_export(
+    active: &Arc<ActiveCluster>,
+    group: &DataGroup,
+    stop: Option<&StopToken>,
+    command: ExportCommand,
+) -> Result<ApplyResult, DomainError> {
+    if stop_requested(stop) {
+        return Err(DomainError::ShuttingDown {
+            outcome: RequestOutcome::DefiniteNoCommit,
+        });
+    }
+    export_data_write(active, group, GroupCommand::Export(command)).await
 }
 
 async fn administration_reconciler_loop(active: Weak<ActiveCluster>, mut stop: StopToken) {
@@ -3884,6 +4655,18 @@ async fn linearize_control(active: &Arc<ActiveCluster>) -> Result<(), DomainErro
     .await
 }
 
+#[cfg(test)]
+async fn linearize_export_control(active: &Arc<ActiveCluster>) -> Result<(), DomainError> {
+    prove_linearizable(
+        active,
+        GroupId::new(CONTROL_GROUP_ID).expect("control group ID is nonzero"),
+        ConsensusGroup::Control,
+        &active.control,
+        &active.control_reader,
+    )
+    .await
+}
+
 async fn submitted_control_write(
     active: &Arc<ActiveCluster>,
     command: GroupCommand,
@@ -3909,6 +4692,113 @@ async fn submitted_control_write(
             request,
         }),
     }
+}
+
+async fn export_control_write(
+    active: &Arc<ActiveCluster>,
+    command: GroupCommand,
+    request: Option<AmbiguousRequest>,
+) -> Result<ApplyResult, DomainError> {
+    let raft = active.control.clone();
+    let task_active = active.clone();
+    let start = active
+        .export
+        .start_proposal(request.clone(), async move {
+            raft.client_write(command)
+                .await
+                .map(|response| response.data)
+                .map_err(|error| map_write_error(error, &task_active, ConsensusGroup::Control))
+        })
+        .await?;
+    if let ProposalStart::Busy(retained) = start {
+        return Err(if retained == request && request.is_some() {
+            export_timeout_error(ConsensusGroup::Control, request)
+        } else {
+            export_busy_error(ConsensusGroup::Control, request)
+        });
+    }
+    match active
+        .export
+        .wait_proposal_until(tokio::time::Instant::now() + OPERATION_TIMEOUT)
+        .await?
+    {
+        ProposalPoll::Resolved(result) => *result,
+        ProposalPoll::Pending(retained_request) => Err(export_timeout_error(
+            ConsensusGroup::Control,
+            retained_request.or(request),
+        )),
+        ProposalPoll::Idle => Err(storage_error(
+            "submitted export control proposal lost coordinator ownership",
+        )),
+    }
+}
+
+async fn export_data_write(
+    active: &Arc<ActiveCluster>,
+    group: &DataGroup,
+    command: GroupCommand,
+) -> Result<ApplyResult, DomainError> {
+    let raft = group.raft.clone();
+    let task_active = active.clone();
+    let start = active
+        .export
+        .start_proposal(None, async move {
+            raft.client_write(command)
+                .await
+                .map(|response| response.data)
+                .map_err(|error| map_write_error(error, &task_active, ConsensusGroup::Data))
+        })
+        .await?;
+    if matches!(start, ProposalStart::Busy(_)) {
+        return Err(export_busy_error(ConsensusGroup::Data, None));
+    }
+    match active
+        .export
+        .wait_proposal_until(tokio::time::Instant::now() + OPERATION_TIMEOUT)
+        .await?
+    {
+        ProposalPoll::Resolved(result) => *result,
+        ProposalPoll::Pending(request) => Err(export_timeout_error(ConsensusGroup::Data, request)),
+        ProposalPoll::Idle => Err(storage_error(
+            "submitted export data proposal lost coordinator ownership",
+        )),
+    }
+}
+
+fn export_timeout_error(group: ConsensusGroup, request: Option<AmbiguousRequest>) -> DomainError {
+    DomainError::QuorumUnavailable {
+        group,
+        outcome: RequestOutcome::AmbiguousCommit,
+        request,
+    }
+}
+
+fn export_busy_error(group: ConsensusGroup, request: Option<AmbiguousRequest>) -> DomainError {
+    DomainError::QuorumUnavailable {
+        group,
+        outcome: RequestOutcome::DefiniteNoCommit,
+        request,
+    }
+}
+
+#[cfg(test)]
+fn export_status_from_apply(result: ApplyResult) -> Result<ExportStatus, DomainError> {
+    match result {
+        ApplyResult::Export(ExportApplyResult::Status(status)) => Ok(status),
+        ApplyResult::Rejected(error) => Err(error),
+        other => Err(DomainError::Storage {
+            reason: format!("unexpected export apply result {other}"),
+        }),
+    }
+}
+
+#[cfg(test)]
+fn ready_artifact_domain_error(error: ReadyArtifactError) -> DomainError {
+    let reason = match error {
+        ReadyArtifactError::Missing => "local export artifact is missing".to_owned(),
+        ReadyArtifactError::Retryable(reason) | ReadyArtifactError::Deterministic(reason) => reason,
+    };
+    DomainError::Storage { reason }
 }
 
 async fn submitted_data_write(
@@ -4846,13 +5736,26 @@ fn lease_clock_observation() -> Result<ClockObservation, DomainError> {
     ClockObservation::new(now.saturating_sub(skew), now.saturating_add(skew))
 }
 
+fn export_deadline_observation() -> Result<ExportDeadline, DomainError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| DomainError::LeaseClockUnavailable)?;
+    let now = u64::try_from(now.as_millis()).map_err(|_| DomainError::LeaseClockUnavailable)?;
+    let skew = u64::try_from(LEASE_CLOCK_SKEW.as_millis())
+        .map_err(|_| DomainError::LeaseClockUnavailable)?;
+    ExportDeadline::new(now.saturating_sub(skew), now.saturating_add(skew))
+}
+
 fn internal_status(error: impl std::fmt::Display) -> tonic::Status {
     tonic::Status::internal(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::{
+        io::Read,
+        sync::atomic::{AtomicUsize, Ordering as AtomicOrdering},
+    };
 
     use uuid::Uuid;
 
@@ -4881,6 +5784,7 @@ mod tests {
             group_pool: GroupPoolConfig::default(),
             publish_scheduler: PublishSchedulerConfig::default(),
             verification_delays: (None, None),
+            export_limits: light_stream_export::ExportLimits::default(),
             security: RuntimeSecurityConfig::LocalInsecure,
             lifecycle: LifecycleController::starting(),
         }
@@ -4896,6 +5800,674 @@ mod tests {
             target: local(2),
             security: RuntimeSecurityConfig::LocalInsecure,
         }
+    }
+
+    fn export_request(sequence: u64) -> MutationRequestId {
+        MutationRequestId::new(
+            light_stream_core::PrincipalId::parse("export-test").unwrap(),
+            light_stream_core::MutationSessionId::from_uuid(Uuid::from_u128(7)),
+            light_stream_core::RequestSequence::new(sequence),
+        )
+    }
+
+    fn future_export_deadline() -> ExportDeadline {
+        let now = export_deadline_observation().unwrap().upper_bound_unix_ms();
+        ExportDeadline::new(now + 60_000, now + 60_000).unwrap()
+    }
+
+    async fn stopped_standalone_export_manager(
+        name: &str,
+    ) -> (Arc<ClusterManager>, PathBuf, BootstrapSpec) {
+        stopped_standalone_export_manager_with_config(name, manager_config()).await
+    }
+
+    async fn stopped_standalone_export_manager_with_config(
+        name: &str,
+        config: ClusterManagerConfig,
+    ) -> (Arc<ClusterManager>, PathBuf, BootstrapSpec) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/light-stream-server")
+            .join(name);
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let manager = Arc::new(
+            ClusterManager::open(path.clone(), local(1), config)
+                .await
+                .unwrap(),
+        );
+        let spec = BootstrapSpec::new(
+            ClusterId::from_uuid(Uuid::new_v4()),
+            StreamId::from_uuid(Uuid::new_v4()),
+            StreamName::parse("export-source").unwrap(),
+        );
+        manager
+            .bootstrap(BootstrapCommand::standalone(spec.clone()))
+            .await
+            .unwrap();
+        for _ in 0..100 {
+            if manager.write_readiness().await.is_ready() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(manager.write_readiness().await.is_ready());
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        if let Some(tasks) = active.maintenance.lock().await.take() {
+            tasks
+                .stop_and_join(tokio::time::Instant::now() + Duration::from_secs(2))
+                .await
+                .unwrap();
+        }
+        (manager, path, spec)
+    }
+
+    async fn reconcile_until_phase(
+        manager: &ClusterManager,
+        request: &MutationRequestId,
+        expected: ExportStatusPhase,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                manager.export_status(request).await.unwrap(),
+                Some(ExportStatus::Active(status)) if status.phase() == expected
+            ) {
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            manager.reconcile_export_once().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    async fn reconcile_until_terminal(
+        manager: &ClusterManager,
+        request: &MutationRequestId,
+        disposition: light_stream_core::ExportTerminalDisposition,
+    ) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                manager.export_status(request).await.unwrap(),
+                Some(ExportStatus::Terminal(receipt))
+                    if receipt.disposition() == disposition
+            ) {
+                return;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            manager.reconcile_export_once().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn standalone_export_progresses_rebuilds_and_releases() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("standalone-export-progression").await;
+        let request = export_request(1);
+        let intent = ExportIntent::new(
+            request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        let export_id = intent.export_id();
+
+        assert!(matches!(
+            manager
+                .begin_export(intent, future_export_deadline())
+                .await
+                .unwrap(),
+            ExportStatus::Active(status) if status.phase() == ExportStatusPhase::Preparing
+        ));
+        assert_eq!(
+            manager.write_readiness().await,
+            WriteReadiness::NotReady {
+                reasons: vec![ReadinessReason::ExportInProgress],
+            }
+        );
+
+        manager.reconcile_export_once().await.unwrap();
+        assert!(matches!(
+            manager.export_status(&request).await.unwrap(),
+            Some(ExportStatus::Active(status))
+                if status.phase() == ExportStatusPhase::Preparing
+        ));
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Frozen).await;
+        manager.reconcile_export_once().await.unwrap();
+        assert!(matches!(
+            manager.export_status(&request).await.unwrap(),
+            Some(ExportStatus::Active(status))
+                if status.phase() == ExportStatusPhase::Materializing
+        ));
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Available).await;
+        let available = manager
+            .active
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .control_reader
+            .active_export()
+            .unwrap()
+            .unwrap();
+        let ActiveExportPhase::Available(available) = available.phase() else {
+            panic!("expected available export");
+        };
+        let artifact = available.artifact();
+
+        let mut opened = manager
+            .open_export_artifact(export_id, artifact)
+            .await
+            .unwrap();
+        let mut original = Vec::new();
+        opened.read_to_end(&mut original).unwrap();
+        assert!(
+            manager
+                .open_export_artifact(
+                    export_id,
+                    light_stream_core::ArtifactIdentity::new(1, [9; 32]).unwrap(),
+                )
+                .await
+                .is_err()
+        );
+
+        let ready = path.join("exports").join(format!("{export_id}.ready"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&ready).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        assert!(matches!(
+            active.export.recover_ready(
+                export_id,
+                Some(light_stream_core::ArtifactIdentity::new(1, [8; 32]).unwrap()),
+            ),
+            Ok(None)
+        ));
+        assert!(!ready.exists());
+        let rebuild_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            manager.reconcile_export_once().await.unwrap();
+            if fs::read(&ready).is_ok_and(|bytes| bytes == original) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < rebuild_deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(fs::read(&ready).unwrap(), original);
+        manager
+            .open_export_artifact(export_id, artifact)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            manager
+                .request_export_completion(request.clone(), export_id, artifact)
+                .await
+                .unwrap(),
+            ExportStatus::Active(status) if status.phase() == ExportStatusPhase::Releasing
+        ));
+        reconcile_until_terminal(
+            &manager,
+            &request,
+            light_stream_core::ExportTerminalDisposition::Completed,
+        )
+        .await;
+        assert!(!ready.exists());
+
+        let abort_request = export_request(2);
+        let abort_intent = ExportIntent::new(
+            abort_request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        manager
+            .begin_export(abort_intent, future_export_deadline())
+            .await
+            .unwrap();
+        assert!(matches!(
+            manager
+                .request_export_abort(
+                    abort_request.clone(),
+                    ExportAbortReason::OperatorRequested,
+                    export_deadline_observation().unwrap(),
+                )
+                .await
+                .unwrap(),
+            ExportStatus::Active(status) if status.phase() == ExportStatusPhase::Aborting
+        ));
+        reconcile_until_terminal(
+            &manager,
+            &abort_request,
+            light_stream_core::ExportTerminalDisposition::Aborted,
+        )
+        .await;
+
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn owned_reconciler_progresses_standalone_export_to_available() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/test-data/light-stream-server/owned-export-reconciler");
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        let manager = Arc::new(
+            ClusterManager::open(path.clone(), local(1), manager_config())
+                .await
+                .unwrap(),
+        );
+        let spec = BootstrapSpec::new(
+            ClusterId::from_uuid(Uuid::new_v4()),
+            StreamId::from_uuid(Uuid::new_v4()),
+            StreamName::parse("owned-export").unwrap(),
+        );
+        manager
+            .bootstrap(BootstrapCommand::standalone(spec.clone()))
+            .await
+            .unwrap();
+        let request = export_request(5);
+        manager
+            .begin_export(
+                ExportIntent::new(
+                    request.clone(),
+                    spec.cluster(),
+                    light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+                    light_stream_core::ExportFormatVersion::V1,
+                ),
+                future_export_deadline(),
+            )
+            .await
+            .unwrap();
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                manager.export_status(&request).await.unwrap(),
+                Some(ExportStatus::Active(status))
+                    if status.phase() == ExportStatusPhase::Available
+            ) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        manager
+            .request_export_abort(
+                request.clone(),
+                ExportAbortReason::OperatorRequested,
+                export_deadline_observation().unwrap(),
+            )
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                manager.export_status(&request).await.unwrap(),
+                Some(ExportStatus::Terminal(receipt))
+                    if receipt.disposition()
+                        == light_stream_core::ExportTerminalDisposition::Aborted
+            ) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn materialization_size_limit_requests_abort() {
+        let mut config = manager_config();
+        config.export_limits.max_artifact_bytes = 1;
+        config.export_limits.max_manifest_bytes = 1;
+        config.export_limits.max_section_bytes = 1;
+        config.export_limits.max_payload_bytes = 1;
+        let (manager, path, spec) =
+            stopped_standalone_export_manager_with_config("export-materialization-limit", config)
+                .await;
+        let request = export_request(6);
+        manager
+            .begin_export(
+                ExportIntent::new(
+                    request.clone(),
+                    spec.cluster(),
+                    light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+                    light_stream_core::ExportFormatVersion::V1,
+                ),
+                future_export_deadline(),
+            )
+            .await
+            .unwrap();
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Materializing).await;
+
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Aborting).await;
+        reconcile_until_terminal(
+            &manager,
+            &request,
+            light_stream_core::ExportTerminalDisposition::Aborted,
+        )
+        .await;
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn stopping_maintenance_stops_export_progress() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("stopped-export-reconciler").await;
+        let request = export_request(3);
+        let intent = ExportIntent::new(
+            request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        manager
+            .begin_export(intent, future_export_deadline())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(EXPORT_RECONCILE_INTERVAL * 3).await;
+
+        assert!(matches!(
+            manager.export_status(&request).await.unwrap(),
+            Some(ExportStatus::Active(status))
+                if status.phase() == ExportStatusPhase::Preparing
+        ));
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn elapsed_export_deadline_aborts_and_releases() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("expired-export-deadline").await;
+        let request = export_request(4);
+        let intent = ExportIntent::new(
+            request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        let now = export_deadline_observation().unwrap().lower_bound_unix_ms();
+        manager
+            .begin_export(intent, ExportDeadline::new(now - 1, now - 1).unwrap())
+            .await
+            .unwrap();
+
+        manager.reconcile_export_once().await.unwrap();
+        assert!(matches!(
+            manager.export_status(&request).await.unwrap(),
+            Some(ExportStatus::Active(status)) if status.phase() == ExportStatusPhase::Aborting
+        ));
+        reconcile_until_terminal(
+            &manager,
+            &request,
+            light_stream_core::ExportTerminalDisposition::Aborted,
+        )
+        .await;
+
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn completed_materialization_is_not_published_after_deadline() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("post-build-expired-export").await;
+        let request = export_request(7);
+        let intent = ExportIntent::new(
+            request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        let export_id = intent.export_id();
+        let deadline_at = export_deadline_observation().unwrap().upper_bound_unix_ms() + 500;
+        manager
+            .begin_export(
+                intent,
+                ExportDeadline::new(deadline_at, deadline_at).unwrap(),
+            )
+            .await
+            .unwrap();
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Materializing).await;
+        manager.reconcile_export_once().await.unwrap();
+        let ready = path.join("exports").join(format!("{export_id}.ready"));
+        let wait_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !ready.exists() {
+            assert!(tokio::time::Instant::now() < wait_deadline);
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let expiry_wait = tokio::time::Instant::now() + Duration::from_secs(6);
+        while export_deadline_observation().unwrap().lower_bound_unix_ms() < deadline_at {
+            assert!(tokio::time::Instant::now() < expiry_wait);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        manager.reconcile_export_once().await.unwrap();
+
+        assert!(matches!(
+            manager.export_status(&request).await.unwrap(),
+            Some(ExportStatus::Active(status)) if status.phase() == ExportStatusPhase::Aborting
+        ));
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn authoritative_probe_is_false_while_export_is_active() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("active-export-authority-probe").await;
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        let request = export_request(8);
+        manager
+            .begin_export(
+                ExportIntent::new(
+                    request,
+                    spec.cluster(),
+                    light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+                    light_stream_core::ExportFormatVersion::V1,
+                ),
+                future_export_deadline(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !ClusterManager::active_group_write_authority(
+                &active,
+                manager.local.node_id(),
+                GroupId::new(CONTROL_GROUP_ID).unwrap(),
+            )
+            .await
+            .unwrap()
+        );
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn follower_and_stale_leader_do_not_start_materialization() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("export-authority-gate").await;
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        let request = export_request(10);
+        let intent = ExportIntent::new(
+            request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        let export_id = intent.export_id();
+        manager
+            .begin_export(intent, future_export_deadline())
+            .await
+            .unwrap();
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Materializing).await;
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        active
+            .export
+            .start_test_materialization(export_id, exited.clone())
+            .await
+            .unwrap();
+
+        let metrics = active.control.metrics().borrow_watched().clone();
+        let proof = active
+            .operational
+            .read()
+            .await
+            .get(&CONTROL_GROUP_ID)
+            .cloned();
+        let mut follower = metrics.clone();
+        follower.state = ServerState::Follower;
+        assert!(!has_materialization_authority(
+            &follower,
+            proof,
+            manager.local.node_id(),
+        ));
+        assert!(!has_materialization_authority_evidence(false, true));
+        active.operational.write().await.remove(&CONTROL_GROUP_ID);
+        assert!(!has_export_materialization_authority(&active).await);
+
+        manager.reconcile_export_once().await.unwrap();
+
+        assert!(exited.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!active.export.materialization_is_running().await);
+        assert!(
+            !path
+                .join("exports")
+                .join(format!("{export_id}.ready"))
+                .exists()
+        );
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn authority_loss_reaps_available_materialization() {
+        let (manager, path, spec) =
+            stopped_standalone_export_manager("available-export-authority-loss").await;
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        let request = export_request(11);
+        let intent = ExportIntent::new(
+            request.clone(),
+            spec.cluster(),
+            light_stream_core::ExportSelection::try_new([spec.stream()]).unwrap(),
+            light_stream_core::ExportFormatVersion::V1,
+        );
+        let export_id = intent.export_id();
+        manager
+            .begin_export(intent, future_export_deadline())
+            .await
+            .unwrap();
+        reconcile_until_phase(&manager, &request, ExportStatusPhase::Available).await;
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        active
+            .export
+            .start_test_materialization(export_id, exited.clone())
+            .await
+            .unwrap();
+        active.operational.write().await.remove(&CONTROL_GROUP_ID);
+
+        manager.reconcile_export_once().await.unwrap();
+
+        assert!(exited.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!active.export.materialization_is_running().await);
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn no_active_export_reaps_mismatched_task_and_cleans_regular_spool_files() {
+        let (manager, path, _) =
+            stopped_standalone_export_manager("terminal-export-spool-cleanup").await;
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        active
+            .export
+            .start_test_materialization(ExportId::from_uuid(Uuid::from_u128(0x901)), exited.clone())
+            .await
+            .unwrap();
+        let exports = path.join("exports");
+        let stale_ready = exports.join(format!(
+            "{}.ready",
+            ExportId::from_uuid(Uuid::from_u128(0x902))
+        ));
+        let stale_building = exports.join(format!(
+            "{}.building",
+            ExportId::from_uuid(Uuid::from_u128(0x903))
+        ));
+        fs::write(&stale_ready, b"ready").unwrap();
+        fs::write(&stale_building, b"building").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target = path.join("symlink-target");
+            let link = exports.join("ignored.ready");
+            fs::write(&target, b"preserve").unwrap();
+            symlink(&target, &link).unwrap();
+        }
+
+        manager.reconcile_export_once().await.unwrap();
+
+        assert!(exited.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!active.export.materialization_is_running().await);
+        assert!(!stale_ready.exists());
+        assert!(!stale_building.exists());
+        #[cfg(unix)]
+        assert_eq!(fs::read(path.join("symlink-target")).unwrap(), b"preserve");
+        manager.shutdown().await.unwrap();
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn shutdown_joins_materialization_before_cluster_storage() {
+        let (manager, path, _) =
+            stopped_standalone_export_manager("shutdown-owned-materialization").await;
+        let active = manager.active.read().await.as_ref().cloned().unwrap();
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        active
+            .export
+            .start_test_materialization(ExportId::from_uuid(Uuid::from_u128(0x900)), exited.clone())
+            .await
+            .unwrap();
+
+        manager.shutdown().await.unwrap();
+
+        assert!(exited.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!active.export.materialization_is_running().await);
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn timed_out_export_mutation_retains_request_identity() {
+        let request = export_request(9);
+        let error = export_timeout_error(
+            ConsensusGroup::Control,
+            Some(AmbiguousRequest::Mutation {
+                request: request.clone(),
+            }),
+        );
+
+        assert!(matches!(
+            error,
+            DomainError::QuorumUnavailable {
+                request: Some(AmbiguousRequest::Mutation { request: actual }),
+                ..
+            } if actual == request
+        ));
     }
 
     #[tokio::test]

@@ -20,6 +20,7 @@ fs2.workspace = true
 futures-util.workspace = true
 http.workspace = true
 light-stream-core = { path = "../light-stream-core" }
+light-stream-export = { path = "../light-stream-export" }
 light-stream-proto = { path = "../light-stream-proto" }
 light-stream-storage = { path = "../light-stream-storage" }
 libc = "0.2"
