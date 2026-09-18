@@ -113,6 +113,10 @@ pub fn canonical_v1() -> FixtureV1 {
         source_cluster: cluster,
         export_id: spec.export().into(),
         cut: control_cut,
+        catalog_revision: 12,
+        assignment_cursor: 1,
+        max_streams: 64,
+        max_partitions_per_stream: 16,
         configured_data_groups: vec![group_one, group_two],
         streams: vec![ActiveStreamV1 {
             descriptor,

@@ -16,9 +16,9 @@ use crate::{
     BOOKMARK_LIFECYCLE_DELETED_V1, ControlSectionV1, DataGroupV1, EXCLUSIONS_V1,
     ExportExclusionsV1, ExportInspection, ExportLimits, ExportManifestV1, ExportTotalsV1,
     FORMAT_VERSION_V1, MAGIC_V1, OPTION_NONE_V1, OPTION_SOME_V1, PartitionV1, REQUIRED_FEATURES_V1,
-    SECTION_KIND_CONTROL_V1, SECTION_KIND_DATA_GROUP_V1, SECTION_VERSION_V1,
-    STREAM_LIFECYCLE_ACTIVE_V1, SectionDescriptorV1, SectionKindV1, TRAILER_BYTES_V1,
-    TRAILER_MAGIC_V1, VerifiedExport, VerifiedSectionV1, VerifyError, VisitError,
+    SECTION_KIND_CONTROL_V1, SECTION_KIND_DATA_GROUP_V1, STREAM_LIFECYCLE_ACTIVE_V1,
+    SectionDescriptorV1, SectionKindV1, TRAILER_BYTES_V1, TRAILER_MAGIC_V1, VerifiedExport,
+    VerifiedSectionV1, VerifyError, VisitError,
     codec::Decoder,
     validate::{
         DataValidation, ModelError, ValidationContext, finish_validation, validate_control,
@@ -539,7 +539,7 @@ fn read_section<R: Read + Seek>(
     }
     if descriptor.kind != expected.kind
         || descriptor.group != expected.group
-        || descriptor.section_version != SECTION_VERSION_V1
+        || descriptor.section_version != expected.kind.version()
     {
         return Err(VerifyError::Inconsistent {
             field: "section order",
@@ -611,6 +611,10 @@ fn decode_control(
     let source_cluster = decoder.cluster()?;
     let export_id = decoder.export()?;
     let cut = decode_cut(&mut decoder)?;
+    let catalog_revision = decoder.u64()?;
+    let assignment_cursor = decoder.u64()?;
+    let max_streams = decoder.u32()?;
+    let max_partitions_per_stream = decoder.u32()?;
     let group_count = count(&mut decoder, u64::from(MAX_DATA_GROUPS), "data groups", 8)?;
     let mut configured_data_groups = Vec::with_capacity(capacity(group_count, "data groups")?);
     for _ in 0..group_count {
@@ -627,6 +631,10 @@ fn decode_control(
         source_cluster,
         export_id,
         cut,
+        catalog_revision,
+        assignment_cursor,
+        max_streams,
+        max_partitions_per_stream,
         configured_data_groups,
         streams,
     })

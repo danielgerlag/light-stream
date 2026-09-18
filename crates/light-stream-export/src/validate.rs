@@ -91,6 +91,18 @@ pub(crate) fn validate_control(
     if context.selected_streams.is_empty() {
         return Err(ModelError::Inconsistent("selected streams"));
     }
+    let selected_stream_count =
+        u64::try_from(context.selected_streams.len()).map_err(|_| ModelError::Limit("streams"))?;
+    if context.control.max_streams == 0
+        || u64::from(context.control.max_streams) < selected_stream_count
+    {
+        return Err(ModelError::Inconsistent("catalog max streams"));
+    }
+    if context.control.max_partitions_per_stream == 0 {
+        return Err(ModelError::Inconsistent(
+            "catalog max partitions per stream",
+        ));
+    }
     require_strict(context.selected_streams, "selected streams")?;
     check_count(
         context.selected_streams.len(),
@@ -118,6 +130,18 @@ pub(crate) fn validate_control(
     if control_streams != context.selected_streams {
         return Err(ModelError::Inconsistent("selected streams"));
     }
+    if context.control.catalog_revision == 0
+        || context.control.catalog_revision
+            < context
+                .control
+                .streams
+                .iter()
+                .map(|stream| stream.descriptor.revision())
+                .max()
+                .unwrap_or_default()
+    {
+        return Err(ModelError::Inconsistent("catalog revision"));
+    }
 
     let configured = context
         .control
@@ -131,6 +155,13 @@ pub(crate) fn validate_control(
     let mut stream_bookmark_ids = BTreeSet::new();
     for stream in &context.control.streams {
         let descriptor = &stream.descriptor;
+        let partition_count = u64::try_from(descriptor.placements().len())
+            .map_err(|_| ModelError::Limit("partitions"))?;
+        if u64::from(context.control.max_partitions_per_stream) < partition_count {
+            return Err(ModelError::Inconsistent(
+                "catalog max partitions per stream",
+            ));
+        }
         if descriptor.cluster() != context.source_cluster {
             return Err(ModelError::Inconsistent("stream source cluster"));
         }

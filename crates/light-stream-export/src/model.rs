@@ -12,7 +12,8 @@ pub const FORMAT_VERSION_V1: u32 = 1;
 pub const REQUIRED_FEATURES_V1: u64 = 0;
 pub const SECTION_KIND_CONTROL_V1: u16 = 1;
 pub const SECTION_KIND_DATA_GROUP_V1: u16 = 2;
-pub const SECTION_VERSION_V1: u16 = 1;
+pub const CONTROL_SECTION_VERSION_V1: u16 = 2;
+pub const DATA_SECTION_VERSION_V1: u16 = 1;
 pub const STREAM_LIFECYCLE_ACTIVE_V1: u8 = 1;
 pub const BOOKMARK_LIFECYCLE_ACTIVE_V1: u8 = 1;
 pub const BOOKMARK_LIFECYCLE_DELETED_V1: u8 = 2;
@@ -109,6 +110,10 @@ pub struct ControlSectionV1 {
     pub source_cluster: ClusterId,
     pub export_id: ExportIdV1,
     pub cut: GroupCut,
+    pub catalog_revision: u64,
+    pub assignment_cursor: u64,
+    pub max_streams: u32,
+    pub max_partitions_per_stream: u32,
     pub configured_data_groups: Vec<GroupId>,
     pub streams: Vec<ActiveStreamV1>,
 }
@@ -162,6 +167,13 @@ impl SectionKindV1 {
         match self {
             Self::Control => SECTION_KIND_CONTROL_V1,
             Self::DataGroup => SECTION_KIND_DATA_GROUP_V1,
+        }
+    }
+
+    pub const fn version(self) -> u16 {
+        match self {
+            Self::Control => CONTROL_SECTION_VERSION_V1,
+            Self::DataGroup => DATA_SECTION_VERSION_V1,
         }
     }
 }

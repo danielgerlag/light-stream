@@ -14,9 +14,9 @@ use light_stream_core::{
 use sha2::{Digest, Sha256};
 
 use crate::{
-    EXCLUSIONS_V1, ExportExclusionsV1, ExportLimits, ExportWriteError, FORMAT_VERSION_V1, MAGIC_V1,
-    REQUIRED_FEATURES_V1, SECTION_VERSION_V1, SectionKindV1, TRAILER_BYTES_V1, TRAILER_MAGIC_V1,
-    VerifyError,
+    CONTROL_SECTION_VERSION_V1, DATA_SECTION_VERSION_V1, EXCLUSIONS_V1, ExportExclusionsV1,
+    ExportLimits, ExportWriteError, FORMAT_VERSION_V1, MAGIC_V1, REQUIRED_FEATURES_V1,
+    SectionKindV1, TRAILER_BYTES_V1, TRAILER_MAGIC_V1, VerifyError,
     fixtures::{FixtureV1, canonical_v1},
     inspect, verify, write_v1,
 };
@@ -61,6 +61,44 @@ fn logical_round_trip_is_redacted_and_preserves_tombstones() {
     assert_eq!(inspection.manifest.totals.payload_bytes, 9);
     assert_eq!(inspection.manifest.totals.partition_bookmarks, 2);
     assert_eq!(inspection.manifest.totals.stream_bookmarks, 2);
+}
+
+#[test]
+fn control_catalog_policy_round_trips_independently_of_decode_budgets() {
+    let limits = ExportLimits::default();
+    let mut fixture = canonical_v1();
+    fixture.document.control.catalog_revision = 41;
+    fixture.document.control.assignment_cursor = 73;
+    fixture.document.control.max_streams = 2_048;
+    fixture.document.control.max_partitions_per_stream = 262_144;
+
+    assert!(u64::from(fixture.document.control.max_streams) > limits.max_streams);
+    assert!(u64::from(fixture.document.control.max_partitions_per_stream) > limits.max_partitions);
+
+    let (bytes, _) = write_fixture(&mut fixture, &limits);
+    let verified = verify(Cursor::new(bytes), &limits).unwrap();
+    let inspection = inspect(&verified);
+    assert!(
+        inspection
+            .sections
+            .iter()
+            .any(|section| section.kind == SectionKindV1::Control)
+    );
+
+    let mut visited_control = false;
+    verified
+        .visit_sections(|section| {
+            if let crate::VerifiedSectionV1::Control(control) = section {
+                visited_control = true;
+                assert_eq!(control.catalog_revision, 41);
+                assert_eq!(control.assignment_cursor, 73);
+                assert_eq!(control.max_streams, 2_048);
+                assert_eq!(control.max_partitions_per_stream, 262_144);
+            }
+            Ok::<_, Infallible>(())
+        })
+        .unwrap();
+    assert!(visited_control);
 }
 
 #[test]
@@ -180,7 +218,13 @@ fn exact_v1_envelope_order_endianness_manifest_and_digest_coverage() {
     for section in &inspection.sections {
         let offset = section.file_offset as usize;
         assert_eq!(be_u16(&bytes[offset..offset + 2]), section.kind.number());
-        assert_eq!(be_u16(&bytes[offset + 2..offset + 4]), SECTION_VERSION_V1);
+        assert_eq!(
+            be_u16(&bytes[offset + 2..offset + 4]),
+            match section.kind {
+                SectionKindV1::Control => CONTROL_SECTION_VERSION_V1,
+                SectionKindV1::DataGroup => DATA_SECTION_VERSION_V1,
+            }
+        );
         assert_eq!(be_u64(&bytes[offset + 4..offset + 12]), section.item_count);
         assert_eq!(
             be_u64(&bytes[offset + 12..offset + 20]),
@@ -199,15 +243,35 @@ fn exact_v1_envelope_order_endianness_manifest_and_digest_coverage() {
     );
     assert_eq!(
         be_u64(&bytes[control_payload + 64..control_payload + 72]),
-        2
+        fixture.document.control.catalog_revision
     );
     assert_eq!(
         be_u64(&bytes[control_payload + 72..control_payload + 80]),
+        fixture.document.control.assignment_cursor
+    );
+    assert_eq!(
+        be_u32(&bytes[control_payload + 80..control_payload + 84]),
+        fixture.document.control.max_streams
+    );
+    assert_eq!(
+        be_u32(&bytes[control_payload + 84..control_payload + 88]),
+        fixture.document.control.max_partitions_per_stream
+    );
+    assert_eq!(
+        be_u64(&bytes[control_payload + 88..control_payload + 96]),
+        2
+    );
+    assert_eq!(
+        be_u64(&bytes[control_payload + 96..control_payload + 104]),
         1
     );
     assert_eq!(
-        be_u64(&bytes[control_payload + 80..control_payload + 88]),
+        be_u64(&bytes[control_payload + 104..control_payload + 112]),
         2
+    );
+    assert_eq!(
+        be_u64(&bytes[control_payload + 112..control_payload + 120]),
+        1
     );
 
     let manifest_offset = trailer_u64(&bytes, 0) as usize;
@@ -734,6 +798,42 @@ fn writer_rejects_partial_stream_bookmark_vectors() {
     add_second_partition(&mut fixture);
 
     assert_inconsistent(fixture);
+}
+
+#[test]
+fn writer_rejects_invalid_control_catalog_policy() {
+    let mut zero_revision = canonical_v1();
+    zero_revision.document.control.catalog_revision = 0;
+    assert_inconsistent(zero_revision);
+
+    let mut regressed_revision = canonical_v1();
+    regressed_revision.document.control.catalog_revision =
+        regressed_revision.document.control.streams[0]
+            .descriptor
+            .revision()
+            - 1;
+    assert_inconsistent(regressed_revision);
+
+    let mut zero_streams = canonical_v1();
+    zero_streams.document.control.max_streams = 0;
+    assert_inconsistent(zero_streams);
+
+    let mut zero_partitions = canonical_v1();
+    zero_partitions.document.control.max_partitions_per_stream = 0;
+    assert_inconsistent(zero_partitions);
+
+    let mut too_many_streams = canonical_v1();
+    add_second_stream(&mut too_many_streams, group(2), "payments");
+    too_many_streams.document.control.max_streams = 1;
+    assert_inconsistent(too_many_streams);
+
+    let mut too_many_partitions = canonical_v1();
+    add_second_placement(&mut too_many_partitions);
+    too_many_partitions
+        .document
+        .control
+        .max_partitions_per_stream = 1;
+    assert_inconsistent(too_many_partitions);
 }
 
 #[test]

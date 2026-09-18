@@ -9,8 +9,8 @@ use crate::{
     ActiveStreamV1, BOOKMARK_LIFECYCLE_ACTIVE_V1, BOOKMARK_LIFECYCLE_DELETED_V1, DataGroupSourceV1,
     DataGroupV1, ExportDocumentV1, ExportLimits, ExportManifestV1, ExportWriteError,
     FORMAT_VERSION_V1, MAGIC_V1, OPTION_NONE_V1, OPTION_SOME_V1, SECTION_KIND_CONTROL_V1,
-    SECTION_KIND_DATA_GROUP_V1, SECTION_VERSION_V1, STREAM_LIFECYCLE_ACTIVE_V1,
-    SectionDescriptorV1, SectionKindV1, TRAILER_BYTES_V1, TRAILER_MAGIC_V1,
+    SECTION_KIND_DATA_GROUP_V1, STREAM_LIFECYCLE_ACTIVE_V1, SectionDescriptorV1, SectionKindV1,
+    TRAILER_BYTES_V1, TRAILER_MAGIC_V1,
     codec::{EncodeLimit, Encoder},
     decode::DecodeBudget,
     validate::{
@@ -166,6 +166,12 @@ fn encode_control(document: &ExportDocumentV1, max: u64) -> Result<Vec<u8>, Enco
     encoder.cluster(control.source_cluster)?;
     encoder.export(control.export_id)?;
     encode_cut(&mut encoder, control.cut)?;
+    // V1 payload offsets 64..72 are catalog revision, 72..80 assignment cursor,
+    // 80..84 max streams, and 84..88 max partitions per stream.
+    encoder.u64(control.catalog_revision)?;
+    encoder.u64(control.assignment_cursor)?;
+    encoder.u32(control.max_streams)?;
+    encoder.u32(control.max_partitions_per_stream)?;
     encoder.u64(len_u64(&control.configured_data_groups)?)?;
     for group in &control.configured_data_groups {
         encoder.u64(group.get())?;
@@ -380,8 +386,9 @@ impl<'a, W: Write> Output<'a, W> {
             SectionKindV1::Control => SECTION_KIND_CONTROL_V1,
             SectionKindV1::DataGroup => SECTION_KIND_DATA_GROUP_V1,
         };
+        let section_version = kind.version();
         self.hashed(&kind_number.to_be_bytes())?;
-        self.hashed(&SECTION_VERSION_V1.to_be_bytes())?;
+        self.hashed(&section_version.to_be_bytes())?;
         self.hashed(&item_count.to_be_bytes())?;
         self.hashed(&payload_length.to_be_bytes())?;
         self.hashed(&payload_sha256)?;
@@ -389,7 +396,7 @@ impl<'a, W: Write> Output<'a, W> {
         Ok(SectionDescriptorV1 {
             ordinal,
             kind,
-            section_version: SECTION_VERSION_V1,
+            section_version,
             group,
             file_offset,
             item_count,
