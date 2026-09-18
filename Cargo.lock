@@ -1203,6 +1203,7 @@ dependencies = [
  "crc32fast",
  "futures-util",
  "light-stream-core",
+ "light-stream-export",
  "openraft",
  "rocksdb",
  "serde",

@@ -1,5 +1,9 @@
+mod logical_export;
 mod retention;
 mod snapshot;
+pub use logical_export::{
+    ControlPlanV1, LogicalExportError, LogicalExportSourceV1, PreparedLogicalExportV1,
+};
 pub use retention::ClockObservation;
 use retention::{
     AdmissionState, LeaseBudget, PartitionRetentionState, RetentionLimits, SafeLeaseClock, admit,
