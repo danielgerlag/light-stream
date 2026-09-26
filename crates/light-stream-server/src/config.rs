@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use clap::Parser;
+use clap::Args;
 use light_stream_core::{
     DEFAULT_MAX_DATA_GROUPS, DEFAULT_MAX_PARTITIONS_PER_STREAM, DEFAULT_MAX_STREAMS, DomainError,
     MAX_DATA_GROUPS, MIN_DATA_GROUPS, NodeDescriptor, NodeId, SecurityMode,
@@ -135,8 +135,7 @@ impl PeerRoutes {
     }
 }
 
-#[derive(Debug, Parser)]
-#[command(name = "light-streamd", version, about = "Light Stream server")]
+#[derive(Args, Debug)]
 pub struct ServerArgs {
     #[arg(long, default_value = "127.0.0.1:7101")]
     pub public_listen: SocketAddr,

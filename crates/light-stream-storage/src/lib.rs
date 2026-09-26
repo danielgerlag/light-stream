@@ -1,9 +1,14 @@
 mod logical_export;
+mod logical_restore;
 mod retention;
 mod snapshot;
 pub use logical_export::{
     ControlPlanV1, LogicalExportCancellation, LogicalExportError, LogicalExportSourceV1,
     PreparedLogicalExportV1,
+};
+pub use logical_restore::{
+    PreservedIdentities, RestoreConfig, RestoreError, RestoreGroupPoolConfig, RestoreReceipt,
+    restore_from_path, restore_from_verified,
 };
 pub use retention::ClockObservation;
 use retention::{
@@ -7305,6 +7310,22 @@ mod tests {
     };
 
     static TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    #[test]
+    fn decode_rejects_unsupported_stored_value_version() {
+        let bytes = serde_json::to_vec(&StoredValue {
+            version: STORAGE_FORMAT_VERSION + 1,
+            checksum: 0,
+            body: serde_json::to_vec(&0_u64).unwrap(),
+        })
+        .unwrap();
+        let error = decode::<u64>(&bytes).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported stored value version")
+        );
+    }
 
     fn test_budget() -> GroupStorageBudget {
         GroupStorageBudget::new(8 * 1024 * 1024, 4 * 1024 * 1024).unwrap()

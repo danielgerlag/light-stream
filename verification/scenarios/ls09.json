@@ -1,0 +1,48 @@
+{
+  "phase": "LS09",
+  "source": "docs/implementation/plan.md#package-and-operate-the-actual-broker-ls09",
+  "scenarios": {
+    "package": {
+      "lanes": ["L02"],
+      "predicate": "A clean environment starts the packaged release broker and completes the user journey (E25) with no development checkout and no undeclared runtime dependency."
+    },
+    "lifecycle": {
+      "lanes": ["L03", "L04"],
+      "predicate": "Readiness is distinct from liveness: the broker reports live without a write quorum yet never advertises writable service, and accepted writes drain on shutdown while admission closes explicitly."
+    },
+    "drain": {
+      "lanes": ["L04"],
+      "predicate": "Graceful shutdown drains acknowledged work; every acknowledged byte survives and the admission gate closes explicitly rather than dropping in-flight commits."
+    },
+    "metrics": {
+      "lanes": ["L09"],
+      "predicate": "Bounded operational diagnostics expose per-group leadership, lag, queue pressure, and rejection under a slow follower without leaking secrets."
+    },
+    "export": {
+      "lanes": ["L05"],
+      "predicate": "The supported quiescent logical export (E26) establishes a healthy quiescent cut and produces an artifact that declares its exact cut, preserved identities, and selected scope, with private credentials excluded."
+    },
+    "restore": {
+      "lanes": ["L06"],
+      "predicate": "Restore into empty storage reproduces the declared data and marker ledger through the public API, rewriting only the cluster identity into a fresh local-insecure standalone cluster."
+    },
+    "restore-corrupt": {
+      "lanes": ["L07"],
+      "predicate": "A corrupted or truncated export is refused by restore without publishing any partial state; the destination is never created."
+    },
+    "version-fixtures": {
+      "lanes": ["L08"],
+      "predicate": "Supported storage and format version fixtures (E27) survive restore and startup, and unsupported formats are refused without resetting storage to recover."
+    },
+    "secured-package": {
+      "lanes": ["L10"],
+      "predicate": "The packaged broker honors secured configuration: certificate mounts, log/evidence redaction, and startup refusal match the LS08 security contract."
+    }
+  },
+  "unsupported": {
+    "perf": "SKIPPED",
+    "perf_reason": "LS09 perf gate (package bytes, startup, idle RSS, diagnostics overhead, restore duration, B4 base/head comparison) is out of scope by operator decision; recorded as SKIPPED, not a waived pass.",
+    "write_ready_target": "NOT_MET",
+    "write_ready_reason": "The write_ready < 1s latency target is a perf optimization deferred out of scope."
+  }
+}

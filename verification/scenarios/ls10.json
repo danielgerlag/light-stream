@@ -1,0 +1,57 @@
+{
+  "phase": "LS10",
+  "source": "docs/implementation/plan.md#complete-end-to-end-and-independent-host-acceptance-ls10",
+  "scenarios": {
+    "regression": {
+      "lanes": ["L01"],
+      "predicate": "The complete supported packaged journey runs at base and head release binaries; existing behavior and the newly added acceptance assertions agree on the ledger (functional only, no throughput dimension)."
+    },
+    "cli-sdk": {
+      "lanes": ["L02"],
+      "predicate": "Standalone CLI and Rust SDK journeys run in both security modes; records, bookmarks, progress, and restart results match across CLI and client in local-insecure and secured configurations."
+    },
+    "fault-leader-crash": {
+      "lanes": ["L04"],
+      "predicate": "The leader is crashed and recovered on a single host across multiple processes; E03 meets its recovery deadline without losing acknowledged work (correctness only, no sustained-traffic capacity)."
+    },
+    "fault-minority-heal": {
+      "lanes": ["L05"],
+      "predicate": "An old leader is kept alive in a minority and then healed; E04 fences stale success and catch-up completes with no acknowledged loss."
+    },
+    "fault-snapshot-catchup": {
+      "lanes": ["L06"],
+      "predicate": "A minority is delayed and then forced through snapshot catch-up; E06 and E08 preserve majority progress and retained history."
+    },
+    "replay-oracle": {
+      "lanes": ["L07"],
+      "predicate": "E28 markers with protected and unprotected replay run against the oracle; retention, leases, and reader outcomes match the oracle throughout."
+    },
+    "security-failover": {
+      "lanes": ["L09"],
+      "predicate": "Security denial, credential rotation, and peer-identity cases run across failover; security guarantees survive topology changes."
+    },
+    "restore-review": {
+      "lanes": ["L10"],
+      "predicate": "The supported export (E26) is restored and the optional-review disposition is audited; passes when restore succeeds and independent security review is either completed or explicitly NOT_REQUESTED."
+    }
+  },
+  "unit": {
+    "predicate": "Full production and retained POC test suites, oracle-negative tests, and evidence-schema tests run with raw command output saved."
+  },
+  "blocked": {
+    "L03": {
+      "verdict": "BLOCKED",
+      "reason": "Three-independent-host journey requires machine/disk failure independence not available in this environment. Recorded as BLOCKED, not a waived pass."
+    }
+  },
+  "unsupported": {
+    "L08": {
+      "verdict": "SKIPPED",
+      "reason": "E29/E30 overload-bound and cold-replay capacity are perf/long-run gates out of scope by operator decision."
+    },
+    "perf": "SKIPPED",
+    "perf_reason": "All LS10 perf gates (base/head throughput, end-to-end p99, one-hour B5 workload, long-run capacity/retention/resource/failover/cold-replay metrics) are out of scope by operator decision; recorded as SKIPPED, not a waived pass.",
+    "independent_host": "BLOCKED",
+    "independent_host_reason": "Missing independent hosts is BLOCKED per plan rule (LS10 Verify perf Rule), never substituted with a same-host proxy."
+  }
+}

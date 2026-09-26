@@ -596,6 +596,11 @@ const PUBLIC_RPC_NAMES: &[&str] = &[
     "ListStreamBookmarks",
     "AdvanceRetention",
     "GetRetentionStatus",
+    "BeginExport",
+    "GetExportStatus",
+    "DownloadExport",
+    "CompleteExport",
+    "AbortExport",
     "AdmitReplayLease",
     "RenewReplayLease",
     "ReleaseReplayLease",
@@ -1168,6 +1173,8 @@ impl SecuredServerSecurity {
 }
 
 fn read_file(path: &Path, secret: bool) -> Result<Vec<u8>, StartupError> {
+    #[cfg(not(unix))]
+    let _ = secret;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         StartupError::InvalidConfig(format!(
             "security material {} is unavailable: {error}",

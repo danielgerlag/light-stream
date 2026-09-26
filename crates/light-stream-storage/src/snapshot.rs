@@ -520,7 +520,7 @@ impl SnapshotCatalog {
                 }
                 Err(error) => return Err(error),
             }
-            File::open(&self.objects)?.sync_all()?;
+            sync_directory(&self.objects)?;
         }
         verify_file(&final_path, bytes.len() as u64, digest)?;
         let artifact = SnapshotArtifact::open_verified(final_path, bytes.len() as u64, digest)?;
@@ -615,7 +615,7 @@ impl SnapshotCatalog {
                 file.get_ref().sync_all()?;
                 drop(file);
                 match fs::rename(&temporary, &final_path) {
-                    Ok(()) => File::open(&self.objects)?.sync_all()?,
+                    Ok(()) => sync_directory(&self.objects)?,
                     Err(error) if final_path.exists() => {
                         if error.kind() != io::ErrorKind::AlreadyExists {
                             verify_file(&final_path, byte_len, digest)?;
@@ -740,7 +740,7 @@ impl SnapshotArtifactWriter {
             fs::remove_file(&self.temporary)?;
         } else {
             fs::rename(&self.temporary, &final_path)?;
-            File::open(&self.catalog.objects)?.sync_all()?;
+            sync_directory(&self.catalog.objects)?;
         }
         self.finished = true;
         let artifact = SnapshotArtifact::open_verified(final_path, byte_len, digest)?;
@@ -881,6 +881,30 @@ fn hex_digest(digest: SnapshotDigest) -> String {
         write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
     }
     value
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    match open_directory(path).and_then(|file| file.sync_all()) {
+        Ok(()) => Ok(()),
+        Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(windows)]
+fn open_directory(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_directory(path: &Path) -> io::Result<File> {
+    File::open(path)
 }
 
 #[cfg(test)]

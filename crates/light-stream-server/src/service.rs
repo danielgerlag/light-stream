@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    io::{Read, Seek, SeekFrom},
+    sync::Arc,
+};
 
 use light_stream_core::{
     AdministrationIntent, AdministrationLifecycle, AdministrationOperation,
@@ -6,19 +9,22 @@ use light_stream_core::{
     HealthStatus, NodeDescriptor, NodeId, Permission, PrincipalId, ResourceScope, SecurityPolicy,
 };
 use light_stream_proto::{
-    admit_replay_lease_from_wire, advance_retention_from_wire, bookmark_page_to_wire,
-    bookmark_to_wire, bootstrap_from_wire, bootstrap_to_wire, capabilities_to_wire,
-    checkpoint_cas_to_wire, checkpoint_to_wire, compare_and_set_checkpoint_from_wire,
+    abort_export_request_from_wire, admit_replay_lease_from_wire, advance_retention_from_wire,
+    begin_export_from_wire, bookmark_page_to_wire, bookmark_to_wire, bootstrap_from_wire,
+    bootstrap_to_wire, capabilities_to_wire, checkpoint_cas_to_wire, checkpoint_to_wire,
+    compare_and_set_checkpoint_from_wire, complete_export_request_from_wire,
     create_bookmark_from_wire, create_stream_bookmark_from_wire, create_stream_from_wire,
     delete_bookmark_from_wire, delete_stream_bookmark_from_wire, domain_error_to_wire,
+    download_export_request_from_wire, export_chunk_to_wire, export_status_to_wire,
     fetch_from_wire, fetch_protected_from_wire, fetch_to_wire, get_checkpoint_from_wire,
-    get_replay_lease_from_wire, health_to_wire, list_bookmarks_from_wire,
-    list_stream_bookmarks_from_wire, publish_batch_and_route_from_wire, publish_probe_from_wire,
-    publish_receipt_to_wire, receipt_from_wire, release_replay_lease_from_wire,
-    renew_replay_lease_from_wire, replay_lease_to_wire, resolve_bookmark_from_wire,
-    resolve_stream_bookmark_from_wire, retention_result_to_wire, retention_status_from_wire,
-    retention_status_to_wire, route_to_wire, stream_bookmark_page_to_wire, stream_bookmark_to_wire,
-    stream_selector_from_wire, stream_to_wire, unsupported_publish_to_wire,
+    get_export_status_request_from_wire, get_replay_lease_from_wire, health_to_wire,
+    list_bookmarks_from_wire, list_stream_bookmarks_from_wire, publish_batch_and_route_from_wire,
+    publish_probe_from_wire, publish_receipt_to_wire, receipt_from_wire,
+    release_replay_lease_from_wire, renew_replay_lease_from_wire, replay_lease_to_wire,
+    resolve_bookmark_from_wire, resolve_stream_bookmark_from_wire, retention_result_to_wire,
+    retention_status_from_wire, retention_status_to_wire, route_to_wire,
+    stream_bookmark_page_to_wire, stream_bookmark_to_wire, stream_selector_from_wire,
+    stream_to_wire, unsupported_publish_to_wire,
     v1::{self, light_stream_server::LightStream},
 };
 use tonic::{Request, Response, Status};
@@ -811,6 +817,218 @@ impl LightStream for PublicApi {
             }
         };
         Ok(Response::new(v1::RetentionStatusResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn begin_export(
+        &self,
+        request: Request<v1::BeginExportRequest>,
+    ) -> Result<Response<v1::BeginExportResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
+        let (_cluster, intent, deadline) = begin_export_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self.cluster.begin_export(intent, deadline).await {
+            Ok(status) => v1::begin_export_response::Result::Status(export_status_to_wire(&status)),
+            Err(error) => v1::begin_export_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::BeginExportResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn get_export_status(
+        &self,
+        request: Request<v1::GetExportStatusRequest>,
+    ) -> Result<Response<v1::GetExportStatusResponse>, Status> {
+        let _permit = self
+            .admit::<action::ClusterObserve, _>(
+                &request,
+                Permission::ClusterObserve,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
+        let (_cluster, request_id) = get_export_status_request_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        match self.cluster.export_status(&request_id).await {
+            Ok(Some(status)) => Ok(Response::new(v1::GetExportStatusResponse {
+                found: true,
+                result: Some(v1::get_export_status_response::Result::Status(
+                    export_status_to_wire(&status),
+                )),
+            })),
+            Ok(None) => Ok(Response::new(v1::GetExportStatusResponse {
+                found: false,
+                result: None,
+            })),
+            Err(error) => Ok(Response::new(v1::GetExportStatusResponse {
+                found: false,
+                result: Some(v1::get_export_status_response::Result::Error(
+                    domain_error_to_wire(&error),
+                )),
+            })),
+        }
+    }
+
+    async fn download_export(
+        &self,
+        request: Request<v1::DownloadExportRequest>,
+    ) -> Result<Response<v1::DownloadExportResponse>, Status> {
+        const DEFAULT_EXPORT_CHUNK_BYTES: usize = 1024 * 1024;
+
+        let _permit = self
+            .admit::<action::ClusterObserve, _>(
+                &request,
+                Permission::ClusterObserve,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                None,
+            )
+            .await?;
+        let (_cluster, request_id, offset, max_bytes) =
+            download_export_request_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self.cluster.export_status(&request_id).await {
+            Ok(Some(light_stream_core::ExportStatus::Active(active)))
+                if active.phase() == light_stream_core::ExportStatusPhase::Available =>
+            {
+                match self.cluster.export_available_artifact(&request_id).await {
+                    Ok(Some(artifact)) if offset <= artifact.length() => {
+                        let limit = if max_bytes == 0 {
+                            DEFAULT_EXPORT_CHUNK_BYTES
+                        } else {
+                            max_bytes as usize
+                        };
+                        match self
+                            .cluster
+                            .open_export_artifact(active.export(), artifact)
+                            .await
+                            .and_then(|mut file| {
+                                file.seek(SeekFrom::Start(offset)).map_err(|error| {
+                                    light_stream_core::DomainError::Storage {
+                                        reason: error.to_string(),
+                                    }
+                                })?;
+                                let mut data = vec![0; limit];
+                                let read = file.read(&mut data).map_err(|error| {
+                                    light_stream_core::DomainError::Storage {
+                                        reason: error.to_string(),
+                                    }
+                                })?;
+                                data.truncate(read);
+                                Ok(export_chunk_to_wire(
+                                    artifact,
+                                    offset,
+                                    data,
+                                    offset + read as u64 >= artifact.length(),
+                                ))
+                            }) {
+                            Ok(chunk) => v1::download_export_response::Result::Chunk(chunk),
+                            Err(error) => v1::download_export_response::Result::Error(
+                                domain_error_to_wire(&error),
+                            ),
+                        }
+                    }
+                    Ok(Some(_)) => v1::download_export_response::Result::Error(
+                        domain_error_to_wire(&light_stream_core::DomainError::InvalidRange {
+                            reason: "download offset exceeds export artifact length".to_owned(),
+                        }),
+                    ),
+                    Ok(None) => v1::download_export_response::Result::Error(domain_error_to_wire(
+                        &light_stream_core::DomainError::InvalidRange {
+                            reason: "export artifact is not available".to_owned(),
+                        },
+                    )),
+                    Err(error) => {
+                        v1::download_export_response::Result::Error(domain_error_to_wire(&error))
+                    }
+                }
+            }
+            Ok(Some(_)) | Ok(None) => v1::download_export_response::Result::Error(
+                domain_error_to_wire(&light_stream_core::DomainError::InvalidRange {
+                    reason: "export artifact is not available".to_owned(),
+                }),
+            ),
+            Err(error) => v1::download_export_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::DownloadExportResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn complete_export(
+        &self,
+        request: Request<v1::CompleteExportRequest>,
+    ) -> Result<Response<v1::CompleteExportResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
+        let (_cluster, request_id, export_id, artifact) =
+            complete_export_request_from_wire(request.into_inner())
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let result = match self
+            .cluster
+            .request_export_completion(request_id, export_id, artifact)
+            .await
+        {
+            Ok(status) => {
+                v1::complete_export_response::Result::Status(export_status_to_wire(&status))
+            }
+            Err(error) => v1::complete_export_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::CompleteExportResponse {
+            result: Some(result),
+        }))
+    }
+
+    async fn abort_export(
+        &self,
+        request: Request<v1::AbortExportRequest>,
+    ) -> Result<Response<v1::AbortExportResponse>, Status> {
+        let claimed = mutation_principal(request.get_ref().request_id.as_ref())?;
+        let _permit = self
+            .admit::<action::ClusterAdmin, _>(
+                &request,
+                Permission::ClusterAdmin,
+                cluster_scope(&request.get_ref().cluster_id)?,
+                claimed.as_ref(),
+            )
+            .await?;
+        let (_cluster, request_id) = abort_export_request_from_wire(request.into_inner())
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Status::internal(error.to_string()))?
+            .as_millis() as u64;
+        let observed_clock = light_stream_core::ExportDeadline::new(now, now)
+            .map_err(|error| Status::internal(error.to_string()))?;
+        let result = match self
+            .cluster
+            .request_export_abort(
+                request_id,
+                light_stream_core::ExportAbortReason::OperatorRequested,
+                observed_clock,
+            )
+            .await
+        {
+            Ok(status) => v1::abort_export_response::Result::Status(export_status_to_wire(&status)),
+            Err(error) => v1::abort_export_response::Result::Error(domain_error_to_wire(&error)),
+        };
+        Ok(Response::new(v1::AbortExportResponse {
             result: Some(result),
         }))
     }

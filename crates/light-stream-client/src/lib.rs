@@ -1,43 +1,48 @@
 use std::{
     fs,
     future::Future,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use light_stream_core::{
-    AmbiguousRequest, BookmarkId, BookmarkName, BookmarkPage, BookmarkPageRequest,
-    BookmarkPublicationSequence, BootstrapResult, BootstrapSpec, Capability, CapabilityReport,
-    CapabilitySupport, CheckpointCasResult, CheckpointExpectation, CheckpointKey,
+    AmbiguousRequest, ArtifactIdentity, BookmarkId, BookmarkName, BookmarkPage,
+    BookmarkPageRequest, BookmarkPublicationSequence, BootstrapResult, BootstrapSpec, Capability,
+    CapabilityReport, CapabilitySupport, CheckpointCasResult, CheckpointExpectation, CheckpointKey,
     CheckpointMutation, ClusterId, CommittedBookmark, CommittedCheckpoint, CommittedRecord,
     CommittedRecordRange, CommittedStreamBookmark, ConsensusGroup, CreateStreamSpec, DomainError,
-    FetchPage, GroupId, HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal,
-    MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor, NodePhase, PartitionId, PartitionKey, PartitionRoute,
-    ProducerRequestId, ProducerSessionId, PublishBatch, PublishProbe, PublishReceipt,
-    ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest, RequestOutcome,
-    RequestSequence, RetentionRequest, RetentionResult, RetentionStatus, SecurityMode,
-    SecurityMutation, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
-    StreamDescriptor, StreamId, StreamName, WriteReadiness,
+    ExportDeadline, ExportId, ExportIntent, ExportStatus, ExportStatusPhase, FetchPage, GroupId,
+    HealthStatus, LeaderHint, LeaseRelease, LeaseRenewal, MAX_PUBLIC_MESSAGE_BYTES, NodeDescriptor,
+    NodePhase, PartitionId, PartitionKey, PartitionRoute, ProducerRequestId, ProducerSessionId,
+    PublishBatch, PublishProbe, PublishReceipt, ReadinessReason, RecordOffset, ReplayLease,
+    ReplayLeaseId, ReplayLeaseRequest, RequestOutcome, RequestSequence, RetentionRequest,
+    RetentionResult, RetentionStatus, SecurityMode, SecurityMutation, StreamBookmarkPage,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId, StreamName,
+    WriteReadiness,
 };
 use light_stream_proto::{
     bookmark_from_wire, checkpoint_cas_from_wire, checkpoint_from_wire, checkpoint_key_to_wire,
-    domain_error_from_wire, mutation_request_id_to_wire, replay_lease_from_wire,
+    domain_error_from_wire, export_artifact_from_wire, export_artifact_to_wire,
+    export_status_from_wire, mutation_request_id_to_wire, replay_lease_from_wire,
     retention_result_from_wire, retention_status_from_response, route_from_wire,
     security_mode_from_wire, stream_bookmark_from_wire, stream_from_wire,
     v1::{
-        self, administration_response, advance_retention_response, bookmark_response,
-        bootstrap_response, fetch_response, get_checkpoint_response,
-        light_stream_client::LightStreamClient, list_bookmarks_response,
-        list_stream_bookmarks_response, list_streams_response, publish_response, receipt_response,
-        replay_lease_response, retention_status_response, route_response, security_policy_response,
-        snapshot_group_response, stream_bookmark_response, stream_response,
+        self, abort_export_response, administration_response, advance_retention_response,
+        begin_export_response, bookmark_response, bootstrap_response, complete_export_response,
+        download_export_response, fetch_response, get_checkpoint_response,
+        get_export_status_response, light_stream_client::LightStreamClient,
+        list_bookmarks_response, list_stream_bookmarks_response, list_streams_response,
+        publish_response, receipt_response, replay_lease_response, retention_status_response,
+        route_response, security_policy_response, snapshot_group_response,
+        stream_bookmark_response, stream_response,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -218,6 +223,139 @@ enum AdministrationCall {
     Transfer(v1::TransferLeadershipRequest),
     Status(v1::AdministrationStatusRequest),
     Abort(v1::AbortAdministrationRequest),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DownloadedExportChunk {
+    pub artifact: ArtifactIdentity,
+    pub offset: u64,
+    pub data: Vec<u8>,
+    pub last: bool,
+}
+
+struct ExportSha256 {
+    state: [u32; 8],
+    len: u64,
+    buffer: [u8; 64],
+    buffer_len: usize,
+}
+
+impl ExportSha256 {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    const fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            len: 0,
+            buffer: [0; 64],
+            buffer_len: 0,
+        }
+    }
+
+    fn update(&mut self, mut input: &[u8]) {
+        self.len = self.len.wrapping_add(input.len() as u64);
+        if self.buffer_len != 0 {
+            let needed = 64 - self.buffer_len;
+            let take = needed.min(input.len());
+            self.buffer[self.buffer_len..self.buffer_len + take].copy_from_slice(&input[..take]);
+            self.buffer_len += take;
+            input = &input[take..];
+            if self.buffer_len == 64 {
+                let block = self.buffer;
+                self.compress(&block);
+                self.buffer_len = 0;
+            }
+        }
+        while input.len() >= 64 {
+            let mut block = [0u8; 64];
+            block.copy_from_slice(&input[..64]);
+            self.compress(&block);
+            input = &input[64..];
+        }
+        if !input.is_empty() {
+            self.buffer[..input.len()].copy_from_slice(input);
+            self.buffer_len = input.len();
+        }
+    }
+
+    fn finalize(mut self) -> [u8; 32] {
+        let bit_len = self.len.wrapping_mul(8);
+        self.buffer[self.buffer_len] = 0x80;
+        self.buffer_len += 1;
+        if self.buffer_len > 56 {
+            self.buffer[self.buffer_len..].fill(0);
+            let block = self.buffer;
+            self.compress(&block);
+            self.buffer_len = 0;
+        }
+        self.buffer[self.buffer_len..56].fill(0);
+        self.buffer[56..].copy_from_slice(&bit_len.to_be_bytes());
+        let block = self.buffer;
+        self.compress(&block);
+
+        let mut out = [0u8; 32];
+        for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
+            chunk.copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    fn compress(&mut self, block: &[u8; 64]) {
+        let mut schedule = [0u32; 64];
+        for (index, chunk) in block.chunks_exact(4).enumerate().take(16) {
+            schedule[index] = u32::from_be_bytes(chunk.try_into().expect("chunk is 4 bytes"));
+        }
+        for index in 16..64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+        for (index, word) in schedule.iter().enumerate() {
+            let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = h
+                .wrapping_add(sum1)
+                .wrapping_add(ch)
+                .wrapping_add(Self::K[index])
+                .wrapping_add(*word);
+            let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = sum0.wrapping_add(maj);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *slot = slot.wrapping_add(value);
+        }
+    }
 }
 
 impl AdministrationCall {
@@ -2129,6 +2267,373 @@ impl Client {
         }
     }
 
+    pub async fn begin_export(
+        &self,
+        cluster: ClusterId,
+        intent: ExportIntent,
+        deadline: ExportDeadline,
+    ) -> Result<ExportStatus, ClientError> {
+        if intent.cluster() != cluster {
+            return Err(DomainError::IdentityMismatch {
+                reason: "export intent belongs to another cluster".to_owned(),
+            }
+            .into());
+        }
+        let mutation = intent.request().clone();
+        let request = v1::BeginExportRequest {
+            cluster_id: cluster.to_string(),
+            request_id: Some(mutation_request_id_to_wire(intent.request())),
+            stream_ids: intent
+                .selection()
+                .streams()
+                .map(|stream| stream.to_string())
+                .collect(),
+            deadline_lower_unix_ms: deadline.lower_bound_unix_ms(),
+            deadline_upper_unix_ms: deadline.upper_bound_unix_ms(),
+        };
+        let rpc_deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .begin_export_once(
+                    &endpoint,
+                    request.clone(),
+                    rpc_deadline,
+                    &mut request_may_have_reached,
+                )
+                .await
+            {
+                Ok(status) => return Ok(status),
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(mutation, request_may_have_reached));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) if self.retry => {
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(rpc_deadline)
+                .await
+                .map_err(|_| mutation_deadline_error(mutation.clone(), request_may_have_reached))?;
+        }
+    }
+
+    pub async fn export_status(
+        &self,
+        cluster: ClusterId,
+        request_id: light_stream_core::MutationRequestId,
+    ) -> Result<Option<ExportStatus>, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let request = v1::GetExportStatusRequest {
+            cluster_id: cluster.to_string(),
+            request_id: Some(mutation_request_id_to_wire(&request_id)),
+        };
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .export_status_once(&endpoint, request.clone(), deadline)
+                .await
+            {
+                Ok(status) => return Ok(status),
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader: Some(hint),
+                    ..
+                }))) if self.retry => {
+                    next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| non_write_deadline_error())?;
+        }
+    }
+
+    pub async fn download_export_chunk(
+        &self,
+        cluster: ClusterId,
+        request_id: light_stream_core::MutationRequestId,
+        offset: u64,
+        max_bytes: u32,
+    ) -> Result<DownloadedExportChunk, ClientError> {
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let request = v1::DownloadExportRequest {
+            cluster_id: cluster.to_string(),
+            request_id: Some(mutation_request_id_to_wire(&request_id)),
+            offset,
+            max_bytes,
+        };
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .download_export_once(&endpoint, request.clone(), deadline)
+                .await
+            {
+                Ok(chunk) => return Ok(chunk),
+                Err(AttemptError::Deadline) => return Err(non_write_deadline_error()),
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader: Some(hint),
+                    ..
+                }))) if self.retry => {
+                    next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| non_write_deadline_error())?;
+        }
+    }
+
+    pub async fn complete_export(
+        &self,
+        cluster: ClusterId,
+        request_id: light_stream_core::MutationRequestId,
+        export_id: ExportId,
+        artifact: ArtifactIdentity,
+    ) -> Result<ExportStatus, ClientError> {
+        let mutation = request_id.clone();
+        let request = v1::CompleteExportRequest {
+            cluster_id: cluster.to_string(),
+            request_id: Some(mutation_request_id_to_wire(&request_id)),
+            export_id: export_id.to_string(),
+            artifact: Some(export_artifact_to_wire(artifact)),
+        };
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .complete_export_once(
+                    &endpoint,
+                    request.clone(),
+                    deadline,
+                    &mut request_may_have_reached,
+                )
+                .await
+            {
+                Ok(status) => return Ok(status),
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(mutation, request_may_have_reached));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) if self.retry => {
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| mutation_deadline_error(mutation.clone(), request_may_have_reached))?;
+        }
+    }
+
+    pub async fn abort_export(
+        &self,
+        cluster: ClusterId,
+        request_id: light_stream_core::MutationRequestId,
+    ) -> Result<ExportStatus, ClientError> {
+        let mutation = request_id.clone();
+        let request = v1::AbortExportRequest {
+            cluster_id: cluster.to_string(),
+            request_id: Some(mutation_request_id_to_wire(&request_id)),
+        };
+        let deadline = Deadline::after(self.deadline);
+        let mut endpoints = self.seeds.clone();
+        let mut index = 0usize;
+        let mut request_may_have_reached = false;
+        loop {
+            let endpoint = endpoints[index % endpoints.len()].clone();
+            let mut next_index = index.wrapping_add(1);
+            match self
+                .abort_export_once(
+                    &endpoint,
+                    request.clone(),
+                    deadline,
+                    &mut request_may_have_reached,
+                )
+                .await
+            {
+                Ok(status) => return Ok(status),
+                Err(AttemptError::Deadline) => {
+                    return Err(mutation_deadline_error(mutation, request_may_have_reached));
+                }
+                Err(AttemptError::Client(ClientError::Domain(DomainError::NotLeader {
+                    leader,
+                    ..
+                }))) if self.retry => {
+                    if let Some(hint) = leader {
+                        next_index = add_hint(&mut endpoints, hint.public_uri())?;
+                    }
+                }
+                Err(AttemptError::Client(ClientError::Domain(
+                    DomainError::QuorumUnavailable { .. },
+                )))
+                | Err(AttemptError::Client(ClientError::Connection(_)))
+                | Err(AttemptError::Client(ClientError::Request(_)))
+                    if self.retry => {}
+                Err(AttemptError::Client(error)) => return Err(error),
+            }
+            index = next_index;
+            retry_sleep(deadline)
+                .await
+                .map_err(|_| mutation_deadline_error(mutation.clone(), request_may_have_reached))?;
+        }
+    }
+
+    pub async fn export_to(
+        &self,
+        cluster: ClusterId,
+        intent: ExportIntent,
+        deadline: ExportDeadline,
+        output: &Path,
+    ) -> Result<ArtifactIdentity, ClientError> {
+        self.begin_export(cluster, intent.clone(), deadline).await?;
+        let request_id = intent.request().clone();
+        let (export_id, artifact) = self
+            .wait_for_export_available(cluster, request_id.clone(), deadline)
+            .await?;
+        let part_path = export_part_path(output);
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&part_path)
+            .map_err(|error| ClientError::Request(error.to_string()))?;
+        let mut hasher = ExportSha256::new();
+        let mut offset = 0u64;
+        loop {
+            let chunk = self
+                .download_export_chunk(cluster, request_id.clone(), offset, 1024 * 1024)
+                .await?;
+            if chunk.artifact != artifact {
+                let _ = fs::remove_file(&part_path);
+                return Err(ClientError::Protocol(
+                    "export artifact identity changed while downloading".to_owned(),
+                ));
+            }
+            if chunk.offset != offset {
+                let _ = fs::remove_file(&part_path);
+                return Err(ClientError::Protocol(
+                    "export chunk offset did not match requested offset".to_owned(),
+                ));
+            }
+            file.write_all(&chunk.data)
+                .map_err(|error| ClientError::Request(error.to_string()))?;
+            hasher.update(&chunk.data);
+            offset += chunk.data.len() as u64;
+            if chunk.last {
+                break;
+            }
+        }
+        let digest = hasher.finalize();
+        if offset != artifact.length() || digest != artifact.sha256() {
+            let _ = fs::remove_file(&part_path);
+            return Err(ClientError::Protocol(
+                "downloaded export artifact failed integrity verification".to_owned(),
+            ));
+        }
+        file.sync_all()
+            .map_err(|error| ClientError::Request(error.to_string()))?;
+        drop(file);
+        self.complete_export(cluster, request_id, export_id, artifact)
+            .await?;
+        fs::rename(&part_path, output).map_err(|error| ClientError::Request(error.to_string()))?;
+        sync_parent_dir(output)?;
+        Ok(artifact)
+    }
+
+    async fn wait_for_export_available(
+        &self,
+        cluster: ClusterId,
+        request_id: light_stream_core::MutationRequestId,
+        export_deadline: ExportDeadline,
+    ) -> Result<(ExportId, ArtifactIdentity), ClientError> {
+        loop {
+            match self.export_status(cluster, request_id.clone()).await? {
+                Some(ExportStatus::Active(active))
+                    if active.phase() == ExportStatusPhase::Available =>
+                {
+                    let chunk = self
+                        .download_export_chunk(cluster, request_id, 0, 1)
+                        .await?;
+                    return Ok((active.export(), chunk.artifact));
+                }
+                Some(ExportStatus::Terminal(receipt)) => {
+                    return Err(ClientError::Protocol(format!(
+                        "export reached terminal state before download: {:?}",
+                        receipt.disposition()
+                    )));
+                }
+                _ => {}
+            }
+            let now = unix_ms_now()?;
+            if now >= export_deadline.upper_bound_unix_ms() {
+                return Err(ClientError::Interrupted {
+                    reason: Interruption::Deadline,
+                    outcome: RequestOutcome::NotApplicable,
+                    request: Some(AmbiguousRequest::Mutation {
+                        request: request_id,
+                    }),
+                });
+            }
+            let sleep_ms = (export_deadline.upper_bound_unix_ms() - now).min(250);
+            tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+        }
+    }
+
     pub async fn admit_replay_lease(
         &self,
         request: ReplayLeaseRequest,
@@ -3399,6 +3904,141 @@ impl Client {
         }
     }
 
+    async fn begin_export_once(
+        &self,
+        endpoint: &str,
+        request: v1::BeginExportRequest,
+        deadline: Deadline,
+        request_may_have_reached: &mut bool,
+    ) -> Result<ExportStatus, AttemptError> {
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
+        let (request, timeout) = timed_request(deadline, request)?;
+        *request_may_have_reached = true;
+        let response = await_rpc(deadline, timeout, client.begin_export(request)).await?;
+        match response.result {
+            Some(begin_export_response::Result::Status(status)) => export_status_from_wire(status)
+                .map_err(ClientError::Domain)
+                .map_err(AttemptError::Client),
+            Some(begin_export_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "begin export response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
+    async fn export_status_once(
+        &self,
+        endpoint: &str,
+        request: v1::GetExportStatusRequest,
+        deadline: Deadline,
+    ) -> Result<Option<ExportStatus>, AttemptError> {
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
+        let response = execute_rpc(deadline, request, |request| {
+            client.get_export_status(request)
+        })
+        .await?;
+        match response.result {
+            Some(get_export_status_response::Result::Status(status)) if response.found => {
+                export_status_from_wire(status)
+                    .map(Some)
+                    .map_err(ClientError::Domain)
+                    .map_err(AttemptError::Client)
+            }
+            None if !response.found => Ok(None),
+            Some(get_export_status_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            Some(_) | None => Err(AttemptError::Client(ClientError::Protocol(
+                "export status response had inconsistent found/result fields".to_owned(),
+            ))),
+        }
+    }
+
+    async fn download_export_once(
+        &self,
+        endpoint: &str,
+        request: v1::DownloadExportRequest,
+        deadline: Deadline,
+    ) -> Result<DownloadedExportChunk, AttemptError> {
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
+        let response =
+            execute_rpc(deadline, request, |request| client.download_export(request)).await?;
+        match response.result {
+            Some(download_export_response::Result::Chunk(chunk)) => {
+                let artifact = export_artifact_from_wire(chunk.artifact.ok_or_else(|| {
+                    DomainError::InvalidPayload {
+                        reason: "export chunk omitted artifact".to_owned(),
+                    }
+                })?)
+                .map_err(ClientError::Domain)?;
+                Ok(DownloadedExportChunk {
+                    artifact,
+                    offset: chunk.offset,
+                    data: chunk.data,
+                    last: chunk.last,
+                })
+            }
+            Some(download_export_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "download export response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
+    async fn complete_export_once(
+        &self,
+        endpoint: &str,
+        request: v1::CompleteExportRequest,
+        deadline: Deadline,
+        request_may_have_reached: &mut bool,
+    ) -> Result<ExportStatus, AttemptError> {
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
+        let (request, timeout) = timed_request(deadline, request)?;
+        *request_may_have_reached = true;
+        let response = await_rpc(deadline, timeout, client.complete_export(request)).await?;
+        match response.result {
+            Some(complete_export_response::Result::Status(status)) => {
+                export_status_from_wire(status)
+                    .map_err(ClientError::Domain)
+                    .map_err(AttemptError::Client)
+            }
+            Some(complete_export_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "complete export response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
+    async fn abort_export_once(
+        &self,
+        endpoint: &str,
+        request: v1::AbortExportRequest,
+        deadline: Deadline,
+        request_may_have_reached: &mut bool,
+    ) -> Result<ExportStatus, AttemptError> {
+        let mut client = connect_client(endpoint, deadline, &self.security).await?;
+        let (request, timeout) = timed_request(deadline, request)?;
+        *request_may_have_reached = true;
+        let response = await_rpc(deadline, timeout, client.abort_export(request)).await?;
+        match response.result {
+            Some(abort_export_response::Result::Status(status)) => export_status_from_wire(status)
+                .map_err(ClientError::Domain)
+                .map_err(AttemptError::Client),
+            Some(abort_export_response::Result::Error(value)) => {
+                Err(AttemptError::Client(decode_domain_error(value)?.into()))
+            }
+            None => Err(AttemptError::Client(ClientError::Protocol(
+                "abort export response omitted its typed result".to_owned(),
+            ))),
+        }
+    }
+
     async fn replay_mutation_once(
         &self,
         endpoint: &str,
@@ -3708,6 +4348,8 @@ fn load_authorization(
 }
 
 fn read_client_file(path: &Path, secret: bool) -> Result<Vec<u8>, ClientError> {
+    #[cfg(not(unix))]
+    let _ = secret;
     let metadata = fs::symlink_metadata(path).map_err(|error| {
         ClientError::SecurityConfiguration(format!(
             "security material {} is unavailable: {error}",
@@ -3942,6 +4584,34 @@ fn non_write_deadline_error() -> ClientError {
     .into()
 }
 
+fn unix_ms_now() -> Result<u64, ClientError> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| ClientError::Request(error.to_string()))?
+        .as_millis() as u64)
+}
+
+fn export_part_path(output: &Path) -> PathBuf {
+    let mut value = output.as_os_str().to_os_string();
+    value.push(".part");
+    PathBuf::from(value)
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<(), ClientError> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| ClientError::Request(error.to_string()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<(), ClientError> {
+    Ok(())
+}
+
 fn validate_endpoint(endpoint: &str) -> Result<(), ClientError> {
     Endpoint::from_shared(endpoint.to_owned())
         .map(|_| ())
@@ -4085,6 +4755,20 @@ mod tests {
             "018f3f7e-5b3b-7c11-98f7-b65ac15f65c0".parse().unwrap(),
             RequestSequence::new(42),
         )
+    }
+
+    #[test]
+    fn export_sha256_matches_known_digest() {
+        let mut digest = ExportSha256::new();
+        digest.update(b"abc");
+        assert_eq!(
+            digest.finalize(),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
+                0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
+                0xf2, 0x00, 0x15, 0xad,
+            ]
+        );
     }
 
     #[test]
