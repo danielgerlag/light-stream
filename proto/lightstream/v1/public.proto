@@ -386,6 +386,111 @@ message RetentionStatusResponse {
   }
 }
 
+message ExportArtifact {
+  uint64 length = 1;
+  bytes sha256 = 2;
+}
+
+message ActiveExportView {
+  string export_id = 1;
+  uint64 epoch = 2;
+  string phase = 3;
+}
+
+message ExportReceiptView {
+  MutationRequestId request_id = 1;
+  string export_id = 2;
+  uint64 epoch = 3;
+  bytes request_digest = 4;
+  uint64 deadline_lower_unix_ms = 5;
+  uint64 deadline_upper_unix_ms = 6;
+  string disposition = 7;
+  ExportArtifact artifact = 8;
+  string abort_reason = 9;
+}
+
+message ExportStatusView {
+  oneof state {
+    ActiveExportView active = 1;
+    ExportReceiptView terminal = 2;
+  }
+}
+
+message BeginExportRequest {
+  string cluster_id = 1;
+  MutationRequestId request_id = 2;
+  repeated string stream_ids = 3;
+  uint64 deadline_lower_unix_ms = 4;
+  uint64 deadline_upper_unix_ms = 5;
+}
+
+message BeginExportResponse {
+  oneof result {
+    ExportStatusView status = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message GetExportStatusRequest {
+  string cluster_id = 1;
+  MutationRequestId request_id = 2;
+}
+
+message GetExportStatusResponse {
+  oneof result {
+    ExportStatusView status = 1;
+    ErrorResult error = 2;
+  }
+  bool found = 3;
+}
+
+message DownloadExportRequest {
+  string cluster_id = 1;
+  MutationRequestId request_id = 2;
+  uint64 offset = 3;
+  uint32 max_bytes = 4;
+}
+
+message ExportChunk {
+  ExportArtifact artifact = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+  bool last = 4;
+}
+
+message DownloadExportResponse {
+  oneof result {
+    ExportChunk chunk = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message CompleteExportRequest {
+  string cluster_id = 1;
+  MutationRequestId request_id = 2;
+  string export_id = 3;
+  ExportArtifact artifact = 4;
+}
+
+message CompleteExportResponse {
+  oneof result {
+    ExportStatusView status = 1;
+    ErrorResult error = 2;
+  }
+}
+
+message AbortExportRequest {
+  string cluster_id = 1;
+  MutationRequestId request_id = 2;
+}
+
+message AbortExportResponse {
+  oneof result {
+    ExportStatusView status = 1;
+    ErrorResult error = 2;
+  }
+}
+
 message ReplayRange {
   string stream_id = 1;
   uint32 partition_id = 2;
@@ -724,6 +829,11 @@ service LightStream {
   rpc ListStreamBookmarks(ListStreamBookmarksRequest) returns (ListStreamBookmarksResponse);
   rpc AdvanceRetention(AdvanceRetentionRequest) returns (AdvanceRetentionResponse);
   rpc GetRetentionStatus(RetentionStatusRequest) returns (RetentionStatusResponse);
+  rpc BeginExport(BeginExportRequest) returns (BeginExportResponse);
+  rpc GetExportStatus(GetExportStatusRequest) returns (GetExportStatusResponse);
+  rpc DownloadExport(DownloadExportRequest) returns (DownloadExportResponse);
+  rpc CompleteExport(CompleteExportRequest) returns (CompleteExportResponse);
+  rpc AbortExport(AbortExportRequest) returns (AbortExportResponse);
   rpc AdmitReplayLease(AdmitReplayLeaseRequest) returns (ReplayLeaseResponse);
   rpc RenewReplayLease(RenewReplayLeaseRequest) returns (ReplayLeaseResponse);
   rpc ReleaseReplayLease(ReleaseReplayLeaseRequest) returns (ReplayLeaseResponse);

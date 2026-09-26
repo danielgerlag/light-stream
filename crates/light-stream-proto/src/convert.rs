@@ -1,18 +1,21 @@
 use light_stream_core::{
-    AmbiguousRequest, BookmarkId, BookmarkLifecycle, BookmarkName, BookmarkPage,
+    AmbiguousRequest, ArtifactIdentity, BookmarkId, BookmarkLifecycle, BookmarkName, BookmarkPage,
     BookmarkPageRequest, BookmarkPublicationSequence, BootstrapCommand, BootstrapResult,
     BootstrapSpec, ByteCount, ByteLimit, CapabilityReport, CapabilitySupport, CatalogRequestId,
     CheckpointCasResult, CheckpointExpectation, CheckpointKey, CheckpointMutation,
     CheckpointRevision, ClusterId, CommittedBookmark, CommittedCheckpoint, CommittedCursor,
     CommittedStreamBookmark, ConsensusGroup, ConsumerId, CreateBookmarkSpec, CreateStreamSpec,
-    DomainError, FetchPage, GroupId, HealthStatus, LeaderHint, LeaseDeadline, LeaseDuration,
-    LeaseGeneration, LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId,
-    NodeDescriptor, NodeId, PartitionId, PartitionKey, PartitionPlacement, PartitionRoute,
-    PrincipalId, ProducerRequestId, ProducerSessionId, ProtectedFetchRequest, PublishBatch,
-    PublishProbe, PublishReceipt, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseLifecycle,
-    ReplayLeaseRequest, ReplayRange, RequestOutcome, RequestSequence, RetentionRequest,
-    RetentionResult, RetentionStatus, SecurityMode, StreamBookmarkPage, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName,
+    DomainError, ExportAbortReason, ExportDeadline, ExportEpoch, ExportFormatVersion, ExportId,
+    ExportIntent, ExportReceipt, ExportReceiptOutcome, ExportRequestDigest, ExportSelection,
+    ExportStatus, ExportStatusPhase, ExportTerminalDisposition, FetchPage, GroupId, HealthStatus,
+    LeaderHint, LeaseDeadline, LeaseDuration, LeaseGeneration, LeaseRelease, LeaseRenewal,
+    MutationRequestId, MutationSessionId, NodeDescriptor, NodeId, PartitionId, PartitionKey,
+    PartitionPlacement, PartitionRoute, PrincipalId, ProducerRequestId, ProducerSessionId,
+    ProtectedFetchRequest, PublishBatch, PublishProbe, PublishReceipt, RecordOffset, ReplayLease,
+    ReplayLeaseId, ReplayLeaseLifecycle, ReplayLeaseRequest, ReplayRange, RequestOutcome,
+    RequestSequence, RetentionRequest, RetentionResult, RetentionStatus, SecurityMode,
+    StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector, StreamDescriptor, StreamId,
+    StreamLifecycle, StreamName,
 };
 
 use crate::v1;
@@ -627,6 +630,262 @@ pub fn retention_status_to_wire(status: &RetentionStatus) -> v1::RetentionStatus
         logically_expired_bytes: status.logically_expired_bytes().get(),
         raft_only_bytes: status.raft_only_bytes().get(),
     }
+}
+
+pub type BeginExportParts = (ClusterId, ExportIntent, ExportDeadline);
+
+pub fn begin_export_from_wire(
+    request: v1::BeginExportRequest,
+) -> Result<BeginExportParts, DomainError> {
+    let cluster = request.cluster_id.parse::<ClusterId>()?;
+    let request_id = mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+        DomainError::InvalidIdentity {
+            kind: "mutation request ID".to_owned(),
+            reason: "request_id is required".to_owned(),
+        }
+    })?)?;
+    let selection = ExportSelection::try_new(
+        request
+            .stream_ids
+            .into_iter()
+            .map(|stream| stream.parse::<StreamId>())
+            .collect::<Result<Vec<_>, _>>()?,
+    )?;
+    let deadline = ExportDeadline::new(
+        request.deadline_lower_unix_ms,
+        request.deadline_upper_unix_ms,
+    )?;
+    let intent = ExportIntent::new(request_id, cluster, selection, ExportFormatVersion::V1);
+    Ok((cluster, intent, deadline))
+}
+
+pub fn export_artifact_to_wire(artifact: ArtifactIdentity) -> v1::ExportArtifact {
+    v1::ExportArtifact {
+        length: artifact.length(),
+        sha256: artifact.sha256().to_vec(),
+    }
+}
+
+pub fn export_artifact_from_wire(
+    artifact: v1::ExportArtifact,
+) -> Result<ArtifactIdentity, DomainError> {
+    ArtifactIdentity::new(
+        artifact.length,
+        bytes_32(artifact.sha256, "export artifact sha256")?,
+    )
+}
+
+pub fn export_status_to_wire(status: &ExportStatus) -> v1::ExportStatusView {
+    let state = match status {
+        ExportStatus::Active(active) => {
+            v1::export_status_view::State::Active(v1::ActiveExportView {
+                export_id: active.export().to_string(),
+                epoch: active.epoch().get(),
+                phase: export_phase_to_wire(active.phase()).to_owned(),
+            })
+        }
+        ExportStatus::Terminal(receipt) => {
+            let (artifact, abort_reason) = match receipt.outcome() {
+                ExportReceiptOutcome::Completed(artifact) => {
+                    (Some(export_artifact_to_wire(*artifact)), String::new())
+                }
+                ExportReceiptOutcome::Aborted(reason) => {
+                    (None, export_abort_reason_to_wire(reason).to_owned())
+                }
+            };
+            let (deadline_lower_unix_ms, deadline_upper_unix_ms) = receipt
+                .deadline()
+                .map(|deadline| {
+                    (
+                        deadline.lower_bound_unix_ms(),
+                        deadline.upper_bound_unix_ms(),
+                    )
+                })
+                .unwrap_or((0, 0));
+            v1::export_status_view::State::Terminal(v1::ExportReceiptView {
+                request_id: Some(mutation_request_id_to_wire(receipt.request())),
+                export_id: receipt.export().to_string(),
+                epoch: receipt.epoch().get(),
+                request_digest: receipt.request_digest().as_bytes().to_vec(),
+                deadline_lower_unix_ms,
+                deadline_upper_unix_ms,
+                disposition: export_disposition_to_wire(receipt.disposition()).to_owned(),
+                artifact,
+                abort_reason,
+            })
+        }
+    };
+    v1::ExportStatusView { state: Some(state) }
+}
+
+pub fn export_status_from_wire(status: v1::ExportStatusView) -> Result<ExportStatus, DomainError> {
+    match status.state.ok_or_else(|| DomainError::InvalidPayload {
+        reason: "export status omitted state".to_owned(),
+    })? {
+        v1::export_status_view::State::Active(active) => {
+            let phase = export_phase_from_wire(&active.phase)?;
+            let value = serde_json::json!({
+                "status": "active",
+                "value": {
+                    "export": active.export_id,
+                    "epoch": active.epoch,
+                    "phase": export_phase_to_wire(phase),
+                }
+            });
+            serde_json::from_value(value).map_err(|error| DomainError::InvalidPayload {
+                reason: error.to_string(),
+            })
+        }
+        v1::export_status_view::State::Terminal(terminal) => {
+            let request = mutation_request_id_from_wire(terminal.request_id.ok_or_else(|| {
+                DomainError::InvalidIdentity {
+                    kind: "mutation request ID".to_owned(),
+                    reason: "request_id is required".to_owned(),
+                }
+            })?)?;
+            let export_id = parse_export_id(&terminal.export_id)?;
+            let epoch = ExportEpoch::new(terminal.epoch)?;
+            let request_digest = ExportRequestDigest::from_bytes(bytes_32(
+                terminal.request_digest,
+                "export request digest",
+            )?);
+            if export_id
+                != ExportReceipt::new(
+                    request.clone(),
+                    epoch,
+                    request_digest,
+                    ExportDeadline::new(
+                        terminal.deadline_lower_unix_ms,
+                        terminal.deadline_upper_unix_ms,
+                    )?,
+                    ExportReceiptOutcome::Aborted(ExportAbortReason::OperatorRequested),
+                )
+                .export()
+            {
+                return Err(DomainError::InvalidIdentity {
+                    kind: "export ID".to_owned(),
+                    reason: "export_id does not match request_digest".to_owned(),
+                });
+            }
+            let outcome = match export_disposition_from_wire(&terminal.disposition)? {
+                ExportTerminalDisposition::Completed => {
+                    let artifact =
+                        terminal
+                            .artifact
+                            .ok_or_else(|| DomainError::InvalidPayload {
+                                reason: "completed export receipt omitted artifact".to_owned(),
+                            })?;
+                    ExportReceiptOutcome::Completed(export_artifact_from_wire(artifact)?)
+                }
+                ExportTerminalDisposition::Aborted => {
+                    if terminal.abort_reason.is_empty() {
+                        return Err(DomainError::InvalidPayload {
+                            reason: "aborted export receipt omitted abort_reason".to_owned(),
+                        });
+                    }
+                    ExportReceiptOutcome::Aborted(export_abort_reason_from_wire(
+                        &terminal.abort_reason,
+                    )?)
+                }
+            };
+            Ok(ExportStatus::Terminal(ExportReceipt::new(
+                request,
+                epoch,
+                request_digest,
+                ExportDeadline::new(
+                    terminal.deadline_lower_unix_ms,
+                    terminal.deadline_upper_unix_ms,
+                )?,
+                outcome,
+            )))
+        }
+    }
+}
+
+pub type GetExportStatusParts = (ClusterId, MutationRequestId);
+
+pub fn get_export_status_request_from_wire(
+    request: v1::GetExportStatusRequest,
+) -> Result<GetExportStatusParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "request_id is required".to_owned(),
+            }
+        })?)?,
+    ))
+}
+
+pub type DownloadExportParts = (ClusterId, MutationRequestId, u64, u32);
+
+pub fn download_export_request_from_wire(
+    request: v1::DownloadExportRequest,
+) -> Result<DownloadExportParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "request_id is required".to_owned(),
+            }
+        })?)?,
+        request.offset,
+        request.max_bytes,
+    ))
+}
+
+pub fn export_chunk_to_wire(
+    artifact: ArtifactIdentity,
+    offset: u64,
+    data: Vec<u8>,
+    last: bool,
+) -> v1::ExportChunk {
+    v1::ExportChunk {
+        artifact: Some(export_artifact_to_wire(artifact)),
+        offset,
+        data,
+        last,
+    }
+}
+
+pub type CompleteExportParts = (ClusterId, MutationRequestId, ExportId, ArtifactIdentity);
+
+pub fn complete_export_request_from_wire(
+    request: v1::CompleteExportRequest,
+) -> Result<CompleteExportParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "request_id is required".to_owned(),
+            }
+        })?)?,
+        parse_export_id(&request.export_id)?,
+        export_artifact_from_wire(request.artifact.ok_or_else(|| {
+            DomainError::InvalidPayload {
+                reason: "artifact is required".to_owned(),
+            }
+        })?)?,
+    ))
+}
+
+pub type AbortExportParts = (ClusterId, MutationRequestId);
+
+pub fn abort_export_request_from_wire(
+    request: v1::AbortExportRequest,
+) -> Result<AbortExportParts, DomainError> {
+    Ok((
+        request.cluster_id.parse()?,
+        mutation_request_id_from_wire(request.request_id.ok_or_else(|| {
+            DomainError::InvalidIdentity {
+                kind: "mutation request ID".to_owned(),
+                reason: "request_id is required".to_owned(),
+            }
+        })?)?,
+    ))
 }
 
 pub fn retention_status_from_response(
@@ -1526,9 +1785,171 @@ fn validate_uri(kind: &str, value: &str) -> Result<(), DomainError> {
     Ok(())
 }
 
+fn bytes_32(value: Vec<u8>, kind: &str) -> Result<[u8; 32], DomainError> {
+    value
+        .try_into()
+        .map_err(|value: Vec<u8>| DomainError::InvalidPayload {
+            reason: format!("{kind} must be exactly 32 bytes, got {}", value.len()),
+        })
+}
+
+fn parse_export_id(value: &str) -> Result<ExportId, DomainError> {
+    serde_json::from_value(serde_json::Value::String(value.to_owned())).map_err(|error| {
+        DomainError::InvalidIdentity {
+            kind: "export ID".to_owned(),
+            reason: error.to_string(),
+        }
+    })
+}
+
+fn export_phase_to_wire(phase: ExportStatusPhase) -> &'static str {
+    match phase {
+        ExportStatusPhase::Preparing => "preparing",
+        ExportStatusPhase::Frozen => "frozen",
+        ExportStatusPhase::Materializing => "materializing",
+        ExportStatusPhase::Available => "available",
+        ExportStatusPhase::Releasing => "releasing",
+        ExportStatusPhase::Aborting => "aborting",
+    }
+}
+
+fn export_phase_from_wire(value: &str) -> Result<ExportStatusPhase, DomainError> {
+    match value {
+        "preparing" => Ok(ExportStatusPhase::Preparing),
+        "frozen" => Ok(ExportStatusPhase::Frozen),
+        "materializing" => Ok(ExportStatusPhase::Materializing),
+        "available" => Ok(ExportStatusPhase::Available),
+        "releasing" => Ok(ExportStatusPhase::Releasing),
+        "aborting" => Ok(ExportStatusPhase::Aborting),
+        _ => Err(DomainError::InvalidName {
+            kind: "export phase".to_owned(),
+            reason: format!("unknown export phase {value:?}"),
+        }),
+    }
+}
+
+fn export_disposition_to_wire(disposition: ExportTerminalDisposition) -> &'static str {
+    match disposition {
+        ExportTerminalDisposition::Completed => "completed",
+        ExportTerminalDisposition::Aborted => "aborted",
+    }
+}
+
+fn export_disposition_from_wire(value: &str) -> Result<ExportTerminalDisposition, DomainError> {
+    match value {
+        "completed" => Ok(ExportTerminalDisposition::Completed),
+        "aborted" => Ok(ExportTerminalDisposition::Aborted),
+        _ => Err(DomainError::InvalidName {
+            kind: "export disposition".to_owned(),
+            reason: format!("unknown export disposition {value:?}"),
+        }),
+    }
+}
+
+fn export_abort_reason_to_wire(reason: &ExportAbortReason) -> &'static str {
+    match reason {
+        ExportAbortReason::OperatorRequested => "operator_requested",
+        ExportAbortReason::DeadlineExceeded => "deadline_exceeded",
+        ExportAbortReason::MaterializationFailed => "materialization_failed",
+    }
+}
+
+fn export_abort_reason_from_wire(value: &str) -> Result<ExportAbortReason, DomainError> {
+    match value {
+        "operator_requested" => Ok(ExportAbortReason::OperatorRequested),
+        "deadline_exceeded" => Ok(ExportAbortReason::DeadlineExceeded),
+        "materialization_failed" => Ok(ExportAbortReason::MaterializationFailed),
+        _ => Err(DomainError::InvalidName {
+            kind: "export abort reason".to_owned(),
+            reason: format!("unknown export abort reason {value:?}"),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn export_request() -> (ClusterId, MutationRequestId, ExportIntent, ExportDeadline) {
+        let cluster = "018f3f7e-5b3b-7c11-98f7-b65ac15f65be"
+            .parse::<ClusterId>()
+            .unwrap();
+        let request = MutationRequestId::new(
+            PrincipalId::parse("local-test").unwrap(),
+            "018f3f7e-5b3b-7c11-98f7-b65ac15f65c0"
+                .parse::<MutationSessionId>()
+                .unwrap(),
+            RequestSequence::new(7),
+        );
+        let selection = ExportSelection::try_new(["018f3f7e-5b3b-7c11-98f7-b65ac15f65bf"
+            .parse::<StreamId>()
+            .unwrap()])
+        .unwrap();
+        let intent =
+            ExportIntent::new(request.clone(), cluster, selection, ExportFormatVersion::V1);
+        let deadline = ExportDeadline::new(10, 20).unwrap();
+        (cluster, request, intent, deadline)
+    }
+
+    #[test]
+    fn export_status_active_round_trips_wire_domain_wire() {
+        let (_cluster, _request, intent, _deadline) = export_request();
+        let wire = v1::ExportStatusView {
+            state: Some(v1::export_status_view::State::Active(
+                v1::ActiveExportView {
+                    export_id: intent.export_id().to_string(),
+                    epoch: 1,
+                    phase: "available".to_owned(),
+                },
+            )),
+        };
+
+        let round_tripped = export_status_to_wire(&export_status_from_wire(wire).unwrap());
+
+        assert_eq!(
+            round_tripped.state,
+            Some(v1::export_status_view::State::Active(
+                v1::ActiveExportView {
+                    export_id: intent.export_id().to_string(),
+                    epoch: 1,
+                    phase: "available".to_owned(),
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn export_status_terminal_completed_round_trips() {
+        let (_cluster, request, intent, deadline) = export_request();
+        let artifact = ArtifactIdentity::new(12, [3; 32]).unwrap();
+        let status = ExportStatus::Terminal(ExportReceipt::new(
+            request,
+            ExportEpoch::new(2).unwrap(),
+            intent.request_digest(),
+            deadline,
+            ExportReceiptOutcome::Completed(artifact),
+        ));
+
+        let round_tripped = export_status_from_wire(export_status_to_wire(&status)).unwrap();
+
+        assert_eq!(round_tripped, status);
+    }
+
+    #[test]
+    fn export_status_terminal_aborted_round_trips() {
+        let (_cluster, request, intent, deadline) = export_request();
+        let status = ExportStatus::Terminal(ExportReceipt::new(
+            request,
+            ExportEpoch::new(3).unwrap(),
+            intent.request_digest(),
+            deadline,
+            ExportReceiptOutcome::Aborted(ExportAbortReason::DeadlineExceeded),
+        ));
+
+        let round_tripped = export_status_from_wire(export_status_to_wire(&status)).unwrap();
+
+        assert_eq!(round_tripped, status);
+    }
 
     #[test]
     fn publish_conversion_validates_the_boundary() {

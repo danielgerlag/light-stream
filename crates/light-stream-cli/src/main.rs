@@ -1,4 +1,10 @@
-use std::{fs, fs::OpenOptions, io::Write, path::PathBuf, time::Duration};
+use std::{
+    fs,
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -12,12 +18,13 @@ use light_stream_core::{
     BookmarkId, BookmarkName, BookmarkPageRequest, BookmarkPublicationSequence, BootstrapSpec,
     ByteLimit, CatalogRequestId, CheckpointExpectation, CheckpointKey, CheckpointMutation,
     CheckpointRevision, ClusterId, CommittedCursor, ConsumerId, CreateStreamSpec,
-    CredentialGeneration, CredentialId, CredentialRef, DomainError, GroupId, LeaseDuration,
-    LeaseRelease, LeaseRenewal, MutationRequestId, MutationSessionId, NodeDescriptor, NodeId,
-    PartitionId, PartitionKey, PrincipalId, ProducerRequestId, ProducerSessionId, PublishBatch,
-    RecordOffset, ReplayLeaseId, ReplayLeaseRequest, ReplayRange, RequestSequence,
-    RetentionRequest, StreamBookmarkPageRequest, StreamCursorVector, StreamId, StreamName,
-    TokenVerifier, TokenVerifierDigest,
+    CredentialGeneration, CredentialId, CredentialRef, DomainError, ExportDeadline,
+    ExportFormatVersion, ExportIntent, ExportSelection, GroupId, LeaseDuration, LeaseRelease,
+    LeaseRenewal, MutationRequestId, MutationSessionId, NodeDescriptor, NodeId, PartitionId,
+    PartitionKey, PrincipalId, ProducerRequestId, ProducerSessionId, PublishBatch, RecordOffset,
+    ReplayLeaseId, ReplayLeaseRequest, ReplayRange, RequestSequence, RetentionRequest,
+    StreamBookmarkPageRequest, StreamCursorVector, StreamId, StreamName, TokenVerifier,
+    TokenVerifierDigest,
 };
 use serde_json::json;
 
@@ -66,6 +73,10 @@ enum Command {
     Retention {
         #[command(subcommand)]
         command: RetentionCommand,
+    },
+    Export {
+        #[command(subcommand)]
+        command: ExportCommand,
     },
     Replay {
         #[command(subcommand)]
@@ -281,6 +292,36 @@ enum RetentionCommand {
     Status {
         #[command(flatten)]
         target: TargetArgs,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExportCommand {
+    Create {
+        #[arg(long)]
+        cluster_id: String,
+        #[arg(long = "stream")]
+        streams: Vec<String>,
+        #[command(flatten)]
+        mutation: MutationArgs,
+        #[arg(long)]
+        deadline_lower_ms: Option<u64>,
+        #[arg(long)]
+        deadline_upper_ms: Option<u64>,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Status {
+        #[arg(long)]
+        cluster_id: String,
+        #[command(flatten)]
+        mutation: MutationArgs,
+    },
+    Abort {
+        #[arg(long)]
+        cluster_id: String,
+        #[command(flatten)]
+        mutation: MutationArgs,
     },
 }
 
@@ -1043,6 +1084,71 @@ async fn run(args: Args, cancellation: Cancellation) -> Result<serde_json::Value
                 }
             }
         }
+        Command::Export { command } => {
+            let client = connect_client(
+                endpoint.clone(),
+                seeds,
+                deadline,
+                retry,
+                security_config.as_deref(),
+            )
+            .await?;
+            match command {
+                ExportCommand::Create {
+                    cluster_id,
+                    streams,
+                    mutation,
+                    deadline_lower_ms,
+                    deadline_upper_ms,
+                    output,
+                } => {
+                    let cluster = cluster_id.parse::<ClusterId>()?;
+                    let request = parse_mutation(&mutation)?;
+                    let selection = ExportSelection::try_new(
+                        streams
+                            .into_iter()
+                            .map(|stream| stream.parse::<StreamId>())
+                            .collect::<Result<Vec<_>, _>>()?,
+                    )?;
+                    let export_deadline =
+                        parse_export_deadline(deadline_lower_ms, deadline_upper_ms)?;
+                    let intent =
+                        ExportIntent::new(request, cluster, selection, ExportFormatVersion::V1);
+                    let artifact = client
+                        .export_to(cluster, intent, export_deadline, &output)
+                        .await?;
+                    Ok(json!({
+                        "export": {
+                            "length": artifact.length(),
+                            "sha256": hex_encode(&artifact.sha256()),
+                        },
+                        "output": output,
+                    }))
+                }
+                ExportCommand::Status {
+                    cluster_id,
+                    mutation,
+                } => {
+                    let status = client
+                        .export_status(cluster_id.parse::<ClusterId>()?, parse_mutation(&mutation)?)
+                        .await?;
+                    Ok(
+                        json!({"command":"export-status","ok":true,"endpoint":endpoint,"found":status.is_some(),"export":status}),
+                    )
+                }
+                ExportCommand::Abort {
+                    cluster_id,
+                    mutation,
+                } => {
+                    let status = client
+                        .abort_export(cluster_id.parse::<ClusterId>()?, parse_mutation(&mutation)?)
+                        .await?;
+                    Ok(
+                        json!({"command":"export-abort","ok":true,"endpoint":endpoint,"export":status}),
+                    )
+                }
+            }
+        }
         Command::Replay { command } => {
             let client = connect_client(
                 endpoint.clone(),
@@ -1714,6 +1820,31 @@ fn parse_mutation(value: &MutationArgs) -> Result<MutationRequestId, DomainError
         value.mutation_session.parse::<MutationSessionId>()?,
         RequestSequence::new(value.sequence),
     ))
+}
+
+fn parse_export_deadline(
+    lower: Option<u64>,
+    upper: Option<u64>,
+) -> Result<ExportDeadline, DomainError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| DomainError::InvalidRange {
+            reason: error.to_string(),
+        })?
+        .as_millis() as u64;
+    let lower = lower.unwrap_or(now);
+    let upper = upper.unwrap_or(now + Duration::from_secs(30 * 60).as_millis() as u64);
+    ExportDeadline::new(lower, upper)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn parse_member(value: &str) -> Result<NodeDescriptor, DomainError> {

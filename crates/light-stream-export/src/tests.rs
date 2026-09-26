@@ -444,6 +444,24 @@ fn verifier_rejects_unknown_required_feature_bit() {
 }
 
 #[test]
+fn verifier_rejects_unsupported_format_version() {
+    let limits = ExportLimits::default();
+    let mut fixture = canonical_v1();
+    let (mut bytes, _) = write_fixture(&mut fixture, &limits);
+    let unsupported = FORMAT_VERSION_V1 + 1;
+    bytes[8..12].copy_from_slice(&unsupported.to_be_bytes());
+    let manifest_start = trailer_u64(&bytes, 0) as usize + 8;
+    bytes[manifest_start..manifest_start + 4].copy_from_slice(&unsupported.to_be_bytes());
+    recompute_artifact_digest(&mut bytes);
+    assert!(matches!(
+        verify(Cursor::new(bytes), &limits),
+        Err(VerifyError::Unsupported {
+            field: "format version"
+        })
+    ));
+}
+
+#[test]
 fn verifier_enforces_every_declared_limit_before_decoding_items() {
     let limits = ExportLimits::default();
     let mut fixture = canonical_v1();

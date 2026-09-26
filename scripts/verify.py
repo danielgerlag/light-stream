@@ -52,6 +52,14 @@ KNOWN_SCENARIOS = {
     "lifecycle",
     "drain",
     "metrics",
+    "export",
+    "restore",
+    "restore-corrupt",
+    "version-fixtures",
+    "acceptance",
+    "regression",
+    "cli-sdk",
+    "restore-review",
 }
 PRODUCTION_PACKAGES = (
     "light-stream-server",
@@ -975,6 +983,27 @@ def load_profile(name):
     if missing:
         raise VerificationError(f"profile {name!r} is incomplete: missing {missing}")
     return value
+
+
+def program_security_review_disposition():
+    """Honor the program-level ``independent_security_review`` switch.
+
+    When the operator has not requested an independent review (the default), the
+    run must never claim to be security-reviewed. Any explicit disposition in
+    ``artifacts/program/manifest.json`` is surfaced verbatim so evidence stays
+    truthful.
+    """
+    path = ROOT / "artifacts" / "program" / "manifest.json"
+    if not path.is_file():
+        return "NOT_REQUESTED"
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "NOT_REQUESTED"
+    disposition = value.get("independent_security_review")
+    if not isinstance(disposition, str) or not disposition.strip():
+        return "NOT_REQUESTED"
+    return disposition
 
 
 def prepare_artifacts(path):
@@ -10155,7 +10184,7 @@ def run_ls09_drain_scenario(artifacts, runner, revision, profile, seed):
                 "implemented_unit": "drain",
                 "package": "VERIFIED_BY_PACKAGE_SCENARIO",
                 "lifecycle": "PASS",
-                "export_restore": "NOT_IMPLEMENTED",
+                "export_restore": "VERIFIED_BY_EXPORT_AND_RESTORE_SCENARIOS",
                 "verdict": "PASS",
             },
         )
@@ -11045,7 +11074,699 @@ def run_ls09_package_scenario(artifacts, runner, revision, profile, seed):
         external.cleanup()
 
 
+def _ls09_prepare_export(artifacts, runner, revision, rng, label, records):
+    """Bring up a packaged standalone node, publish records, and materialise a
+    real ``.lsexport`` artifact through the operator CLI.
+
+    Returns ``(state, cleanup)``. The caller must invoke ``cleanup()`` once it is
+    done with ``state`` regardless of success or failure.
+    """
+    external, external_root, package_root, binaries = prepare_ls09_runtime_package(
+        artifacts, runner, revision
+    )
+    standalone = None
+
+    def cleanup():
+        if standalone is not None and getattr(standalone, "closed", False) is False:
+            try:
+                standalone.stop()
+            except VerificationError:
+                pass
+        external.cleanup()
+
+    try:
+        standalone = OwnedServer(
+            binaries["light-streamd"],
+            external_root / f"{label}-src",
+            artifacts / "node-logs",
+            f"{label}-source",
+            cwd=package_root,
+        )
+        endpoint = f"http://{standalone.ready['public_address']}"
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        session = deterministic_uuid(rng)
+        runner.run(
+            cli_endpoint_command(binaries["light-streamctl"], endpoint, deadline_ms=30000)
+            + [
+                "cluster",
+                "bootstrap",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--stream-name",
+                label,
+            ],
+            f"{label}-bootstrap",
+            timeout=60,
+        )
+        payloads = []
+        samples = artifacts / "samples"
+        samples.mkdir(parents=True, exist_ok=True)
+        for index in range(records):
+            payload = samples / f"{label}-{index}.bin"
+            data = bytes(rng.randrange(0, 256) for _ in range(256))
+            payload.write_bytes(data)
+            payloads.append(data)
+            parse_json_output(
+                runner.run(
+                    publish_command(
+                        binaries["light-streamctl"],
+                        endpoint,
+                        cluster,
+                        stream,
+                        f"{label}-principal",
+                        session,
+                        index + 1,
+                        payload,
+                        deadline_ms=30000,
+                    ),
+                    f"{label}-publish-{index}",
+                    timeout=40,
+                ),
+                f"LS09 {label} publish {index}",
+            )
+        export_path = external_root / f"{label}.lsexport"
+        summary = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"], endpoint, deadline_ms=60000
+                )
+                + [
+                    "export",
+                    "create",
+                    "--cluster-id",
+                    cluster,
+                    "--stream",
+                    stream,
+                    "--principal",
+                    f"{label}-principal",
+                    "--mutation-session",
+                    deterministic_uuid(rng),
+                    "--sequence",
+                    "1",
+                    "--output",
+                    str(export_path),
+                ],
+                f"{label}-export-create",
+                timeout=120,
+            ),
+            f"LS09 {label} export",
+        )
+        if not export_path.is_file():
+            raise VerificationError(f"LS09 {label} export produced no artifact")
+        if summary["export"]["length"] != export_path.stat().st_size:
+            raise VerificationError(f"LS09 {label} export length disagreed with the file")
+        state = {
+            "external_root": external_root,
+            "package_root": package_root,
+            "binaries": binaries,
+            "endpoint": endpoint,
+            "cluster": cluster,
+            "stream": stream,
+            "payloads": payloads,
+            "export_path": export_path,
+            "export_summary": summary,
+        }
+        return state, cleanup
+    except BaseException:
+        cleanup()
+        raise
+
+
+def _ls09_restore_config(target_cluster, data_dir):
+    return {
+        "target_cluster": target_cluster,
+        "node_id": 1,
+        "data_dir": str(data_dir),
+        "group_pool": {
+            "max_data_groups": 1,
+            "max_streams": 64,
+            "max_partitions_per_stream": 64,
+            "rocksdb_cache_bytes": 256 * 1024 * 1024,
+            "rocksdb_write_buffer_bytes": 128 * 1024 * 1024,
+        },
+        "receipt_window": 4096,
+        "serve_config_digest": None,
+    }
+
+
+def run_ls09_export_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    state, cleanup = _ls09_prepare_export(artifacts, runner, revision, rng, "ls09-export", 4)
+    try:
+        binaries = state["binaries"]
+        inspection = parse_json_output(
+            runner.run(
+                [str(binaries["light-streamd"]), "inspect", "--input", str(state["export_path"])],
+                "ls09-export-inspect",
+                timeout=60,
+            ),
+            "LS09 export inspect",
+        )
+        totals = inspection["totals"]
+        if totals["records"] != len(state["payloads"]):
+            raise VerificationError(
+                "LS09 export inspect reported the wrong record total: "
+                f"{totals['records']} != {len(state['payloads'])}"
+            )
+        if inspection["format_version"] != 1:
+            raise VerificationError("LS09 export inspect reported an unexpected format version")
+        if state["stream"] not in inspection["selected_streams"][0]:
+            raise VerificationError("LS09 export inspect omitted the selected stream")
+        write_json(
+            artifacts / "l05.json",
+            {
+                "verdict": "PASS",
+                "export": state["export_summary"]["export"],
+                "inspect": inspection,
+                "records": len(state["payloads"]),
+                "perf": "SKIPPED (perf out of scope)",
+            },
+        )
+    finally:
+        cleanup()
+
+
+def run_ls09_restore_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    state, cleanup = _ls09_prepare_export(artifacts, runner, revision, rng, "ls09-restore", 4)
+    restored = None
+    try:
+        binaries = state["binaries"]
+        target_cluster = deterministic_uuid(rng)
+        restore_dir = state["external_root"] / "ls09-restore-target"
+        config_path = state["external_root"] / "ls09-restore-config.json"
+        write_json(config_path, _ls09_restore_config(target_cluster, restore_dir))
+        receipt = parse_json_output(
+            runner.run(
+                [
+                    str(binaries["light-streamd"]),
+                    "restore",
+                    "--config",
+                    str(config_path),
+                    "--input",
+                    str(state["export_path"]),
+                ],
+                "ls09-restore-apply",
+                timeout=120,
+            ),
+            "LS09 restore receipt",
+        )
+        if receipt["target_cluster"] != target_cluster:
+            raise VerificationError("LS09 restore rewrote the target cluster incorrectly")
+        if receipt["source_cluster"] != state["cluster"]:
+            raise VerificationError("LS09 restore lost the source cluster identity")
+        if state["stream"] not in receipt["preserved"]["streams"]:
+            raise VerificationError("LS09 restore did not preserve the stream identity")
+        if receipt["preserved"]["records"] != len(state["payloads"]):
+            raise VerificationError("LS09 restore preserved the wrong record count")
+        restored = OwnedServer(
+            binaries["light-streamd"],
+            restore_dir,
+            artifacts / "node-logs",
+            "ls09-restore-serve",
+            cwd=state["package_root"],
+        )
+        restore_endpoint = f"http://{restored.ready['public_address']}"
+        fetched = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"], restore_endpoint, deadline_ms=30000
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    target_cluster,
+                    "--stream-id",
+                    state["stream"],
+                    "--offset",
+                    "0",
+                    "--limit",
+                    str(len(state["payloads"]) + 4),
+                ],
+                "ls09-restore-fetch",
+                timeout=40,
+            ),
+            "LS09 restore fetch",
+        )
+        records = fetched["page"]["records"]
+        observed = [bytes(record["payload"]) for record in records]
+        if observed != state["payloads"]:
+            raise VerificationError("LS09 restore ledger did not match the source through the API")
+        restored.stop()
+        restored = None
+        write_json(
+            artifacts / "l06.json",
+            {
+                "verdict": "PASS",
+                "receipt": receipt,
+                "ledger_match": True,
+                "records": len(state["payloads"]),
+            },
+        )
+    finally:
+        if restored is not None:
+            try:
+                restored.stop()
+            except VerificationError:
+                pass
+        cleanup()
+
+
+def run_ls09_restore_corrupt_scenario(artifacts, runner, revision, profile, seed):
+    rng = random.Random(seed)
+    state, cleanup = _ls09_prepare_export(artifacts, runner, revision, rng, "ls09-corrupt", 3)
+    try:
+        binaries = state["binaries"]
+        original = state["export_path"].read_bytes()
+        corrupt = bytearray(original)
+        midpoint = len(corrupt) // 2
+        corrupt[midpoint] ^= 0xFF
+        state["export_path"].write_bytes(bytes(corrupt))
+        target_cluster = deterministic_uuid(rng)
+        restore_dir = state["external_root"] / "ls09-corrupt-target"
+        config_path = state["external_root"] / "ls09-corrupt-config.json"
+        write_json(config_path, _ls09_restore_config(target_cluster, restore_dir))
+        result = runner.run(
+            [
+                str(binaries["light-streamd"]),
+                "restore",
+                "--config",
+                str(config_path),
+                "--input",
+                str(state["export_path"]),
+            ],
+            "ls09-corrupt-restore",
+            timeout=120,
+            expected_codes=(0, 1),
+        )
+        if result.returncode == 0:
+            raise VerificationError("LS09 corrupt restore unexpectedly succeeded")
+        if restore_dir.exists():
+            raise VerificationError("LS09 corrupt restore left a partial destination behind")
+        write_json(
+            artifacts / "l07.json",
+            {
+                "verdict": "PASS",
+                "corruption_offset": midpoint,
+                "restore_exit_code": result.returncode,
+                "restore_stderr": result.stderr.strip()[:2000],
+                "destination_absent": True,
+            },
+        )
+    finally:
+        cleanup()
+
+
+def run_ls09_version_scenario(artifacts, runner, revision, profile, seed):
+    external, external_root, package_root, binaries = prepare_ls09_runtime_package(
+        artifacts, runner, revision
+    )
+    try:
+        version = parse_json_output(
+            runner.run(
+                [str(binaries["light-streamd"]), "version"],
+                "ls09-version",
+                timeout=30,
+            ),
+            "LS09 version",
+        )
+        supported_storage = version["supported"]["storage_format_versions"]
+        supported_export = version["supported"]["export_format_versions"]
+        if version["storage_format_version"] not in supported_storage:
+            raise VerificationError("LS09 version omitted its own storage format from support")
+        if version["export_format_version"] not in supported_export:
+            raise VerificationError("LS09 version omitted its own export format from support")
+        write_json(
+            artifacts / "l08.json",
+            {
+                "verdict": "PASS",
+                "version": version,
+                "unsupported_refusal": "COVERED_BY_UNIT_FIXTURES",
+                "storage_fixture_test": "decode_rejects_unsupported_stored_value_version",
+                "export_fixture_test": "verifier_rejects_unsupported_format_version",
+            },
+        )
+    finally:
+        external.cleanup()
+
+
+LS10_LANES = (
+    ("l01", "regression", "functional regression: packaged publish/export/restore journey"),
+    ("l02", "cli-sdk", "standalone CLI journey with restart persistence (local-insecure)"),
+    ("l04", "fault-leader-crash", "leader crash recovery correctness"),
+    ("l05", "fault-minority-heal", "minority-leader fencing and heal correctness"),
+    ("l06", "fault-snapshot-catchup", "snapshot catch-up correctness"),
+    ("l07", "replay-oracle", "protected/unprotected replay oracle (E28)"),
+    ("l09", "security-failover", "security denial/rotation/peer-identity across failover"),
+    ("l10", "restore-review", "restore supported export and optional-review disposition"),
+    ("l03", "independent-host", "three independent hosts"),
+    ("l08", "overload-capacity", "overload and cold-replay capacity"),
+)
+
+
+def run_ls10_regression_lane(artifacts, runner, revision, seed):
+    rng = random.Random(seed)
+    state, cleanup = _ls09_prepare_export(artifacts, runner, revision, rng, "ls10-regression", 5)
+    restored = None
+    try:
+        binaries = state["binaries"]
+        target_cluster = deterministic_uuid(rng)
+        restore_dir = state["external_root"] / "ls10-regression-target"
+        config_path = state["external_root"] / "ls10-regression-config.json"
+        write_json(config_path, _ls09_restore_config(target_cluster, restore_dir))
+        receipt = parse_json_output(
+            runner.run(
+                [
+                    str(binaries["light-streamd"]),
+                    "restore",
+                    "--config",
+                    str(config_path),
+                    "--input",
+                    str(state["export_path"]),
+                ],
+                "ls10-regression-restore",
+                timeout=120,
+            ),
+            "LS10 regression restore",
+        )
+        restored = OwnedServer(
+            binaries["light-streamd"],
+            restore_dir,
+            artifacts / "node-logs",
+            "ls10-regression-serve",
+            cwd=state["package_root"],
+        )
+        endpoint = f"http://{restored.ready['public_address']}"
+        fetched = parse_json_output(
+            runner.run(
+                cli_endpoint_command(binaries["light-streamctl"], endpoint, deadline_ms=30000)
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    target_cluster,
+                    "--stream-id",
+                    state["stream"],
+                    "--offset",
+                    "0",
+                    "--limit",
+                    str(len(state["payloads"]) + 4),
+                ],
+                "ls10-regression-fetch",
+                timeout=40,
+            ),
+            "LS10 regression fetch",
+        )
+        observed = [bytes(record["payload"]) for record in fetched["page"]["records"]]
+        if observed != state["payloads"]:
+            raise VerificationError("LS10 regression ledger diverged after restore")
+        restored.stop()
+        restored = None
+        verdict = {
+            "verdict": "PASS",
+            "records": len(state["payloads"]),
+            "export": state["export_summary"]["export"],
+            "receipt": receipt,
+            "ledger_match": True,
+        }
+        write_json(artifacts / "l01.json", verdict)
+        return verdict
+    finally:
+        if restored is not None:
+            try:
+                restored.stop()
+            except VerificationError:
+                pass
+        cleanup()
+
+
+def run_ls10_cli_sdk_lane(artifacts, runner, revision, seed):
+    rng = random.Random(seed)
+    external, external_root, package_root, binaries = prepare_ls09_runtime_package(
+        artifacts, runner, revision
+    )
+    server = None
+    restarted = None
+    data_dir = external_root / "ls10-cli-sdk"
+    try:
+        server = OwnedServer(
+            binaries["light-streamd"],
+            data_dir,
+            artifacts / "node-logs",
+            "ls10-cli-sdk",
+            cwd=package_root,
+        )
+        endpoint = f"http://{server.ready['public_address']}"
+        cluster = deterministic_uuid(rng)
+        stream = deterministic_uuid(rng)
+        session = deterministic_uuid(rng)
+        runner.run(
+            cli_endpoint_command(binaries["light-streamctl"], endpoint, deadline_ms=30000)
+            + [
+                "cluster",
+                "bootstrap",
+                "--cluster-id",
+                cluster,
+                "--stream-id",
+                stream,
+                "--stream-name",
+                "cli-sdk",
+            ],
+            "ls10-cli-sdk-bootstrap",
+            timeout=60,
+        )
+        payloads = []
+        for index in range(4):
+            payload = artifacts / "samples" / f"ls10-cli-sdk-{index}.bin"
+            payload.parent.mkdir(parents=True, exist_ok=True)
+            data = bytes(rng.randrange(0, 256) for _ in range(128))
+            payload.write_bytes(data)
+            payloads.append(data)
+            runner.run(
+                publish_command(
+                    binaries["light-streamctl"],
+                    endpoint,
+                    cluster,
+                    stream,
+                    "cli-sdk-principal",
+                    session,
+                    index + 1,
+                    payload,
+                    deadline_ms=30000,
+                ),
+                f"ls10-cli-sdk-publish-{index}",
+                timeout=40,
+            )
+        before = parse_json_output(
+            runner.run(
+                cli_endpoint_command(binaries["light-streamctl"], endpoint, deadline_ms=30000)
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "8",
+                ],
+                "ls10-cli-sdk-fetch",
+                timeout=40,
+            ),
+            "LS10 cli-sdk fetch",
+        )
+        server.stop()
+        server = None
+        restarted = OwnedServer(
+            binaries["light-streamd"],
+            data_dir,
+            artifacts / "node-logs",
+            "ls10-cli-sdk-restart",
+            cwd=package_root,
+        )
+        restart_endpoint = f"http://{restarted.ready['public_address']}"
+        after = parse_json_output(
+            runner.run(
+                cli_endpoint_command(
+                    binaries["light-streamctl"], restart_endpoint, deadline_ms=30000
+                )
+                + [
+                    "fetch",
+                    "--cluster-id",
+                    cluster,
+                    "--stream-id",
+                    stream,
+                    "--offset",
+                    "0",
+                    "--limit",
+                    "8",
+                ],
+                "ls10-cli-sdk-restart-fetch",
+                timeout=40,
+            ),
+            "LS10 cli-sdk restart fetch",
+        )
+        if after["page"]["records"] != before["page"]["records"]:
+            raise VerificationError("LS10 cli-sdk restart changed the durable ledger")
+        observed = [bytes(record["payload"]) for record in after["page"]["records"]]
+        if observed != payloads:
+            raise VerificationError("LS10 cli-sdk records did not survive restart intact")
+        restarted.stop()
+        restarted = None
+        verdict = {
+            "verdict": "PASS",
+            "security_mode": "local-insecure",
+            "records": len(payloads),
+            "restart_persistent": True,
+            "secured_mode": {
+                "verdict": "AVAILABLE_NOT_SELECTED",
+                "verified_by_phase": "LS08",
+            },
+        }
+        write_json(artifacts / "l02.json", verdict)
+        return verdict
+    finally:
+        for candidate in (server, restarted):
+            if candidate is not None:
+                try:
+                    candidate.stop()
+                except VerificationError:
+                    pass
+        external.cleanup()
+
+
+def run_ls10_restore_review_lane(artifacts, runner, revision, seed):
+    rng = random.Random(seed)
+    state, cleanup = _ls09_prepare_export(artifacts, runner, revision, rng, "ls10-restore", 3)
+    try:
+        binaries = state["binaries"]
+        target_cluster = deterministic_uuid(rng)
+        restore_dir = state["external_root"] / "ls10-restore-target"
+        config_path = state["external_root"] / "ls10-restore-config.json"
+        write_json(config_path, _ls09_restore_config(target_cluster, restore_dir))
+        receipt = parse_json_output(
+            runner.run(
+                [
+                    str(binaries["light-streamd"]),
+                    "restore",
+                    "--config",
+                    str(config_path),
+                    "--input",
+                    str(state["export_path"]),
+                ],
+                "ls10-restore-review",
+                timeout=120,
+            ),
+            "LS10 restore review",
+        )
+        if receipt["target_cluster"] != target_cluster:
+            raise VerificationError("LS10 restore review rewrote the target cluster incorrectly")
+        verdict = {
+            "verdict": "PASS",
+            "receipt": receipt,
+            "independent_security_review": program_security_review_disposition(),
+        }
+        write_json(artifacts / "l10.json", verdict)
+        return verdict
+    finally:
+        cleanup()
+
+
+def write_ls10_acceptance_index(artifacts, revision, lanes):
+    entries = []
+    for lane_id, name, description in LS10_LANES:
+        record = lanes.get(name, {})
+        entry = {
+            "lane": lane_id,
+            "scenario": name,
+            "description": description,
+            "verdict": record.get("verdict", "NOT_RUN"),
+            "evidence": record.get("evidence"),
+            "reason": record.get("reason"),
+        }
+        entries.append({key: value for key, value in entry.items() if value is not None})
+    failures = [entry for entry in entries if entry["verdict"] == "FAIL"]
+    passed = [entry for entry in entries if entry["verdict"] == "PASS"]
+    blocked = [entry for entry in entries if entry["verdict"] == "BLOCKED"]
+    skipped = [entry for entry in entries if entry["verdict"] == "SKIPPED"]
+    deferred = [entry for entry in entries if entry["verdict"] == "DEFERRED_TO_PHASE_SUITE"]
+    index = {
+        "phase": "LS10",
+        "source_revision": revision,
+        "generated_at": utc_now(),
+        "independent_host": "BLOCKED",
+        "independent_security_review": program_security_review_disposition(),
+        "local_verdict": "FAIL" if failures else "PASS",
+        "summary": {
+            "passed": len(passed),
+            "failed": len(failures),
+            "blocked": len(blocked),
+            "skipped": len(skipped),
+            "deferred": len(deferred),
+        },
+        "note": (
+            "Blocked and skipped lanes are not passes. Fault-correctness lanes marked "
+            "DEFERRED_TO_PHASE_SUITE are proven by the retained LS05-LS08 phase suites, "
+            "which run as their own gated phases; perf/capacity and independent-host gates "
+            "are out of scope on this host."
+        ),
+        "lanes": entries,
+    }
+    write_json(artifacts / "acceptance-index.json", index)
+    return index
+
+
+def run_ls10(args, artifacts, runner, revision, profile):
+    scenario = args.scenario
+    lanes = {}
+
+    def evidence(path):
+        return str((artifacts / path))
+
+    def deferred(name, phase):
+        return {
+            "verdict": "DEFERRED_TO_PHASE_SUITE",
+            "reason": f"proven by the {phase} phase suite (run --phase {phase})",
+        }
+
+    run_all = scenario in ("all", "acceptance")
+    if run_all or scenario == "regression":
+        verdict = run_ls10_regression_lane(artifacts, runner, revision, args.seed)
+        lanes["regression"] = {**verdict, "evidence": evidence("l01.json")}
+    if run_all or scenario == "cli-sdk":
+        verdict = run_ls10_cli_sdk_lane(artifacts, runner, revision, args.seed + 1)
+        lanes["cli-sdk"] = {**verdict, "evidence": evidence("l02.json")}
+    if run_all or scenario == "restore-review":
+        verdict = run_ls10_restore_review_lane(artifacts, runner, revision, args.seed + 2)
+        lanes["restore-review"] = {**verdict, "evidence": evidence("l10.json")}
+    if run_all:
+        lanes["fault-leader-crash"] = deferred("fault-leader-crash", "LS05")
+        lanes["fault-minority-heal"] = deferred("fault-minority-heal", "LS06")
+        lanes["fault-snapshot-catchup"] = deferred("fault-snapshot-catchup", "LS06")
+        lanes["replay-oracle"] = deferred("replay-oracle", "LS07")
+        lanes["security-failover"] = deferred("security-failover", "LS08")
+        lanes["independent-host"] = {
+            "verdict": "BLOCKED",
+            "reason": "three independent approved hosts are unavailable on this host",
+        }
+        lanes["overload-capacity"] = {
+            "verdict": "SKIPPED",
+            "reason": "overload/cold-replay capacity is perf out of scope",
+        }
+    index = write_ls10_acceptance_index(artifacts, revision, lanes)
+    if index["local_verdict"] != "PASS":
+        raise VerificationError(
+            f"LS10 acceptance recorded failures: {index['summary']}"
+        )
+
+
 def run_selected(args, artifacts, runner, binaries, revision, profile):
+    if args.phase == "LS10":
+        run_ls10(args, artifacts, runner, revision, profile)
+        return
     if args.phase == "LS09":
         if args.scenario == "package":
             run_ls09_package_scenario(
@@ -11063,9 +11784,25 @@ def run_selected(args, artifacts, runner, binaries, revision, profile):
             run_ls09_metrics_scenario(
                 artifacts, runner, revision, profile, args.seed
             )
+        elif args.scenario == "export":
+            run_ls09_export_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        elif args.scenario == "restore":
+            run_ls09_restore_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        elif args.scenario == "restore-corrupt":
+            run_ls09_restore_corrupt_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
+        elif args.scenario == "version-fixtures":
+            run_ls09_version_scenario(
+                artifacts, runner, revision, profile, args.seed
+            )
         else:
             raise VerificationError(
-                "full LS09 verification is unavailable until lifecycle and restore are implemented"
+                f"unknown LS09 scenario {args.scenario!r}"
             )
         return
     if args.phase == "LS08" or args.suite == "ls08-e2e":
@@ -11279,6 +12016,7 @@ def parse_args():
         "LS07",
         "LS08",
         "LS09",
+        "LS10",
     ):
         parser.error(f"unknown phase {args.phase!r}")
     if args.suite is not None and args.suite not in (
@@ -11533,7 +12271,7 @@ def main():
             "python": sys.version,
         },
         "independent_host": "BLOCKED",
-        "independent_security_review": "NOT_REQUESTED",
+        "independent_security_review": program_security_review_disposition(),
         "phase": args.phase,
         "profile": profile,
         "publication": "BLOCKED_NO_GIT_REPOSITORY",
@@ -11549,11 +12287,19 @@ def main():
     error_message = None
     try:
         snapshot_source(artifacts, fingerprints)
-        if args.phase == "LS09" and args.scenario in (
-            "package",
-            "lifecycle",
-            "drain",
-            "metrics",
+        if args.phase == "LS10" or (
+            args.phase == "LS09"
+            and args.scenario
+            in (
+                "package",
+                "lifecycle",
+                "drain",
+                "metrics",
+                "export",
+                "restore",
+                "restore-corrupt",
+                "version-fixtures",
+            )
         ):
             binaries = {}
         else:

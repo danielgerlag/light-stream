@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs::{self, File},
     future::Future,
-    io::Write,
+    io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, RwLock as StdRwLock, Weak,
@@ -18,16 +18,15 @@ use light_stream_core::{
     BootstrapTopology, CheckpointCasResult, CheckpointKey, CheckpointMutation, ClusterId,
     ClusterTopology, CommittedBookmark, CommittedCheckpoint, CommittedStreamBookmark,
     ConsensusGroup, CreateBookmarkSpec, CreateStreamSpec, DomainError, ExportAbortReason,
-    ExportDeadline, ExportFenceObservation, ExportStatus, ExportStatusPhase, FetchPage, GroupId,
-    LeaderHint, LeaseRelease, LeaseRenewal, NodeDescriptor, NodeId, NodePhase, OperationalProof,
-    PartitionId, PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest,
-    PublishBatch, PublishReceipt, ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId,
-    ReplayLeaseRequest, RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus,
-    SecurityMutation, SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest,
-    StreamCursorVector, StreamDescriptor, StreamId, StreamLifecycle, StreamName, WriteReadiness,
+    ExportDeadline, ExportFenceObservation, ExportId, ExportIntent, ExportStatus,
+    ExportStatusPhase, FetchPage, GroupId, LeaderHint, LeaseRelease, LeaseRenewal,
+    MutationRequestId, NodeDescriptor, NodeId, NodePhase, OperationalProof, PartitionId,
+    PartitionKey, PartitionRoute, ProducerRequestId, ProtectedFetchRequest, PublishBatch,
+    PublishReceipt, ReadinessReason, RecordOffset, ReplayLease, ReplayLeaseId, ReplayLeaseRequest,
+    RequestOutcome, RetentionRequest, RetentionResult, RetentionStatus, SecurityMutation,
+    SecurityPolicy, StreamBookmarkPage, StreamBookmarkPageRequest, StreamCursorVector,
+    StreamDescriptor, StreamId, StreamLifecycle, StreamName, WriteReadiness,
 };
-#[cfg(test)]
-use light_stream_core::{ExportId, ExportIntent, MutationRequestId};
 use light_stream_storage::{
     ApplyResult, CONTROL_GROUP_ID, ClockObservation, CommittedStateReader, ControlRaftConfig,
     DATA_GROUP_ID, DataRaftConfig, ExportApplyResult, ExportCommand, GroupCommand, GroupIdentity,
@@ -1986,7 +1985,6 @@ impl ClusterManager {
             .then(|| manifest.cluster_id())
     }
 
-    #[cfg(test)]
     pub(crate) async fn begin_export(
         &self,
         intent: ExportIntent,
@@ -2005,7 +2003,6 @@ impl ClusterManager {
         )
     }
 
-    #[cfg(test)]
     pub(crate) async fn export_status(
         &self,
         request: &MutationRequestId,
@@ -2023,20 +2020,29 @@ impl ClusterManager {
             .map(ExportStatus::Terminal))
     }
 
-    #[cfg(test)]
     pub(crate) async fn open_export_artifact(
         &self,
         export: ExportId,
         expected: light_stream_core::ArtifactIdentity,
     ) -> Result<File, DomainError> {
         let active = self.application_cluster().await?;
-        active
+        let (mut file, actual) = active
             .export
-            .open_ready(export, expected)
-            .map_err(ready_artifact_domain_error)
+            .verified_ready(export)
+            .map_err(ready_artifact_domain_error)?;
+        if actual != expected {
+            return Err(ready_artifact_domain_error(
+                ReadyArtifactError::Deterministic(
+                    "local export artifact identity does not match committed identity".to_owned(),
+                ),
+            ));
+        }
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            ready_artifact_domain_error(ReadyArtifactError::Retryable(error.to_string()))
+        })?;
+        Ok(file)
     }
 
-    #[cfg(test)]
     pub(crate) async fn request_export_completion(
         &self,
         request: MutationRequestId,
@@ -2059,7 +2065,6 @@ impl ClusterManager {
         )
     }
 
-    #[cfg(test)]
     pub(crate) async fn request_export_abort(
         &self,
         request: MutationRequestId,
@@ -2080,6 +2085,24 @@ impl ClusterManager {
             )
             .await?,
         )
+    }
+
+    pub(crate) async fn export_available_artifact(
+        &self,
+        request: &MutationRequestId,
+    ) -> Result<Option<light_stream_core::ArtifactIdentity>, DomainError> {
+        let active = self.application_cluster().await?;
+        linearize_export_control(&active).await?;
+        let Some(export) = active.control_reader.active_export()? else {
+            return Ok(None);
+        };
+        if export.spec().request() != request {
+            return Ok(None);
+        }
+        let ActiveExportPhase::Available(available) = export.phase() else {
+            return Ok(None);
+        };
+        Ok(Some(available.artifact()))
     }
 
     pub(crate) async fn export_state_snapshot(&self) -> Option<ExportStatusPhase> {
@@ -4655,7 +4678,6 @@ async fn linearize_control(active: &Arc<ActiveCluster>) -> Result<(), DomainErro
     .await
 }
 
-#[cfg(test)]
 async fn linearize_export_control(active: &Arc<ActiveCluster>) -> Result<(), DomainError> {
     prove_linearizable(
         active,
@@ -4781,7 +4803,6 @@ fn export_busy_error(group: ConsensusGroup, request: Option<AmbiguousRequest>) -
     }
 }
 
-#[cfg(test)]
 fn export_status_from_apply(result: ApplyResult) -> Result<ExportStatus, DomainError> {
     match result {
         ApplyResult::Export(ExportApplyResult::Status(status)) => Ok(status),
@@ -4792,7 +4813,6 @@ fn export_status_from_apply(result: ApplyResult) -> Result<ExportStatus, DomainE
     }
 }
 
-#[cfg(test)]
 fn ready_artifact_domain_error(error: ReadyArtifactError) -> DomainError {
     let reason = match error {
         ReadyArtifactError::Missing => "local export artifact is missing".to_owned(),
